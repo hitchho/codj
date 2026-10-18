@@ -31,7 +31,7 @@ use crate::allowed_commands::{CommandContext, CommandName};
 use crate::soulseek_types::{ConnectionState, Download, DownloadState, RankedFile};
 use crate::states::State;
 use crate::utils::{log, FPSController};
-use crate::{fuzzy_search, Config, Lyrics, PlayingStatus, ServerProxy};
+use crate::{Config, Lyrics, PlayingStatus, ServerProxy};
 
 pub struct ViewConfiguration {
     lyrics: bool,
@@ -359,6 +359,22 @@ pub struct UI<'a> {
     pub lua: Lua,
     /// Ranked search results from server (sorted by quality)
     pub soulseek_ranked: Vec<RankedFile>,
+    /// soulseek_ranked narrowed by the name filter; the table, cursor and downloads use this
+    soulseek_shown: Vec<RankedFile>,
+    /// regex on result names, typed after `f` in the results
+    soulseek_filter: Input,
+    /// the name filter is being typed
+    soulseek_filtering: bool,
+    /// first `d` of a `dd` in the soulseek panel
+    soulseek_pending_d: bool,
+    /// config file the settings panel writes to
+    pub config_path: Option<std::path::PathBuf>,
+    /// the settings panel, when open
+    settings_view: Option<SettingsView>,
+    /// play queue as last fetched from the server
+    queue: Vec<crate::types::OuterMusic>,
+    /// the queue panel, when open
+    queue_view: Option<QueueView>,
     /// Soulseek status message
     pub soulseek_status: String,
     /// Active downloads for display
@@ -374,6 +390,8 @@ pub struct UI<'a> {
     pub soulseek_focus: SoulseekFocus,
     /// Table state of the results table (keeps scroll offset)
     pub soulseek_results_state: TableState,
+    /// selected result whose name is scrolling, and when it was selected
+    soulseek_marquee: (Option<(String, String)>, std::time::Instant),
     /// Table state of the downloads table (keeps scroll offset)
     pub soulseek_downloads_state: TableState,
     /// A search was started from this session, open the panel when results arrive
@@ -441,6 +459,61 @@ fn anchored_index<T>(
     found.unwrap_or(selected).min(new.len().saturating_sub(1))
 }
 
+/// Window of `text` that fits in `width` columns, scrolled by time so a long name can be read in
+/// full: holds at the start, scrolls to the end, holds there, then starts over.
+fn marquee(text: &str, width: usize, elapsed_secs: f64) -> String {
+    const HOLD: f64 = 1.0;
+    const CHARS_PER_SEC: f64 = 6.0;
+    let chars: Vec<char> = text.chars().collect();
+    if width == 0 || chars.len() <= width {
+        return text.to_string();
+    }
+    let max_offset = chars.len() - width;
+    let scroll = max_offset as f64 / CHARS_PER_SEC;
+    let t = elapsed_secs % (HOLD + scroll + HOLD);
+    let offset = if t < HOLD {
+        0
+    } else if t < HOLD + scroll {
+        (((t - HOLD) * CHARS_PER_SEC) as usize).min(max_offset)
+    } else {
+        max_offset
+    };
+    chars[offset..offset + width].iter().collect()
+}
+
+/// State of the open queue panel
+#[derive(Default)]
+struct QueueView {
+    selected: usize,
+    /// first `d` of a `dd`
+    pending_d: bool,
+}
+
+/// State of the open settings panel
+struct SettingsView {
+    /// the `[soulseek]` settings being edited
+    data: crate::parser::SoulseekSettings,
+    selected: usize,
+    /// edit box for the selected value
+    editing: Option<Input>,
+    /// result of the last change
+    message: String,
+}
+
+/// Results whose file name matches the filter regex (all of them for an empty filter)
+fn filter_results(results: &[RankedFile], filter: &str) -> Vec<RankedFile> {
+    let filter = filter.trim();
+    if filter.is_empty() {
+        return results.to_vec();
+    }
+    let re = crate::search::build_regex(filter);
+    results
+        .iter()
+        .filter(|rf| re.is_match(rf.file.basename()))
+        .cloned()
+        .collect()
+}
+
 fn same_result(a: &RankedFile, b: &RankedFile) -> bool {
     a.username == b.username && a.file.filename == b.file.filename
 }
@@ -467,15 +540,28 @@ impl ListMode {
             if key.modifiers == KeyModifiers::NONE {
                 match key.code {
                     KeyCode::Enter => {
+                        let query = ui.search_bufr.value().trim().to_string();
+                        if ui.music_list.musics.is_empty() && !query.is_empty() {
+                            // nothing in the library, look for it on soulseek instead
+                            ui.leave_search();
+                            ui.soulseek_search(&query).await;
+                            return;
+                        }
                         ui.play_selected_music().await;
-                        ui.reset_querry();
-                        ui.mode = ListMode::Select;
-                        ui.geometry.disable_search();
+                        ui.leave_search();
                         return;
                     }
                     KeyCode::Esc => {
-                        ui.change_list_mode(ListMode::AfterSearch);
-                        ui.select_region(Region::List);
+                        ui.leave_search();
+                        return;
+                    }
+                    // j/k are typed into the query, arrows move through the matches
+                    KeyCode::Down => {
+                        ui.list_down();
+                        return;
+                    }
+                    KeyCode::Up => {
+                        ui.list_up();
                         return;
                     }
                     _ => {}
@@ -493,7 +579,7 @@ impl ListMode {
                     KeyCode::Char(c) => match c {
                         'j' => ui.list_down(),
                         'k' => ui.list_up(),
-                        '/' => ui.change_list_mode(ListMode::Search),
+                        '/' | 'f' => ui.change_list_mode(ListMode::Search),
                         'q' => ui.change_list_mode(ListMode::Select),
                         ' ' => ui.play_after_search().await,
                         _ => {}
@@ -528,7 +614,7 @@ impl ListMode {
                             KeyCode::Char(c) => match c {
                                 'j' => ui.list_down(),
                                 'k' => ui.list_up(),
-                                '/' => {
+                                '/' | 'f' => {
                                     ui.select_region(Region::Search);
                                     ui.change_list_mode(ListMode::Search)
                                 }
@@ -540,8 +626,15 @@ impl ListMode {
                                 ' ' => ui.play_selected_music().await,
                                 's' => ui.goto_playing(),
                                 'g' => ui.anticipate('g'),
-                                'G' => ui.goto_bottom(),
-                                'q' => return ui.quit(),
+                                'q' => ui.queue_selected(false).await,
+                                'h' => ui.previous_5s().await,
+                                'l' => ui.next_5s().await,
+                                // some terminals send shifted letters without the SHIFT flag
+                                c if c.is_ascii_uppercase() => {
+                                    if ui.list_upper_key(c).await {
+                                        return ui.quit();
+                                    }
+                                }
                                 _ => {}
                             },
                             _ => {}
@@ -560,8 +653,8 @@ impl ListMode {
                 }
                 KeyModifiers::SHIFT => {
                     if let KeyCode::Char(c) = key.code {
-                        if c == 'G' {
-                            ui.goto_bottom()
+                        if ui.list_upper_key(c).await {
+                            return ui.quit();
                         }
                     }
                 }
@@ -617,6 +710,16 @@ impl ListMode {
 
 impl Region {
     pub async fn handle_events<'a>(ui: &mut UI<'a>, key: &KeyEvent) -> io::Result<bool> {
+        // the settings panel sits on top and takes every key while open
+        if ui.settings_view.is_some() {
+            ui.handle_settings_key(key).await;
+            return Ok(false);
+        }
+        if ui.queue_view.is_some() {
+            Region::handle_global(ui, key).await;
+            ui.handle_queue_key(key).await;
+            return Ok(false);
+        }
         Region::handle_global(ui, key).await;
         // keybind depend on reagion
         match ui.region {
@@ -697,26 +800,53 @@ impl Region {
     }
 
     async fn handle_soulseek<'a>(ui: &mut UI<'a>, key: &KeyEvent) -> io::Result<bool> {
+        if key.kind == event::KeyEventKind::Press && ui.soulseek_filtering {
+            // typing the name filter: keys go into it, arrows still move
+            match key.code {
+                KeyCode::Enter => ui.soulseek_filtering = false,
+                KeyCode::Esc => {
+                    ui.soulseek_filter.reset();
+                    ui.soulseek_filtering = false;
+                    ui.soulseek_refilter();
+                }
+                KeyCode::Down => ui.soulseek_down(),
+                KeyCode::Up => ui.soulseek_up(),
+                _ => {
+                    ui.soulseek_filter
+                        .handle_event(&crossterm::event::Event::Key(*key));
+                    ui.soulseek_refilter();
+                }
+            }
+            return Ok(false);
+        }
         if key.kind == event::KeyEventKind::Press {
+            // `dd` only counts when the two d's are back to back
+            let pending_d = std::mem::take(&mut ui.soulseek_pending_d);
             match key.modifiers {
                 KeyModifiers::NONE => match key.code {
                     KeyCode::Char('j') => ui.soulseek_down(),
                     KeyCode::Char('k') => ui.soulseek_up(),
-                    KeyCode::Char('q') | KeyCode::Esc => {
+                    KeyCode::Char('f') | KeyCode::Char('/') => {
+                        ui.soulseek_focus = SoulseekFocus::Results;
+                        ui.soulseek_filtering = true;
+                    }
+                    KeyCode::Esc if !ui.soulseek_filter.value().is_empty() => {
+                        // first Esc drops the filter, the next one closes the panel
+                        ui.soulseek_filter.reset();
+                        ui.soulseek_refilter();
+                    }
+                    KeyCode::Char('q') | KeyCode::Char('z') | KeyCode::Esc => {
                         ui.soulseek_visible = false;
                         ui.region = Region::List;
                     }
                     KeyCode::Enter | KeyCode::Char(' ') => {
                         ui.soulseek_download_selected().await;
                     }
-                    KeyCode::Char('d') | KeyCode::Delete => {
-                        if ui.soulseek_focus == SoulseekFocus::Downloads {
-                            ui.soulseek_cancel_selected().await;
-                        } else {
-                            ui.soulseek_status =
-                                "press Tab to focus downloads, then d to cancel".to_string();
-                        }
-                    }
+                    KeyCode::Char('x') | KeyCode::Delete => ui.soulseek_remove_key().await,
+                    KeyCode::Char('J') => ui.soulseek_move_download(false).await,
+                    KeyCode::Char('K') => ui.soulseek_move_download(true).await,
+                    KeyCode::Char('d') if pending_d => ui.soulseek_remove_key().await,
+                    KeyCode::Char('d') => ui.soulseek_pending_d = true,
                     KeyCode::Char('c') => {
                         ui.soulseek_clear_finished().await;
                     }
@@ -735,6 +865,8 @@ impl Region {
                     match key.code {
                         KeyCode::BackTab => ui.soulseek_switch_focus(),
                         KeyCode::Char('G') => ui.soulseek_goto_bottom(),
+                        KeyCode::Char('J') => ui.soulseek_move_download(false).await,
+                        KeyCode::Char('K') => ui.soulseek_move_download(true).await,
                         _ => {}
                     }
                 }
@@ -757,6 +889,8 @@ impl Region {
                     if let KeyCode::Char(c) = key.code {
                         match ui.mode {
                             ListMode::Search | ListMode::Command => {}
+                            // letters are being typed into the soulseek name filter
+                            _ if ui.soulseek_filtering => {}
                             _ => match c {
                                 'm' => ui.toggle_mute().await,
                                 'p' => ui.toggle_play().await,
@@ -867,7 +1001,7 @@ impl Region {
                 }
                 KeyModifiers::NONE => match key.code {
                     KeyCode::Char(c) => match c {
-                        'q' => return ui.quit(),
+                        'z' => ui.select_list_region(),
                         'l' => ui.next_action(),
                         'h' => ui.previous_action(),
                         _ => {}
@@ -895,7 +1029,7 @@ impl Region {
                         'l' => ui.next_5s().await,
                         'h' => ui.previous_5s().await,
                         'k' => ui.toggle_play().await,
-                        'q' => return ui.quit(),
+                        'z' => ui.select_list_region(),
                         _ => {}
                     }
                 }
@@ -913,7 +1047,7 @@ impl Region {
                         match c {
                             'k' | 'l' => ui.increase_volume().await,
                             'h' | 'j' => ui.decrease_volume().await,
-                            'q' => return ui.quit(),
+                            'z' => ui.select_list_region(),
                             _ => {}
                         }
                     }
@@ -941,7 +1075,7 @@ impl Region {
                 KeyModifiers::NONE => match ui.anticipation_mode {
                     AncitipationMode::Normal => match key.code {
                         KeyCode::Char(c) => match c {
-                            'q' => return ui.quit(),
+                            'z' => ui.select_list_region(),
                             'j' => ui.select_next_lyrics_line(),
                             'k' => ui.select_previous_lyrics_line(),
                             'g' => ui.anticipate('g'),
@@ -989,7 +1123,7 @@ impl Region {
         if key.kind == event::KeyEventKind::Press && key.modifiers == KeyModifiers::NONE {
             match key.code {
                 KeyCode::Char(c) => match c {
-                    'q' => return ui.quit(),
+                    'z' => ui.select_list_region(),
                     'j' => ui.select_next_playlist_name(),
                     'k' => ui.select_previous_playlist_name(),
                     _ => {}
@@ -1155,6 +1289,14 @@ impl<'a> UI<'a> {
             internal_clock: tokio::time::interval(Duration::from_secs(1)),
             lua,
             soulseek_ranked: Vec::new(),
+            soulseek_shown: Vec::new(),
+            soulseek_filter: Input::default(),
+            soulseek_filtering: false,
+            soulseek_pending_d: false,
+            config_path: None,
+            settings_view: None,
+            queue: Vec::new(),
+            queue_view: None,
             soulseek_status: String::new(),
             soulseek_download_list: Vec::new(),
             soulseek_selected: 0,
@@ -1162,6 +1304,7 @@ impl<'a> UI<'a> {
             soulseek_download_selected: 0,
             soulseek_focus: SoulseekFocus::default(),
             soulseek_results_state: TableState::new(),
+            soulseek_marquee: (None, std::time::Instant::now()),
             soulseek_downloads_state: TableState::new(),
             soulseek_open_on_results: false,
             command_from_soulseek: false,
@@ -1208,6 +1351,11 @@ impl<'a> UI<'a> {
                     index,
                 });
             }
+            for m in &mut self.music_list.unfiltered_music_list {
+                if m.title.trim().is_empty() {
+                    m.title = crate::search::file_name(&m.path);
+                }
+            }
             self.music_list.musics = self.music_list.unfiltered_music_list.clone();
             self.music_list.playing_index = playlist.playing_index as usize;
             self.state.batch.metadata = self.state.proxy.metadata().await.unwrap_or_default();
@@ -1245,9 +1393,16 @@ impl<'a> UI<'a> {
             self.state.batch.status = PlayingStatus::Playing;
         }
 
-        if let Poll::Ready(v) = volume_stream.poll_next_unpin(&mut ctx) {
-            let volume = v.unwrap().args().unwrap().amount.max(0.0).min(1.0);
-            self.state.batch.volume = volume;
+        // drain every pending volume signal; echoes of our own changes are already applied
+        // locally, applying them late would undo presses made since
+        while let Poll::Ready(Some(v)) = volume_stream.poll_next_unpin(&mut ctx) {
+            if self.state.batch.own_volume_changes > 0 {
+                self.state.batch.own_volume_changes -= 1;
+                continue;
+            }
+            if let Ok(args) = v.args() {
+                self.state.batch.volume = args.amount.clamp(0.0, 1.0);
+            }
         }
 
         if let Poll::Ready(v) = playlist_created_stream.poll_next_unpin(&mut ctx) {
@@ -1286,6 +1441,11 @@ impl<'a> UI<'a> {
                     index,
                 });
             }
+            for m in &mut self.music_list.unfiltered_music_list {
+                if m.title.trim().is_empty() {
+                    m.title = crate::search::file_name(&m.path);
+                }
+            }
             self.music_list.musics = self.music_list.unfiltered_music_list.clone();
             self.music_list.playing_index = playlist.playing_index as usize;
             self.state.batch.metadata = self.state.proxy.metadata().await.unwrap_or_default();
@@ -1306,6 +1466,33 @@ impl<'a> UI<'a> {
         if let Poll::Ready(v) = sorted_stream.poll_next_unpin(&mut ctx) {
             self.state.batch.sort = v.unwrap().args().unwrap().sort;
             self.fetch_playlist_data().await;
+        }
+
+        let added = self.state.dbus_streams.music_added.as_mut().and_then(|stream| {
+            match stream.poll_next_unpin(&mut ctx) {
+                Poll::Ready(Some(signal)) => signal.args().ok().map(|a| a.path().to_string()),
+                _ => None,
+            }
+        });
+        if let Some(path) = added {
+            self.on_music_added(&path).await;
+        }
+    }
+
+    /// A finished download joined the library: reload the list and put the cursor on it, unless
+    /// the user is in the middle of a search
+    async fn on_music_added(&mut self, path: &str) {
+        self.fetch_playlist_data().await;
+        if matches!(self.mode, ListMode::Search | ListMode::AfterSearch) {
+            self.music_list.search(self.search_bufr.value().to_owned());
+            return;
+        }
+        let target = std::path::Path::new(path);
+        if let Some(i) = self.music_list.musics.iter().position(|m| {
+            let p: &std::path::Path = (&m.path).into();
+            p == target
+        }) {
+            self.music_list.selected = i;
         }
     }
 
@@ -1478,24 +1665,24 @@ impl<'a> UI<'a> {
         let block = match self.region {
             Region::List => match self.mode {
                 ListMode::Command => Block::default()
-                    .title("Musics")
+                    .title(self.musics_title())
                     .borders(Borders::ALL)
                     .fg(self.style.list_style.active_command_region_color),
                 ListMode::Search => Block::default()
-                    .title("Musics")
+                    .title(self.musics_title())
                     .borders(Borders::ALL)
                     .fg(self.style.list_style.active_search_region_color),
                 ListMode::AfterSearch => Block::default()
-                    .title("Musics")
+                    .title(self.musics_title())
                     .borders(Borders::ALL)
                     .fg(self.style.list_style.active_after_search_region_color),
                 ListMode::Select => Block::default()
-                    .title("Musics")
+                    .title(self.musics_title())
                     .borders(Borders::ALL)
                     .fg(self.style.list_style.active_region_color),
             },
             _ => Block::default()
-                .title("Musics")
+                .title(self.musics_title())
                 .borders(Borders::ALL)
                 .fg(self.style.list_style.passive_region_color),
         };
@@ -1543,24 +1730,24 @@ impl<'a> UI<'a> {
         let block = match self.region {
             Region::List => match self.mode {
                 ListMode::Search => Block::default()
-                    .title("Musics")
+                    .title(self.musics_title())
                     .borders(Borders::ALL)
                     .fg(self.style.list_style.active_search_region_color),
                 ListMode::AfterSearch => Block::default()
-                    .title("Musics")
+                    .title(self.musics_title())
                     .borders(Borders::ALL)
                     .fg(self.style.list_style.active_after_search_region_color),
                 ListMode::Select => Block::default()
-                    .title("Musics")
+                    .title(self.musics_title())
                     .borders(Borders::ALL)
                     .fg(self.style.list_style.active_region_color),
                 ListMode::Command => Block::default()
-                    .title("Musics")
+                    .title(self.musics_title())
                     .borders(Borders::ALL)
                     .fg(self.style.list_style.active_command_region_color),
             },
             _ => Block::default()
-                .title("Musics")
+                .title(self.musics_title())
                 .borders(Borders::ALL)
                 .fg(self.style.list_style.passive_region_color),
         };
@@ -1806,9 +1993,14 @@ impl<'a> UI<'a> {
         self.music_list.unfiltered_music_list.clear();
         for (index, music) in playlist.musics.iter().enumerate() {
             let music = music.to_owned();
+            let title = if music.title.trim().is_empty() {
+                crate::search::file_name(&music.path)
+            } else {
+                music.title
+            };
             self.music_list.unfiltered_music_list.push(Music {
                 path: music.path,
-                title: music.title,
+                title,
                 length: music.length,
                 artist: music.artist,
                 genre: music.genre,
@@ -1832,6 +2024,297 @@ impl<'a> UI<'a> {
         self.render_volume(frame);
         self.render_seeker(frame);
         self.render_soulseek(frame);
+        self.render_queue(frame);
+        self.render_settings(frame);
+    }
+
+    fn render_queue(&mut self, frame: &mut Frame) {
+        let Some(view) = &self.queue_view else {
+            return;
+        };
+        let full = frame.area();
+        let area = Rect {
+            x: full.x + full.width / 2,
+            y: full.y,
+            width: full.width - full.width / 2,
+            height: full.height.saturating_sub(6),
+        };
+        frame.render_widget(Clear, area);
+        let rows: Vec<Row> = self
+            .queue
+            .iter()
+            .enumerate()
+            .map(|(i, m)| {
+                let title = if m.title.trim().is_empty() {
+                    crate::search::file_name(&m.path)
+                } else {
+                    m.title.clone()
+                };
+                Row::new(vec![
+                    Cell::from(format!("{}", i + 1)),
+                    Cell::from(title),
+                    Cell::from(m.artist.clone()),
+                    Cell::from(UI::duration_to_string(m.length.as_secs())),
+                ])
+            })
+            .collect();
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(3),
+                Constraint::Fill(3),
+                Constraint::Fill(2),
+                Constraint::Length(6),
+            ],
+        )
+        .block(
+            Block::bordered()
+                .title(format!(" queue ({}) ", self.queue.len()))
+                .title_bottom(" J/K move · x/dd remove · Enter play · z close ")
+                .border_style(Style::default().fg(Color::Yellow)),
+        )
+        .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
+        let selected = (!self.queue.is_empty()).then_some(view.selected.min(self.queue.len() - 1));
+        let mut state = TableState::new().with_selected(selected);
+        frame.render_stateful_widget(table, area, &mut state);
+    }
+
+    /// Title of the music list, with the queue length once something is queued
+    fn musics_title(&self) -> String {
+        if self.queue.is_empty() {
+            "Musics".to_string()
+        } else {
+            format!("Musics · queue {}", self.queue.len())
+        }
+    }
+
+    /// Shift+letter in the music list; returns true to quit
+    async fn list_upper_key(&mut self, c: char) -> bool {
+        let quit_armed = matches!(self.anticipation_mode, AncitipationMode::Char('Z'));
+        self.anticipation_mode = AncitipationMode::Normal;
+        match c {
+            'G' => self.goto_bottom(),
+            'Q' => self.toggle_queue().await,
+            'H' => self.decrease_volume().await,
+            'L' => self.increase_volume().await,
+            // ZZ quits, like vim
+            'Z' if quit_armed => return true,
+            'Z' => self.anticipate('Z'),
+            _ => {}
+        }
+        false
+    }
+
+    /// `q`: add the highlighted track to the queue (`front` = play it next)
+    async fn queue_selected(&mut self, front: bool) {
+        let Some(index) = self
+            .music_list
+            .musics
+            .get(self.music_list.selected)
+            .map(|m| m.index as u32)
+        else {
+            return;
+        };
+        let _ = self.state.proxy.queue_add(index, front).await;
+        self.poll_queue().await;
+    }
+
+    async fn toggle_queue(&mut self) {
+        if self.queue_view.take().is_none() {
+            self.poll_queue().await;
+            self.queue_view = Some(QueueView::default());
+        }
+    }
+
+    /// Fetches the play queue (it shrinks as queued tracks get played)
+    pub async fn poll_queue(&mut self) {
+        if let Ok(queue) = self.state.proxy.get_queue().await {
+            self.queue = queue;
+        }
+        if let Some(view) = self.queue_view.as_mut() {
+            view.selected = view.selected.min(self.queue.len().saturating_sub(1));
+        }
+    }
+
+    async fn handle_queue_key(&mut self, key: &KeyEvent) {
+        if key.kind != event::KeyEventKind::Press {
+            return;
+        }
+        let Some(view) = self.queue_view.as_mut() else {
+            return;
+        };
+        let pending_d = std::mem::take(&mut view.pending_d);
+        let len = self.queue.len();
+        let pos = view.selected;
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => view.selected = (pos + 1).min(len.saturating_sub(1)),
+            KeyCode::Char('k') | KeyCode::Up => view.selected = pos.saturating_sub(1),
+            KeyCode::Char('J') if pos + 1 < len => {
+                view.selected = pos + 1;
+                let _ = self.state.proxy.queue_move(pos as u32, false).await;
+                self.poll_queue().await;
+            }
+            KeyCode::Char('K') if pos > 0 => {
+                view.selected = pos - 1;
+                let _ = self.state.proxy.queue_move(pos as u32, true).await;
+                self.poll_queue().await;
+            }
+            KeyCode::Char('d') if !pending_d => view.pending_d = true,
+            KeyCode::Char('x') | KeyCode::Char('d') | KeyCode::Delete if len > 0 => {
+                let _ = self.state.proxy.queue_remove(pos as u32).await;
+                self.poll_queue().await;
+            }
+            KeyCode::Enter if len > 0 => {
+                let _ = self.state.proxy.queue_play(pos as u32).await;
+                self.poll_queue().await;
+            }
+            KeyCode::Char('z') | KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => {
+                self.queue_view = None
+            }
+            _ => {}
+        }
+    }
+
+    fn render_settings(&mut self, frame: &mut Frame) {
+        let Some(view) = &self.settings_view else {
+            return;
+        };
+        let full = frame.area();
+        let width = full.width.saturating_sub(4).min(100);
+        let height = (crate::settings::SOULSEEK.len() as u16 + 7).min(full.height);
+        let area = Rect {
+            x: full.x + (full.width - width) / 2,
+            y: full.y + (full.height.saturating_sub(height)) / 2,
+            width,
+            height,
+        };
+        frame.render_widget(Clear, area);
+        let block = Block::bordered()
+            .title(" soulseek settings ")
+            .title_bottom(" j/k move · Enter edit · Space toggle · Esc close ")
+            .border_style(Style::default().fg(Color::Yellow));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let [list_area, help_area] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(3)]).areas(inner);
+
+        let rows: Vec<Row> = crate::settings::SOULSEEK
+            .iter()
+            .map(|s| {
+                Row::new(vec![
+                    Cell::from(s.key),
+                    Cell::from(crate::settings::display(&view.data, s.key)),
+                ])
+            })
+            .collect();
+        let table = Table::new(rows, [Constraint::Length(26), Constraint::Min(10)])
+            .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
+        let mut state = TableState::new().with_selected(Some(view.selected));
+        frame.render_stateful_widget(table, list_area, &mut state);
+
+        let setting = &crate::settings::SOULSEEK[view.selected];
+        let mut lines = vec![Line::from(setting.help).dim()];
+        match &view.editing {
+            Some(input) => lines.push(Line::from(format!("{} = {}▏", setting.key, input.value()))),
+            None => lines.push(Line::from(view.message.clone())),
+        }
+        frame.render_widget(Paragraph::new(lines), help_area);
+    }
+
+    /// Opens the settings panel with what's in the config file right now
+    fn open_settings(&mut self) {
+        let from_file = self
+            .config_path
+            .as_ref()
+            .and_then(|p| Config::parse_config(&p.to_string_lossy()).ok())
+            .and_then(|c| c.soulseek);
+        let data = from_file
+            .or_else(|| self.soulseek_config.clone())
+            .unwrap_or_default();
+        self.settings_view = Some(SettingsView {
+            data,
+            selected: 0,
+            editing: None,
+            message: String::new(),
+        });
+    }
+
+    async fn handle_settings_key(&mut self, key: &KeyEvent) {
+        if key.kind != event::KeyEventKind::Press {
+            return;
+        }
+        let Some(view) = self.settings_view.as_mut() else {
+            return;
+        };
+        let count = crate::settings::SOULSEEK.len();
+        let setting = &crate::settings::SOULSEEK[view.selected];
+
+        if let Some(input) = view.editing.as_mut() {
+            match key.code {
+                KeyCode::Esc => view.editing = None,
+                KeyCode::Enter => {
+                    let text = input.value().to_string();
+                    view.editing = None;
+                    match crate::settings::set(&mut view.data, setting.key, &text) {
+                        Ok(()) => self.apply_setting(setting.key, setting.ranking).await,
+                        Err(e) => view.message = e,
+                    }
+                }
+                _ => {
+                    input.handle_event(&crossterm::event::Event::Key(*key));
+                }
+            }
+            return;
+        }
+
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => view.selected = (view.selected + 1) % count,
+            KeyCode::Char('k') | KeyCode::Up => view.selected = (view.selected + count - 1) % count,
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('z') => self.settings_view = None,
+            KeyCode::Char(' ') | KeyCode::Enter if setting.kind == crate::settings::Kind::Bool => {
+                crate::settings::toggle(&mut view.data, setting.key);
+                self.apply_setting(setting.key, setting.ranking).await;
+            }
+            KeyCode::Enter => {
+                view.editing = Some(Input::new(crate::settings::edit_text(
+                    &view.data,
+                    setting.key,
+                )));
+            }
+            _ => {}
+        }
+    }
+
+    /// Saves the changed setting to the config file and starts using it
+    async fn apply_setting(&mut self, key: &str, ranking: bool) {
+        let Some(view) = self.settings_view.as_mut() else {
+            return;
+        };
+        let saved = match &self.config_path {
+            Some(path) => crate::settings::save(path, &view.data, key),
+            None => Err("no config file to save to".to_string()),
+        };
+        let data = view.data.clone();
+        view.message = match saved {
+            Ok(()) if ranking => "saved, applied to the results".to_string(),
+            Ok(()) => "saved, takes effect on the next connect".to_string(),
+            Err(e) => e,
+        };
+        self.soulseek_config = data.enabled.unwrap_or(false).then(|| data.clone());
+        if ranking {
+            let _ = self
+                .state
+                .proxy
+                .slsk_set_preferences(
+                    data.formats.clone().unwrap_or_default(),
+                    data.min_bitrate.unwrap_or(0),
+                    data.max_size_mb.unwrap_or(0),
+                    data.prefer_free_slots.unwrap_or(true),
+                    data.max_concurrent_downloads.unwrap_or(3),
+                )
+                .await;
+        }
     }
 
     /// Renders soulseek search results and downloads
@@ -1877,31 +2360,18 @@ impl<'a> UI<'a> {
     }
 
     fn render_soulseek_results(&mut self, frame: &mut Frame, area: Rect, border_style: Style) {
-        let title = format!(" soulseek results ({}) ", self.soulseek_ranked.len());
-
-        let rows: Vec<Row> = self
-            .soulseek_ranked
-            .iter()
-            .map(|rf| {
-                let format = rf.file.extension().unwrap_or("?");
-                let bitrate = if rf.file.bitrate > 0 {
-                    format!("{}k", rf.file.bitrate)
-                } else {
-                    "-".to_string()
-                };
-                let size_mb = rf.file.size as f64 / 1_048_576.0;
-                let score = rf.quality_score;
-
-                Row::new(vec![
-                    Cell::from(rf.file.basename().to_string()),
-                    Cell::from(format.to_uppercase()),
-                    Cell::from(bitrate),
-                    Cell::from(format!("{:.1}MB", size_mb)),
-                    Cell::from(format!("{}", score)),
-                    Cell::from(rf.username.clone()),
-                ])
-            })
-            .collect();
+        let filter = self.soulseek_filter.value();
+        let title = if self.soulseek_filtering || !filter.is_empty() {
+            format!(
+                " soulseek results ({} of {}) · filter: {}{} ",
+                self.soulseek_shown.len(),
+                self.soulseek_ranked.len(),
+                filter,
+                if self.soulseek_filtering { "▏" } else { "" }
+            )
+        } else {
+            format!(" soulseek results ({}) ", self.soulseek_ranked.len())
+        };
 
         let widths = [
             Constraint::Percentage(35),
@@ -1911,6 +2381,56 @@ impl<'a> UI<'a> {
             Constraint::Length(5),
             Constraint::Percentage(20),
         ];
+        // same column layout the table computes, to know how much of the name fits
+        let inner = area.inner(Margin::new(1, 1));
+        let name_width = Layout::horizontal(widths)
+            .flex(layout::Flex::Start)
+            .spacing(1)
+            .split(inner)[0]
+            .width as usize;
+
+        // restart the scroll whenever another result gets selected
+        let selected_key = self
+            .soulseek_shown
+            .get(self.soulseek_selected)
+            .map(|rf| (rf.username.clone(), rf.file.filename.clone()));
+        if self.soulseek_marquee.0 != selected_key {
+            self.soulseek_marquee = (selected_key, std::time::Instant::now());
+        }
+        let scroll_name = self.soulseek_focus == SoulseekFocus::Results;
+        let elapsed = self.soulseek_marquee.1.elapsed().as_secs_f64();
+        let selected = self.soulseek_selected;
+
+        let rows: Vec<Row> = self
+            .soulseek_shown
+            .iter()
+            .enumerate()
+            .map(|(i, rf)| {
+                let format = rf.file.extension().unwrap_or("?");
+                let bitrate = if rf.file.bitrate > 0 {
+                    format!("{}k", rf.file.bitrate)
+                } else {
+                    "-".to_string()
+                };
+                let size_mb = rf.file.size as f64 / 1_048_576.0;
+                let score = rf.quality_score;
+
+                let name = if scroll_name && i == selected {
+                    marquee(rf.file.basename(), name_width, elapsed)
+                } else {
+                    rf.file.basename().to_string()
+                };
+
+                Row::new(vec![
+                    Cell::from(name),
+                    Cell::from(format.to_uppercase()),
+                    Cell::from(bitrate),
+                    Cell::from(format!("{:.1}MB", size_mb)),
+                    Cell::from(format!("{}", score)),
+                    Cell::from(rf.username.clone()),
+                ])
+            })
+            .collect();
 
         let table = Table::new(rows, widths)
             .header(
@@ -1926,7 +2446,7 @@ impl<'a> UI<'a> {
             .highlight_style(self.soulseek_highlight(true));
 
         self.soulseek_results_state
-            .select((!self.soulseek_ranked.is_empty()).then_some(self.soulseek_selected));
+            .select((!self.soulseek_shown.is_empty()).then_some(self.soulseek_selected));
         frame.render_stateful_widget(table, area, &mut self.soulseek_results_state);
     }
 
@@ -2096,12 +2616,12 @@ impl<'a> UI<'a> {
     }
 
     /// Increases volume
-    pub async fn increase_volume(&self) {
+    pub async fn increase_volume(&mut self) {
         self.state.increase_volume().await;
     }
 
     /// Decreases volume
-    pub async fn decrease_volume(&self) {
+    pub async fn decrease_volume(&mut self) {
         self.state.decrease_volume().await;
     }
 
@@ -2198,6 +2718,7 @@ impl<'a> UI<'a> {
             Some(self.state.proxy.receive_playlist_deleted().await.unwrap());
         self.state.dbus_streams.playlist_created =
             Some(self.state.proxy.receive_playlist_created().await.unwrap());
+        self.state.dbus_streams.music_added = self.state.proxy.receive_music_added().await.ok();
         //----------------------------------------------------
         //TODO: make this something more readable
         self.displayed_repeat = self.state.get_repeat();
@@ -2302,6 +2823,24 @@ impl<'a> UI<'a> {
             _ => {}
         }
         self.mode = mode;
+    }
+
+    /// Closes the search and shows the full list again, keeping the cursor on the track that was
+    /// highlighted in the results
+    fn leave_search(&mut self) {
+        let keep = self
+            .music_list
+            .musics
+            .get(self.music_list.selected)
+            .map(|m| m.index);
+        self.search_bufr.reset();
+        self.reset_querry();
+        self.mode = ListMode::Select;
+        self.geometry.disable_search();
+        self.select_region(Region::List);
+        self.music_list.selected = keep
+            .and_then(|i| self.music_list.musics.iter().position(|m| m.index == i))
+            .unwrap_or(0);
     }
 
     async fn play_after_search(&mut self) {
@@ -2623,9 +3162,15 @@ impl<'a> UI<'a> {
     fn render_search(&self, frame: &mut Frame<'_>) {
         if matches!(self.mode, ListMode::Search | ListMode::AfterSearch) {
             if let Some(geo) = self.geometry.search_geo() {
+                let title = if self.search_bufr.value().trim().is_empty() {
+                    "Search (regex, artist:/genre:/title:)".to_string()
+                } else if self.music_list.musics.is_empty() {
+                    "Search (no matches, Enter: search soulseek)".to_string()
+                } else {
+                    format!("Search ({} matches)", self.music_list.musics.len())
+                };
                 frame.render_widget(
-                    Paragraph::new(self.search_bufr.value())
-                        .block(Block::bordered().title("Querry")),
+                    Paragraph::new(self.search_bufr.value()).block(Block::bordered().title(title)),
                     geo,
                 );
             }
@@ -2683,8 +3228,14 @@ impl<'a> UI<'a> {
                 self.remove_playlist(name).await;
             }
             CommandName::SoulseekSearch => {
-                let query = args.join(" ");
-                self.soulseek_search(&query).await;
+                if args.is_empty() {
+                    // plain `:slsk` opens the panel; return there after the command input
+                    self.soulseek_visible = true;
+                    self.command_from_soulseek = true;
+                } else {
+                    let query = args.join(" ");
+                    self.soulseek_search(&query).await;
+                }
             }
             CommandName::SoulseekConnect => {
                 self.soulseek_connect().await;
@@ -2692,6 +3243,7 @@ impl<'a> UI<'a> {
             CommandName::SoulseekDisconnect => {
                 self.soulseek_disconnect().await;
             }
+            CommandName::Settings => self.open_settings(),
         }
         Ok(false)
     }
@@ -2771,15 +3323,37 @@ impl<'a> UI<'a> {
         self.soulseek_connected = false;
         self.soulseek_open_on_results = false;
         self.soulseek_ranked.clear();
+        self.soulseek_shown.clear();
         self.soulseek_selected = 0;
         self.soulseek_selection_moved = false;
     }
 
     async fn soulseek_search(&mut self, query: &str) {
+        // connect on first use, using the [soulseek] config
+        if !matches!(self.state.proxy.slsk_state().await, Ok(ConnectionState::Ready)) {
+            self.soulseek_connect().await;
+        }
+        // ranking settings live in the client config, the server ranks with them
+        if let Some(cfg) = &self.soulseek_config {
+            let _ = self
+                .state
+                .proxy
+                .slsk_set_preferences(
+                    cfg.formats.clone().unwrap_or_default(),
+                    cfg.min_bitrate.unwrap_or(0),
+                    cfg.max_size_mb.unwrap_or(0),
+                    cfg.prefer_free_slots.unwrap_or(true),
+                    cfg.max_concurrent_downloads.unwrap_or(3),
+                )
+                .await;
+        }
         match self.state.proxy.slsk_search(query.to_string()).await {
             Ok(msg) => {
                 self.soulseek_status = msg;
                 self.soulseek_ranked.clear();
+                self.soulseek_shown.clear();
+                self.soulseek_filter.reset();
+                self.soulseek_filtering = false;
                 self.soulseek_selected = 0;
                 self.soulseek_selection_moved = false;
                 self.soulseek_open_on_results = true;
@@ -2804,16 +3378,18 @@ impl<'a> UI<'a> {
 
     /// Replaces the results, keeping the selection on the same (username, filename)
     fn apply_soulseek_results(&mut self, results: Vec<RankedFile>) {
+        let shown = filter_results(&results, self.soulseek_filter.value());
         self.soulseek_selected = if self.soulseek_selection_moved {
             anchored_index(
-                &self.soulseek_ranked,
-                &results,
+                &self.soulseek_shown,
+                &shown,
                 self.soulseek_selected,
                 same_result,
             )
         } else {
             0
         };
+        self.soulseek_shown = shown;
         if !results.is_empty() && results.len() != self.soulseek_ranked.len() {
             self.soulseek_status = format!("found {} files (sorted by quality)", results.len());
         }
@@ -2844,6 +3420,15 @@ impl<'a> UI<'a> {
         self.soulseek_download_list = downloads;
     }
 
+    /// Re-applies the name filter after it was edited, keeping the cursor on the same result
+    /// when it still matches
+    fn soulseek_refilter(&mut self) {
+        let shown = filter_results(&self.soulseek_ranked, self.soulseek_filter.value());
+        self.soulseek_selected =
+            anchored_index(&self.soulseek_shown, &shown, self.soulseek_selected, same_result);
+        self.soulseek_shown = shown;
+    }
+
     fn soulseek_switch_focus(&mut self) {
         self.soulseek_focus = match self.soulseek_focus {
             SoulseekFocus::Results => SoulseekFocus::Downloads,
@@ -2867,7 +3452,7 @@ impl<'a> UI<'a> {
             self.soulseek_selection_moved = true;
         }
         match self.soulseek_focus {
-            SoulseekFocus::Results => (&mut self.soulseek_selected, self.soulseek_ranked.len()),
+            SoulseekFocus::Results => (&mut self.soulseek_selected, self.soulseek_shown.len()),
             SoulseekFocus::Downloads => (
                 &mut self.soulseek_download_selected,
                 self.soulseek_download_list.len(),
@@ -2904,7 +3489,7 @@ impl<'a> UI<'a> {
         if self.soulseek_focus != SoulseekFocus::Results {
             return;
         }
-        let Some(rf) = self.soulseek_ranked.get(self.soulseek_selected) else {
+        let Some(rf) = self.soulseek_shown.get(self.soulseek_selected) else {
             return;
         };
         let (username, filename) = (rf.username.clone(), rf.file.filename.clone());
@@ -2918,20 +3503,45 @@ impl<'a> UI<'a> {
         }
     }
 
-    async fn soulseek_cancel_selected(&mut self) {
-        // cancel the download selected in the downloads list (by id)
-        if let Some(dl) = self
+    /// Shift+J/K: move the selected download down/up; waiting downloads start in list order.
+    /// The selection follows it (anchored by id) when the list is refreshed.
+    async fn soulseek_move_download(&mut self, up: bool) {
+        if self.soulseek_focus != SoulseekFocus::Downloads {
+            return;
+        }
+        let Some(id) = self
             .soulseek_download_list
             .get(self.soulseek_download_selected)
-        {
-            match self.state.proxy.slsk_cancel_download(dl.id).await {
-                Ok(msg) => {
-                    self.soulseek_status = msg;
-                }
-                Err(e) => {
-                    self.soulseek_status = format!("cancel error: {}", e);
-                }
-            }
+            .map(|dl| dl.id)
+        else {
+            return;
+        };
+        let _ = self.state.proxy.slsk_move_download(id, up).await;
+        if let Ok(downloads) = self.state.proxy.slsk_get_downloads().await {
+            self.apply_soulseek_downloads(downloads);
+        }
+    }
+
+    /// `x` / `dd`: remove the selected download (cancelling it if it's still running)
+    async fn soulseek_remove_key(&mut self) {
+        if self.soulseek_focus != SoulseekFocus::Downloads {
+            self.soulseek_status = "Tab to the downloads list, then x or dd to remove".to_string();
+            return;
+        }
+        let Some(id) = self
+            .soulseek_download_list
+            .get(self.soulseek_download_selected)
+            .map(|dl| dl.id)
+        else {
+            return;
+        };
+        match self.state.proxy.slsk_remove_download(id).await {
+            Ok(msg) => self.soulseek_status = msg,
+            Err(e) => self.soulseek_status = format!("remove error: {}", e),
+        }
+        // refresh now so the row disappears without waiting for the next poll
+        if let Ok(downloads) = self.state.proxy.slsk_get_downloads().await {
+            self.apply_soulseek_downloads(downloads);
         }
     }
 
@@ -3049,40 +3659,7 @@ pub struct Musics {
 impl Musics {
     /// search the music list
     pub fn search(&mut self, search_bufr: String) {
-        let n = 20;
-        let paire = search_bufr.split_once(":");
-        match paire {
-            Some((left, right)) => {
-                let criteria = left;
-                if criteria == "genre" {
-                    self.musics = fuzzy_search::fuzzy_search_music_grene_best_n(
-                        right.trim(),
-                        &self.unfiltered_music_list,
-                        n,
-                    );
-                } else if criteria == "duration" {
-                    // TODO: use duration instead of str
-                    self.musics = fuzzy_search::fuzzy_search_music_grene_best_n(
-                        right.trim(),
-                        &self.unfiltered_music_list,
-                        n,
-                    );
-                } else if criteria == "artist" {
-                    self.musics = fuzzy_search::fuzzy_search_music_artist_best_n(
-                        right.trim(),
-                        &self.unfiltered_music_list,
-                        n,
-                    );
-                }
-            }
-            None => {
-                self.musics = fuzzy_search::fuzzy_search_music_titles_best_n(
-                    &search_bufr,
-                    &self.unfiltered_music_list,
-                    n,
-                );
-            }
-        }
+        self.musics = crate::search::search_musics(&search_bufr, &self.unfiltered_music_list);
     }
 
     pub fn reset_search(&mut self) {
@@ -3375,6 +3952,42 @@ impl Event {
 mod soulseek_tests {
     use super::*;
     use crate::soulseek_types::SharedFile;
+
+    #[test]
+    fn filter_results_by_name_regex() {
+        let all = vec![
+            rf("a", "Music\\Aphex Twin\\01 Xtal.flac"),
+            rf("b", "x/02 Tha.mp3"),
+            rf("c", "Aphex\\03 Pulsewidth.m4a"),
+        ];
+        assert_eq!(filter_results(&all, "").len(), 3);
+        // matches the file name only, not the folders
+        assert_eq!(filter_results(&all, "aphex").len(), 0);
+        let hits = filter_results(&all, "xtal|PULSE");
+        assert_eq!(hits.iter().map(|r| r.username.as_str()).collect::<Vec<_>>(), vec!["a", "c"]);
+        // half-typed regex is matched literally
+        assert!(filter_results(&all, "(").is_empty());
+    }
+
+    #[test]
+    fn marquee_short_name_does_not_scroll() {
+        assert_eq!(marquee("short.mp3", 20, 5.0), "short.mp3");
+    }
+
+    #[test]
+    fn marquee_holds_scrolls_and_wraps() {
+        let name = "0123456789abcdef"; // 16 chars in 10 columns: 6 to scroll, 1s at 6/s
+        assert_eq!(marquee(name, 10, 0.5), "0123456789"); // hold at start
+        assert_eq!(marquee(name, 10, 1.5), "3456789abc"); // halfway
+        assert_eq!(marquee(name, 10, 2.5), "6789abcdef"); // hold at end
+        assert_eq!(marquee(name, 10, 3.5), "0123456789"); // starts over
+    }
+
+    #[test]
+    fn marquee_handles_multibyte() {
+        let s = marquee("ØTTA - Ünïcødé name.flac", 8, 10.0);
+        assert_eq!(s.chars().count(), 8);
+    }
 
     fn rf(user: &str, name: &str) -> RankedFile {
         RankedFile {

@@ -25,5 +25,10 @@ list = "/home/user/.config/mplayer-client/lua/list.lua"
 # server_port = 2242
 # listen_port = 2234
 # max_results = 50
+# result ranking/filtering:
+# formats = ["flac", "mp3", "ogg"]  # only show these, earlier = preferred (unset: all audio)
+# min_bitrate = 256                 # hide lossy files below this kbps (lossless always kept)
+# max_size_mb = 0                   # hide files bigger than this, 0 = no limit
+# prefer_free_slots = true          # rank peers with free upload slots higher
 # download_dir = "/home/user/Music/soulseek"
 # share_dir = "/home/user/Music/shared"  # optional, uses dummy file if not set

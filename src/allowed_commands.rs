@@ -27,6 +27,7 @@ pub enum CommandName {
     SoulseekSearch,
     SoulseekConnect,
     SoulseekDisconnect,
+    Settings,
 }
 
 impl CommandName {
@@ -54,11 +55,13 @@ impl CommandName {
             // Playlist name
             CommandName::RemovePlaylist => 1,
             // search query
-            CommandName::SoulseekSearch => 1,
+            // no query just opens the panel
+            CommandName::SoulseekSearch => 0,
             // no arguments
             CommandName::SoulseekConnect => 0,
             // no arguments
             CommandName::SoulseekDisconnect => 0,
+            CommandName::Settings => 0,
         }
     }
 }
@@ -78,10 +81,11 @@ impl FromStr for CommandName {
             "pause" => Ok(Self::Pause),
             "reload" => Ok(Self::Reload),
             "resume" => Ok(Self::Resume),
-            "q" | "quit" => Ok(Self::Quit),
+            "q" | "q!" | "quit" | "qa" | "qa!" | "wq" | "x" => Ok(Self::Quit),
             "slsk" | "soulseek" | "slsk_search" => Ok(Self::SoulseekSearch),
             "slsk_connect" => Ok(Self::SoulseekConnect),
             "slsk_disconnect" => Ok(Self::SoulseekDisconnect),
+            "settings" | "set" => Ok(Self::Settings),
             _ => Err(std::io::Error::other(format!(
                 "Unkown command variant {}",
                 s

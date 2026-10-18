@@ -1,6 +1,5 @@
 use std::fs::OpenOptions;
 use std::io::prelude::*;
-use std::time::Instant;
 
 #[allow(unused)]
 pub trait StringFeatures {
@@ -100,7 +99,6 @@ impl RunStatus {
 
 pub struct FPSController {
     fps: u32,
-    instant: Instant,
     frame_window: f64,
 }
 
@@ -108,7 +106,6 @@ impl Default for FPSController {
     fn default() -> Self {
         Self {
             fps: 30,
-            instant: Instant::now(),
             frame_window: 1.0 / 30.0,
         }
     }
@@ -119,22 +116,13 @@ impl FPSController {
     pub fn new(fps: u32) -> Self {
         Self {
             fps,
-            instant: Instant::now(),
             frame_window: 1.0 / fps as f64,
         }
     }
 
-    pub fn check_fps(&mut self) -> bool {
-        let now = Instant::now();
-        if (now - self.instant).as_secs_f64() > self.frame_window {
-            self.register_instant();
-            return true;
-        }
-        false
-    }
-
-    fn register_instant(&mut self) {
-        self.instant = Instant::now();
+    /// Time budget for one frame
+    pub fn frame_duration(&self) -> std::time::Duration {
+        std::time::Duration::from_secs_f64(self.frame_window)
     }
 
     pub fn change_fps(&mut self, fps: u32) {

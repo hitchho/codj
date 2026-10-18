@@ -36,6 +36,16 @@ pub struct SoulseekSettings {
     pub download_dir: Option<PathBuf>,
     /// directory to share (optional, uses dummy file if not set)
     pub share_dir: Option<PathBuf>,
+    /// result formats to show, earlier = preferred (e.g. ["flac", "mp3"]); unset = all audio
+    pub formats: Option<Vec<String>>,
+    /// hide lossy results below this kbps; lossless and unknown bitrates are kept
+    pub min_bitrate: Option<u32>,
+    /// hide results bigger than this many MiB
+    pub max_size_mb: Option<u32>,
+    /// rank peers with free upload slots higher (default true)
+    pub prefer_free_slots: Option<bool>,
+    /// downloads running at once, the rest wait in list order (default 3)
+    pub max_concurrent_downloads: Option<u32>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]

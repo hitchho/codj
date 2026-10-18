@@ -10,19 +10,30 @@
 |List|Normal|`k`|Scroll up|
 |List|Normal|`Space` or `Enter`|Play the music under selection|
 |List|Normal|`s`|Scroll to the currently playing music|
+|List|Normal|`q`|Add the music under selection to the play queue (the list title shows the queue length)|
+|List|Normal|`Shift + q`|Open / close the queue panel|
+|List|Normal|`h` / `l`|Seek 5 seconds back / forward|
+|List|Normal|`Shift + h` / `Shift + l`|Volume down / up|
+|List|Normal|`ZZ`|Quit (also `:q`, `:q!`, `:wq`, `:x`)|
+|Queue|Any|`j` / `k`|Move in the queue|
+|Queue|Any|`Shift + j` / `Shift + k`|Move the selected track later / earlier in the queue|
+|Queue|Any|`x`, `dd` or `Delete`|Remove from the queue|
+|Queue|Any|`Enter`|Play it now|
+|Queue|Any|`z`, `q`, `Esc` or `Shift + q`|Close the queue panel|
 |List|Normal|`gg`|Scroll to the start of the list|
 |List|Normal|`G`|Scroll to the end of the list|
 |List|Normal|`Ctrl + d`|Scroll half page down|
 |List|Normal|`Ctrl + u`|Sroll half page up|
 |List|Normal|`gg`|Go to the top of the list|
 |List|Normal|`G`|Go to the bottom of the list|
-|List|Normal|`/`|Enable `Search` mode|
+|List|Normal|`/` or `f`|Enable `Search` mode: case-insensitive regex over title, artist and file name (`artist:`, `genre:`, `title:` to pick one field)|
+|List|Search|`Enter`|Play the selected match, or search soulseek for the query when nothing matches|
+|List|Search|`Esc`|Close the search, back to the full list with the cursor on the highlighted track|
+|List|Search|`Up` / `Down`|Move through the matches while typing|
 |List|Normal|`:`|Enable `Command` mode|
 |List|Search|`Character`|Register the character to the search querry, check [this](#Search_filters) for search tricks|
-|List|Search|`Enter`|Play the music under selection|
 |List|Command|`Character`|Register the character to the command querry, check [this](#commands) for available commands|
 |List|Command|`Enter`|Execute command|
-|List|Search|`Esc`|Enable `After Search` mode|
 |List|After Search|`j`|Scroll down|
 |List|After Search|`k`|Scroll up|
 |List|After Search|`Space` or `Enter`|Play the music under selection|
@@ -70,7 +81,9 @@
 |`:q` | `:quit`|Quit client|
 |`:slsk_connect`|Connect to soulseek network (requires config)|
 |`:slsk_disconnect`|Disconnect from soulseek network|
-|`:slsk <query>` | `:soulseek <query>`|Search for music on soulseek network|
+|`:slsk <query>` | `:soulseek <query>`|Search for music on soulseek network (connects on first use)|
+|`:slsk`|Open the soulseek panel|
+|`:settings` | `:set`|Open the soulseek settings panel: `j`/`k` move, `Enter` edits, `Space` toggles, `Esc` closes. Changes are saved to your config file right away (comments kept); ranking settings apply to the current results immediately|
 
 # Soulseek
 
@@ -86,21 +99,23 @@ Soulseek uses optimistic registration - if you connect with a username that does
 |------|-------|-----|
 |Any|`Ctrl + s`|Toggle soulseek panel|
 |Soulseek|`Tab` or `Shift + Tab`|Switch focus between the results table and the downloads list (the focused one has a yellow border and highlighted row)|
+|Soulseek|`f` or `/`|Filter the results by file name (case-insensitive regex). `Enter` keeps the filter, `Esc` clears it, arrows move while typing|
 |Soulseek|`j`|Move down in the focused list|
 |Soulseek|`k`|Move up in the focused list|
 |Soulseek|`Enter` or `Space`|Queue selected result for download (results focused)|
-|Soulseek|`d` or `Delete`|Cancel selected download (downloads focused)|
+|Soulseek|`x`, `dd` or `Delete`|Remove the selected download, cancelling it if still running (downloads focused)|
+|Soulseek|`Shift + j` / `Shift + k`|Move the selected download down / up; waiting downloads start top first (`max_concurrent_downloads` run at once)|
 |Soulseek|`:`|Open the command input, returns to the soulseek panel afterwards|
 |Soulseek|`c`|Clear finished downloads|
 |Soulseek|`G`|Go to bottom of the focused list|
 |Soulseek|`Ctrl + d`|Scroll down 10 items|
 |Soulseek|`Ctrl + u`|Scroll up 10 items|
-|Soulseek|`q` or `Esc`|Close soulseek panel|
+|Soulseek|`z`, `q` or `Esc`|Close soulseek panel (`Esc` clears an active filter first)|
 
 ## Soulseek Results Display
 
 Results are automatically sorted by quality score which considers:
-- **Format**: FLAC > WAV > ALAC > MP3 > OGG > AAC > WMA
+- **Format**: WAV > FLAC > ALAC > MP3 > OGG > AAC > WMA, or your own order with `formats` in `[soulseek]` (which also hides every other format)
 - **Bitrate**: Higher bitrate = better score
 - **Sample Rate**: Higher than 44.1kHz gets bonus points
 - **VBR**: VBR gets slight bonus for lossy formats
@@ -146,6 +161,11 @@ password = "your_password"
 # server_port = 2242
 # listen_port = 2234
 # max_results = 50
+# result ranking/filtering:
+# formats = ["flac", "mp3", "ogg"]  # only show these, earlier = preferred (unset: all audio)
+# min_bitrate = 256                 # hide lossy files below this kbps (lossless always kept)
+# max_size_mb = 0                   # hide files bigger than this, 0 = no limit
+# prefer_free_slots = true          # rank peers with free upload slots higher
 # download_dir = "/home/user/Music/soulseek"
 # share_dir = "/home/user/Music/shared"  # optional
 ```

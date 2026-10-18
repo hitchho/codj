@@ -3,7 +3,7 @@ use futures::executor::block_on;
 use std::{collections::HashMap, time::Duration};
 
 use crate::{
-    EndedStream, Metadata, MusicPlayedStream, OuterMusic, PausedStream, PlayingStatus, Playlist,
+    EndedStream, Metadata, MusicAddedStream, MusicPlayedStream, OuterMusic, PausedStream, PlayingStatus, Playlist,
     PlaylistCreatedStream, PlaylistDeletedStream, PlaylistLoadedStream, PlaylistsUpdatedStream,
     Repeat, ResumedStream, ServerProxy, Sort, SortedStream, VolumeChangedStream,
 };
@@ -46,6 +46,8 @@ pub struct Batch {
     pub repeat: Repeat,
     /// playlist order
     pub sort: Sort,
+    /// volume changes sent by this client whose VolumeChanged echo hasn't come back yet
+    pub own_volume_changes: u32,
 }
 
 #[derive(Default)]
@@ -60,6 +62,7 @@ pub struct Streams {
     pub playlist_loaded: Option<PlaylistLoadedStream>,
     pub playlist_deleted: Option<PlaylistDeletedStream>,
     pub playlist_created: Option<PlaylistCreatedStream>,
+    pub music_added: Option<MusicAddedStream>,
 }
 
 /// Handle state management with the bus server
@@ -222,8 +225,10 @@ impl<'a> State<'a> {
     }
 
     /// Seeks by x secons from the current playing time stamp
-    pub async fn seek(&self, amount: f64) {
+    pub async fn seek(&mut self, amount: f64) {
         self.proxy.seek(amount).await.unwrap();
+        // so the next seek in the same frame starts from here
+        self.batch.played_duration = Duration::from_secs_f64(amount);
     }
 
     /// Resumes the player
@@ -346,12 +351,22 @@ impl<'a> State<'a> {
         block_on(async { self.proxy.get_playlists_names().await.unwrap_or_default() })
     }
 
-    pub(crate) async fn increase_volume(&self) {
-        self.proxy.volume(self.volume() + 0.1).await.unwrap();
+    pub(crate) async fn increase_volume(&mut self) {
+        self.step_volume(0.1).await;
     }
 
-    pub(crate) async fn decrease_volume(&self) {
-        self.proxy.volume(self.volume() - 0.1).await.unwrap();
+    pub(crate) async fn decrease_volume(&mut self) {
+        self.step_volume(-0.1).await;
+    }
+
+    /// Changes the volume by `delta`, keeping it in 0..=1. The cached value is updated at once
+    /// so several presses in one frame add up instead of all starting from the same value.
+    async fn step_volume(&mut self, delta: f32) {
+        let volume = ((self.volume() + delta) * 10.0).round() / 10.0;
+        let volume = volume.clamp(0.0, 1.0);
+        self.proxy.volume(volume).await.unwrap();
+        self.batch.volume = volume;
+        self.batch.own_volume_changes += 1;
     }
 
     pub(crate) async fn sort(&self, sort: crate::Sort) {

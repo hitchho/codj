@@ -24,7 +24,8 @@ use utils::RunStatus;
 use zbus::{proxy, Connection, Result};
 
 mod allowed_commands;
-mod fuzzy_search;
+mod search;
+mod settings;
 mod parser;
 mod soulseek_types;
 mod states;
@@ -68,6 +69,12 @@ pub trait Server {
     fn play_next(&self) -> Result<RunStatus>;
     /// Plays a music from its indoex on the playlist
     fn play_from_index(&self, index: u32) -> Result<RunStatus>;
+    /// queue the playlist track at `index`; `front` makes it play next
+    fn queue_add(&self, index: u32, front: bool) -> Result<RunStatus>;
+    fn queue_remove(&self, pos: u32) -> Result<RunStatus>;
+    fn queue_move(&self, pos: u32, up: bool) -> Result<RunStatus>;
+    fn queue_play(&self, pos: u32) -> Result<RunStatus>;
+    fn get_queue(&self) -> Result<Vec<OuterMusic>>;
     /// Sorts playlist
     fn sort(&self, sort: Sort) -> Result<RunStatus>;
     /// Changes the repeat state of plalyist
@@ -151,6 +158,10 @@ pub trait Server {
     #[zbus(signal)]
     async fn repeat_changed(&self, sort: Repeat) -> zbus::Result<()>;
 
+    /// Signal fires when a finished download was added to the library
+    #[zbus(signal)]
+    async fn music_added(&self, path: &str) -> zbus::Result<()>;
+
     #[zbus(signal)]
     async fn playlists_updated(
         &self,
@@ -189,6 +200,16 @@ pub trait Server {
     async fn slsk_get_downloads(&self) -> Result<Vec<Download>>;
     async fn slsk_cancel_download(&self, id: u32) -> Result<String>;
     async fn slsk_clear_finished(&self) -> Result<String>;
+    async fn slsk_remove_download(&self, id: u32) -> Result<String>;
+    async fn slsk_set_preferences(
+        &self,
+        formats: Vec<String>,
+        min_bitrate: u32,
+        max_size_mb: u32,
+        prefer_free_slots: bool,
+        max_concurrent_downloads: u32,
+    ) -> Result<String>;
+    async fn slsk_move_download(&self, id: u32, up: bool) -> Result<String>;
 }
 
 pub fn init_panic_hook() {
@@ -217,30 +238,41 @@ async fn main() -> Result<()> {
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
 
     let args: Vec<String> = env::args().collect();
-    let config = if args.len() > 1 {
-        Config::parse_config(&args[1]).unwrap()
+    let config_path = if args.len() > 1 {
+        args[1].clone()
     } else {
         let mut home = env::var("HOME").unwrap().to_string();
         home.push_str("/.config/mplayer-client/config.toml");
-        Config::parse_config(&home).unwrap_or_default()
+        home
+    };
+    let config = if args.len() > 1 {
+        Config::parse_config(&config_path).unwrap()
+    } else {
+        Config::parse_config(&config_path).unwrap_or_default()
     };
 
     let mut ui = ui::UI::new(proxy);
+    ui.config_path = Some(config_path.into());
 
     ui.update_from_config(&config);
     ui.restore_state().await;
     ui.set_frame(&mut terminal.get_frame());
     let mut should_quit = false;
+    // soulseek results trickle in from peers, twice a second is plenty
+    let soulseek_poll = std::time::Duration::from_millis(500);
+    let mut last_soulseek_poll: Option<std::time::Instant> = None;
     while !should_quit {
-        if ui.fps_controller.check_fps() {
-            terminal.draw(|frame| {
-                ui.render(frame);
-            })?;
-            ui.update_state().await;
-            // poll soulseek for search results
+        terminal.draw(|frame| {
+            ui.render(frame);
+        })?;
+        ui.update_state().await;
+        if last_soulseek_poll.map_or(true, |t| t.elapsed() >= soulseek_poll) {
             ui.poll_soulseek_results().await;
-            should_quit = handle_events(&mut ui).await?;
+            ui.poll_queue().await;
+            last_soulseek_poll = Some(std::time::Instant::now());
         }
+        let frame = ui.fps_controller.frame_duration();
+        should_quit = handle_events(&mut ui, frame).await?;
     }
 
     disable_raw_mode()?;
@@ -248,11 +280,17 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn handle_events<'a>(ui: &mut ui::UI<'a>) -> io::Result<bool> {
-    if event::poll(std::time::Duration::from_millis(50))? {
+/// Waits up to one frame for input, then handles every queued key before the next draw. Handling
+/// only one key per frame let held keys (key repeat) pile up and keep scrolling after release.
+async fn handle_events<'a>(ui: &mut ui::UI<'a>, frame: std::time::Duration) -> io::Result<bool> {
+    let mut wait = frame;
+    while event::poll(wait)? {
         if let Event::Key(key) = event::read()? {
-            return ui::Region::handle_events(ui, &key).await;
+            if ui::Region::handle_events(ui, &key).await? {
+                return Ok(true);
+            }
         }
+        wait = std::time::Duration::ZERO;
     }
     Ok(false)
 }
