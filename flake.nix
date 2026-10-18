@@ -20,7 +20,7 @@
       in
       {
         defaultPackage = naersk-lib.buildPackage {
-          name = "mplayer-client";
+          name = "musa";
           src = ./.;
           buildInputs = with pkgs; [
             pkg-config

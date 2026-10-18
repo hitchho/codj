@@ -132,7 +132,7 @@ Downloads are shown with colored status:
 
 # Configuration
 
-Config file is optional, but if you want to have it, you can to either pass it as the first argument to `mplayer-client` or put it on `$HOME/.config/mplayer-client/config.toml`
+Config file is optional, but if you want to have it, you can to either pass it as the first argument to `musa` or put it on `$HOME/.config/musa/config.toml` (the old `$HOME/.config/mplayer-client/config.toml` is still read if that doesn't exist)
 ```Toml
 # EVERY OPTION CAN BE EMITTED
 [config]
@@ -145,12 +145,12 @@ genre = false # display genre, default to false
 [scripts]
 # region_name = path/to/script.lua
 # only full path work for now
-all = "/home/user/.config/mplayer-client/lua/all.lua"
-list = "/home/user/.config/mplayer-client/lua/list.lua"
-# lyrics = "/home/user/.config/mplayer-client/list.lua"
-# actions = "/home/user/.config/mplayer-client/actions.lua"
-# seeker = "/home/user/.config/mplayer-client/seeker.lua"
-# volume = "/home/user/.config/mplayer-client/volume.lua"
+all = "/home/user/.config/musa/lua/all.lua"
+list = "/home/user/.config/musa/lua/list.lua"
+# lyrics = "/home/user/.config/musa/list.lua"
+# actions = "/home/user/.config/musa/actions.lua"
+# seeker = "/home/user/.config/musa/seeker.lua"
+# volume = "/home/user/.config/musa/volume.lua"
 
 [soulseek]
 # soulseek network search for music
@@ -172,7 +172,7 @@ password = "your_password"
 
 ## Soulseek Sharing
 
-Soulseek requires users to share files to participate in the network. By default, mplayer-client shares a virtual dummy.mp3 file (100KB, 128kbps, 3 minutes) to satisfy this requirement without exposing any real files.
+Soulseek requires users to share files to participate in the network. By default, musa shares a virtual dummy.mp3 file (100KB, 128kbps, 3 minutes) to satisfy this requirement without exposing any real files.
 
 If you want to share a real directory, set `share_dir` in your config. Otherwise, the dummy file is used automatically.
 

@@ -304,7 +304,7 @@ mod tests {
 
     #[test]
     fn save_keeps_comments_and_other_sections() {
-        let dir = std::env::temp_dir().join(format!("mplayer-settings-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("musa-settings-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         std::fs::write(

@@ -1,14 +1,22 @@
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [package]
-authors = ["yasssine <yassine.bna@proton.me>"]
-name = "mplayer-client"
-version = "0.1.1"
+authors = [
+    "yasssine <yassine.bna@proton.me>",
+    "Tommi Niemi <tommi@rotko.net>",
+]
+# "musa" is taken on crates.io; the binary is still called musa
+name = "musa-player"
+version = "0.2.0"
 edition = "2021"
 readme = "README.md"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/yassinebenarbia/mplayer-client"
-description = "Terminal based client for the mplayer-server server"
-keywords = ["music", "music-client", "mplayer-client", "mplayer", "linux", "dbus", "zbus", "audio", "playback", "mplayer-server"]
+description = "musa: terminal music player with built-in Soulseek, the TUI for musad"
+keywords = ["music", "music-player", "tui", "soulseek", "dbus"]
+
+[[bin]]
+name = "musa"
+path = "src/main.rs"
 
 
 [dependencies]

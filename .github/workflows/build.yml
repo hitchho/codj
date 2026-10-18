@@ -1,4 +1,4 @@
-name: "Build mplayer-client via Nix"
+name: "Build musa via Nix"
 
 on:
   push:

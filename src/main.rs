@@ -42,9 +42,9 @@ use crate::types::{OuterPlaylist, PlaylistOpperation};
 // NOTE: the return status of most functions is not currently documented, tho
 // usually they represent the success of the opperaiton/call.
 #[proxy(
-    interface = "org.zbus.mplayerServer",
-    default_service = "org.zbus.mplayer",
-    default_path = "/org/zbus/mplayer"
+    interface = "net.rotko.Musa.Player",
+    default_service = "net.rotko.Musa",
+    default_path = "/net/rotko/Musa"
 )]
 pub trait Server {
     /// Toggle playing status
@@ -229,7 +229,7 @@ async fn main() -> Result<()> {
     });
     let proxy = ServerProxy::new(&connection).await?;
     proxy.get_playing_index().await.unwrap_or_else(|_| {
-        panic!("Mplayer server is not Up, aborting..");
+        panic!("musad is not running, start it first. aborting..");
     });
 
     init_panic_hook();
@@ -241,9 +241,15 @@ async fn main() -> Result<()> {
     let config_path = if args.len() > 1 {
         args[1].clone()
     } else {
-        let mut home = env::var("HOME").unwrap().to_string();
-        home.push_str("/.config/mplayer-client/config.toml");
-        home
+        // ~/.config/musa, or the config from before the rename
+        let home = env::var("HOME").unwrap().to_string();
+        let new = format!("{home}/.config/musa/config.toml");
+        let old = format!("{home}/.config/mplayer-client/config.toml");
+        if !std::path::Path::new(&new).exists() && std::path::Path::new(&old).exists() {
+            old
+        } else {
+            new
+        }
     };
     let config = if args.len() > 1 {
         Config::parse_config(&config_path).unwrap()
