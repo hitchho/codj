@@ -2074,7 +2074,8 @@ impl<'a> UI<'a> {
                 .border_style(Style::default().fg(Color::Yellow)),
         )
         .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
-        let selected = (!self.queue.is_empty()).then_some(view.selected.min(self.queue.len() - 1));
+        // `then`, not `then_some`: the index must not be computed for an empty queue
+        let selected = (!self.queue.is_empty()).then(|| view.selected.min(self.queue.len() - 1));
         let mut state = TableState::new().with_selected(selected);
         frame.render_stateful_widget(table, area, &mut state);
     }
