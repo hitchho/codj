@@ -16,6 +16,7 @@ ___
 - vim-style keys: `j`/`k`, `gg`/`G`, `h`/`l` seek, `H`/`L` volume, `ZZ` / `:q` to quit
 - regex search over title, artist and file name (`f` or `/`); no match? `Enter` searches Soulseek
 - play queue (`q` to queue, `Shift+Q` to open it)
+- "more like this" (`m`): musad analyzes your library locally and queues similar-sounding tracks
 - Soulseek search, filtering, downloads with a concurrency limit and reorderable queue; finished downloads show up in the library
 - `:settings` panel, saved straight to your config file
 - lyrics, playlists and Lua scripting

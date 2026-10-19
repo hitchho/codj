@@ -11,6 +11,7 @@
 |List|Normal|`Space` or `Enter`|Play the music under selection|
 |List|Normal|`s`|Scroll to the currently playing music|
 |List|Normal|`q`|Add the music under selection to the play queue (the list title shows the queue length)|
+|List|Normal|`m`|Queue 5 tracks that sound like the one under selection (needs musad's audio analysis; the list title shows the highlighted track's estimated BPM and loudness)|
 |List|Normal|`Shift + q`|Open / close the queue panel|
 |List|Normal|`h` / `l`|Seek 5 seconds back / forward|
 |List|Normal|`Shift + h` / `Shift + l`|Volume down / up|

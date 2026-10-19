@@ -375,6 +375,12 @@ pub struct UI<'a> {
     queue: Vec<crate::types::OuterMusic>,
     /// the queue panel, when open
     queue_view: Option<QueueView>,
+    /// (analyzed, queued) of the server's audio analysis
+    analysis_progress: (u32, u32),
+    /// path, bpm and loudness of the highlighted track, once analyzed
+    selected_features: Option<(String, f64, f64)>,
+    /// short-lived message in the music list title
+    list_note: Option<(String, Instant)>,
     /// Soulseek status message
     pub soulseek_status: String,
     /// Active downloads for display
@@ -627,6 +633,7 @@ impl ListMode {
                                 's' => ui.goto_playing(),
                                 'g' => ui.anticipate('g'),
                                 'q' => ui.queue_selected(false).await,
+                                'm' => ui.queue_similar().await,
                                 'h' => ui.previous_5s().await,
                                 'l' => ui.next_5s().await,
                                 // some terminals send shifted letters without the SHIFT flag
@@ -1297,6 +1304,9 @@ impl<'a> UI<'a> {
             settings_view: None,
             queue: Vec::new(),
             queue_view: None,
+            analysis_progress: (0, 0),
+            selected_features: None,
+            list_note: None,
             soulseek_status: String::new(),
             soulseek_download_list: Vec::new(),
             soulseek_selected: 0,
@@ -2082,11 +2092,62 @@ impl<'a> UI<'a> {
 
     /// Title of the music list, with the queue length once something is queued
     fn musics_title(&self) -> String {
-        if self.queue.is_empty() {
-            "Musics".to_string()
-        } else {
-            format!("Musics · queue {}", self.queue.len())
+        let mut title = "Musics".to_string();
+        if !self.queue.is_empty() {
+            title += &format!(" · queue {}", self.queue.len());
         }
+        if let Some((note, at)) = &self.list_note {
+            if at.elapsed() < Duration::from_secs(4) {
+                return format!("{title} · {note}");
+            }
+        }
+        if let Some((path, bpm, db)) = &self.selected_features {
+            if self.selected_path().as_deref() == Some(path.as_str()) {
+                title += &format!(" · ~{bpm:.0} bpm {db:.0} dB");
+            }
+        }
+        let (done, total) = self.analysis_progress;
+        if done < total {
+            title += &format!(" · analyzing {done}/{total}");
+        }
+        title
+    }
+
+    fn selected_path(&self) -> Option<String> {
+        self.music_list
+            .musics
+            .get(self.music_list.selected)
+            .map(|m| <&std::path::Path>::from(&m.path).to_string_lossy().into_owned())
+    }
+
+    /// Fetches analysis progress and the highlighted track's tempo/loudness
+    pub async fn poll_analysis(&mut self) {
+        if let Ok(progress) = self.state.proxy.analysis_status().await {
+            self.analysis_progress = progress;
+        }
+        let Some(path) = self.selected_path() else {
+            self.selected_features = None;
+            return;
+        };
+        if let Ok((bpm, db, true)) = self.state.proxy.get_features(&path).await {
+            self.selected_features = Some((path, bpm, db));
+        }
+    }
+
+    /// `m`: queue tracks that sound like the highlighted one
+    async fn queue_similar(&mut self) {
+        let Some(path) = self.selected_path() else { return };
+        let note = match self.state.proxy.queue_similar(&path, 5).await {
+            Ok(0) if self.analysis_progress.0 < self.analysis_progress.1 => format!(
+                "not analyzed yet ({}/{})",
+                self.analysis_progress.0, self.analysis_progress.1
+            ),
+            Ok(0) => "nothing similar to queue".to_string(),
+            Ok(n) => format!("queued {n} similar"),
+            Err(e) => format!("similar failed: {e}"),
+        };
+        self.list_note = Some((note, Instant::now()));
+        self.poll_queue().await;
     }
 
     /// Shift+letter in the music list; returns true to quit

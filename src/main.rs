@@ -75,6 +75,12 @@ pub trait Server {
     fn queue_move(&self, pos: u32, up: bool) -> Result<RunStatus>;
     fn queue_play(&self, pos: u32) -> Result<RunStatus>;
     fn get_queue(&self) -> Result<Vec<OuterMusic>>;
+    /// (analyzed, queued) of the server's audio analysis
+    fn analysis_status(&self) -> Result<(u32, u32)>;
+    /// (bpm, loudness dBFS, analyzed)
+    fn get_features(&self, path: &str) -> Result<(f64, f64, bool)>;
+    /// queues the `n` tracks that sound most like `path`; returns how many were added
+    fn queue_similar(&self, path: &str, n: u32) -> Result<u32>;
     /// Sorts playlist
     fn sort(&self, sort: Sort) -> Result<RunStatus>;
     /// Changes the repeat state of plalyist
@@ -275,6 +281,7 @@ async fn main() -> Result<()> {
         if last_soulseek_poll.map_or(true, |t| t.elapsed() >= soulseek_poll) {
             ui.poll_soulseek_results().await;
             ui.poll_queue().await;
+            ui.poll_analysis().await;
             last_soulseek_poll = Some(std::time::Instant::now());
         }
         let frame = ui.fps_controller.frame_duration();
