@@ -2103,7 +2103,11 @@ impl<'a> UI<'a> {
         }
         if let Some((path, bpm, db)) = &self.selected_features {
             if self.selected_path().as_deref() == Some(path.as_str()) {
-                title += &format!(" · ~{bpm:.0} bpm {db:.0} dB");
+                // 0: no beat found
+                if *bpm >= 1. {
+                    title += &format!(" · ~{bpm:.0} bpm");
+                }
+                title += &format!(" {db:.0} dB");
             }
         }
         let (done, total) = self.analysis_progress;
