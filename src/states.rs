@@ -359,6 +359,17 @@ impl<'a> State<'a> {
         self.step_volume(-0.1).await;
     }
 
+    /// Sets the volume to `volume` (0..=1), rounded to whole percent
+    pub(crate) async fn set_volume(&mut self, volume: f32) {
+        let volume = ((volume * 100.0).round() / 100.0).clamp(0.0, 1.0);
+        if (volume - self.batch.volume).abs() < f32::EPSILON {
+            return;
+        }
+        let _ = self.proxy.volume(volume).await;
+        self.batch.volume = volume;
+        self.batch.own_volume_changes += 1;
+    }
+
     /// Changes the volume by `delta`, keeping it in 0..=1. The cached value is updated at once
     /// so several presses in one frame add up instead of all starting from the same value.
     async fn step_volume(&mut self, delta: f32) {

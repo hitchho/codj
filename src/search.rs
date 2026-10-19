@@ -62,6 +62,14 @@ pub fn file_name<'f>(path: &'f FilePath<'f>) -> String {
         .unwrap_or_default()
 }
 
+/// File name without its extension, to show untagged files
+pub fn file_stem<'f>(path: &'f FilePath<'f>) -> String {
+    let path: &Path = path.into();
+    path.file_stem()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

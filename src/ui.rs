@@ -13,7 +13,9 @@ use crate::style::UIStyle;
 use crate::types::Music;
 use crate::{Repeat, Sort};
 use crossterm::event::Event as CrosstermEvent;
-use crossterm::event::{self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use futures::StreamExt;
 use mlua::prelude::*;
 use mlua::Lua;
@@ -40,6 +42,11 @@ pub struct ViewConfiguration {
     playlists: bool,
 }
 
+/// ⏮ ⏸ ⏭ ⏹, three columns each
+const BAR_CONTROLS_WIDTH: u16 = 12;
+/// "vol 100%"
+const VOLUME_LABEL_WIDTH: u16 = 8;
+
 pub struct ViewGeometry {
     frame: Rect,
     list: Rect,
@@ -48,6 +55,9 @@ pub struct ViewGeometry {
     actions: Rect,
     volume: Rect,
     slider: Rect,
+    bar: Rect,
+    elapsed: Rect,
+    total: Rect,
     search: Option<Rect>,
     command: Option<Rect>,
     configuration: ViewConfiguration,
@@ -74,6 +84,9 @@ impl ViewGeometry {
             actions,
             volume,
             slider,
+            bar: frame,
+            elapsed: frame,
+            total: frame,
             search,
             command,
             configuration,
@@ -102,114 +115,56 @@ impl ViewGeometry {
         init
     }
 
-    fn calculate_list(&mut self) {
-        let mut init = self.frame;
-        init.height = init.height.saturating_sub(7);
-        if self.configuration.search || self.configuration.command {
-            init.height = init.height.saturating_sub(3);
-        }
-        if self.configuration.lyrics || self.configuration.playlists {
-            init.height /= 2;
-            init.height = init.height.saturating_sub(1);
-        }
-        self.list = init
-    }
-
-    fn calculate_lyrics(&mut self) {
-        if self.configuration.lyrics {
-            let mut init = self.frame;
-            init.height = init.height.saturating_sub(4) / 2;
-            init.y = init.height.saturating_sub(2);
-            if self.configuration.search {
-                init.height = init.height.saturating_sub(1);
-                init.y += 1;
-            }
-            self.lyrics = Some(init);
-        } else {
-            self.lyrics = None;
-        }
-    }
-
-    fn calculate_playlists(&mut self) {
-        if self.configuration.playlists {
-            let mut init = self.frame;
-            init.height = init.height.saturating_sub(4) / 2;
-            init.y = init.height.saturating_sub(2);
-            if self.configuration.search {
-                init.height = init.height.saturating_sub(1);
-                init.y += 1;
-            }
-            self.playlists = Some(init);
-        } else {
-            self.playlists = None;
-        }
-    }
-
-    fn calculate_search(&mut self) {
-        if self.configuration.search {
-            let mut init = self.frame;
-            init.y = init.height.saturating_sub(10);
-            if self.configuration.lyrics {
-                init.y /= 2;
-                init.y = init.y.saturating_sub(1);
-            }
-            init.height = 3;
-            self.search = Some(init);
-        } else {
-            self.search = None;
-        }
-    }
-
-    fn calculate_command(&mut self) {
-        if self.configuration.command {
-            let mut init = self.frame;
-            init.y = init.height.saturating_sub(10);
-            if self.configuration.lyrics {
-                init.y /= 2;
-                init.y = init.y.saturating_sub(1);
-            }
-            init.height = 3;
-            self.command = Some(init);
-        } else {
-            self.command = None;
-        }
-    }
-
-    fn calculate_actions(&mut self) {
-        let mut area = self.frame;
-        if area.height > 7 {
-            area.y = area.height.saturating_sub(3).saturating_sub(4);
-            area.height = 3;
-        }
-        self.actions = area;
-    }
-
-    fn calculate_slider(&mut self) {
-        let mut area = self.frame;
-        area.y = area.height.saturating_sub(4);
-        area.height = 3;
-        area.width = (area.width / 5) * 4_u16;
-        self.slider = area;
-    }
-
-    fn calculate_volume(&mut self) {
-        let mut area = self.frame;
-        area.y = area.height.saturating_sub(4);
-        area.x = (area.width / 5) * 4_u16;
-        area.width -= area.x;
-        area.height = 3;
-        self.volume = area;
-    }
-
+    /// Splits the screen: the list on top, the search/command input under it, lyrics or
+    /// playlists below that, and the 3-row now-playing bar at the bottom
     pub fn calculate_gemoetry(&mut self) {
-        self.calculate_list();
-        self.calculate_lyrics();
-        self.calculate_playlists();
-        self.calculate_search();
-        self.calculate_command();
-        self.calculate_actions();
-        self.calculate_slider();
-        self.calculate_volume();
+        let [main, bar] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).areas(self.frame);
+        let panel_open = self.configuration.lyrics || self.configuration.playlists;
+        let (top, panel) = if panel_open {
+            let [top, panel] =
+                Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .areas(main);
+            (top, Some(panel))
+        } else {
+            (main, None)
+        };
+        let input_open = self.configuration.search || self.configuration.command;
+        let (list, input) = if input_open {
+            let [list, input] =
+                Layout::vertical([Constraint::Min(0), Constraint::Length(3)]).areas(top);
+            (list, Some(input))
+        } else {
+            (top, None)
+        };
+        self.list = list;
+        self.lyrics = panel.filter(|_| self.configuration.lyrics);
+        self.playlists = panel.filter(|_| self.configuration.playlists);
+        self.search = input.filter(|_| self.configuration.search);
+        self.command = input.filter(|_| self.configuration.command);
+
+        // inside the bar: controls, elapsed, seek bar, total, volume
+        self.bar = bar;
+        let inner = Block::bordered().inner(bar);
+        let [controls, _, elapsed, slider, total, _, volume] = Layout::horizontal([
+            Constraint::Length(BAR_CONTROLS_WIDTH),
+            Constraint::Length(1),
+            Constraint::Length(6),
+            Constraint::Min(4),
+            Constraint::Length(6),
+            Constraint::Length(2),
+            Constraint::Length(16),
+        ])
+        .areas(inner);
+        self.actions = controls;
+        self.elapsed = elapsed;
+        self.slider = slider;
+        self.total = total;
+        self.volume = volume;
+    }
+
+    pub fn bar_geo(&self) -> Rect {
+        self.bar
     }
 
     pub fn set_frame(&mut self, frame: Rect) {
@@ -381,6 +336,11 @@ pub struct UI<'a> {
     selected_features: Option<(String, f64, f64)>,
     /// short-lived message in the music list title
     list_note: Option<(String, Instant)>,
+    /// where the repeat and sort labels were drawn in the bar, for clicks
+    bar_repeat: Rect,
+    bar_sort: Rect,
+    /// last list click (row index, time), a second click on the same row plays it
+    last_click: Option<(usize, Instant)>,
     /// Soulseek status message
     pub soulseek_status: String,
     /// Active downloads for display
@@ -1333,6 +1293,9 @@ impl<'a> UI<'a> {
             analysis_progress: (0, 0),
             selected_features: None,
             list_note: None,
+            bar_repeat: Rect::default(),
+            bar_sort: Rect::default(),
+            last_click: None,
             soulseek_status: String::new(),
             soulseek_download_list: Vec::new(),
             soulseek_selected: 0,
@@ -1695,7 +1658,7 @@ impl<'a> UI<'a> {
             Constraint::Fill(3),
             Constraint::Fill(2),
             Constraint::Fill(1),
-            Constraint::Fill(1),
+            Constraint::Length(8),
         ];
 
         let block = match self.region {
@@ -1760,7 +1723,7 @@ impl<'a> UI<'a> {
         let widths = [
             Constraint::Fill(3),
             Constraint::Fill(2),
-            Constraint::Fill(1),
+            Constraint::Length(8),
         ];
 
         let block = match self.region {
@@ -1865,15 +1828,6 @@ impl<'a> UI<'a> {
         format!("{}:{}", sminutes, sseconds)
     }
 
-    /// Returns the current playing timer as a string "xx:yy"
-    fn timer(&mut self) -> String {
-        format!(
-            "{}/{}",
-            UI::duration_to_string(self.state.played_duration().as_secs()),
-            UI::duration_to_string(self.state.playing_music().length.as_secs())
-        )
-    }
-
     /// Calculates the percentage of the seeker with respect with the full song length
     fn seeker_percent(&self) -> f64 {
         let current = self.state.played_duration().as_secs();
@@ -1921,98 +1875,244 @@ impl<'a> UI<'a> {
         }
     }
 
-    /// Renders the displayed time seeker
-    pub fn render_seeker(&mut self, frame: &mut Frame) {
-        let selected_music = self.state.playing_music();
-        let style = match self.region {
-            Region::Seeker => Style::new().fg(self.style.seeker_style.active_region_color),
-            _ => Style::new().fg(self.style.seeker_style.passive_region_color),
-        };
+    /// Mouse: click a track to select it and again to play, wheel scrolls; in the bar, click
+    /// the controls, click/drag the seek bar, click or wheel the volume, click repeat/sort to
+    /// change them
+    pub async fn handle_mouse(&mut self, m: &MouseEvent) {
+        let at = Position::new(m.column, m.row);
+        let overlay =
+            self.soulseek_visible || self.queue_view.is_some() || self.settings_view.is_some();
+        let list = self.geometry.list_geo();
+        let in_list = !overlay && list.contains(at) && !matches!(self.mode, ListMode::Command);
+        match m.kind {
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+                let down = matches!(m.kind, MouseEventKind::ScrollDown);
+                if in_list {
+                    self.scroll_list_by(if down { 3 } else { -3 });
+                } else if self.geometry.slider_geo().contains(at) {
+                    if down { self.previous_5s().await } else { self.next_5s().await }
+                } else if self.geometry.volume_geo().contains(at) {
+                    if down { self.decrease_volume().await } else { self.increase_volume().await }
+                }
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if in_list {
+                    self.click_list(at, list).await;
+                } else if self.geometry.slider_geo().contains(at) {
+                    self.seek_to_column(m.column).await;
+                } else if self.geometry.volume_geo().contains(at) {
+                    self.volume_to_column(m.column).await;
+                } else if self.geometry.actions_geo().contains(at) {
+                    let i = (m.column - self.geometry.actions_geo().x) / 3;
+                    self.action = match i {
+                        0 => PowerActions::BackwardSkip,
+                        1 => PowerActions::TogglePlay,
+                        2 => PowerActions::ForwardSkip,
+                        _ => PowerActions::Stop,
+                    };
+                    self.preform_action().await;
+                } else if self.bar_repeat.contains(at) {
+                    self.action = PowerActions::Repeat;
+                    self.cycle();
+                    self.repeat().await;
+                } else if self.bar_sort.contains(at) {
+                    self.action = PowerActions::Sort;
+                    self.cycle();
+                    self.sort().await;
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if self.geometry.slider_geo().contains(at) {
+                    self.seek_to_column(m.column).await;
+                } else if self.geometry.volume_geo().contains(at) {
+                    self.volume_to_column(m.column).await;
+                }
+            }
+            _ => {}
+        }
+    }
 
+    async fn click_list(&mut self, at: Position, list: Rect) {
+        // border and header take the first two rows
+        let first = list.y + 2;
+        if at.y < first || at.y + 1 >= list.y + list.height {
+            return;
+        }
+        let index = self.music_list.state.offset() + (at.y - first) as usize;
+        if index >= self.music_list.musics.len() {
+            return;
+        }
+        self.select_list_region();
+        let again = self
+            .last_click
+            .is_some_and(|(i, t)| i == index && t.elapsed() < Duration::from_millis(500));
+        self.music_list.selected = index;
+        if again {
+            self.last_click = None;
+            self.play_selected_music().await;
+            if matches!(self.mode, ListMode::Search | ListMode::AfterSearch) {
+                self.leave_search();
+            }
+        } else {
+            self.last_click = Some((index, Instant::now()));
+        }
+    }
+
+    /// Moves the selection by `rows`, stopping at the ends (the wheel shouldn't wrap around)
+    fn scroll_list_by(&mut self, rows: isize) {
+        let len = self.music_list.musics.len();
+        if len == 0 {
+            return;
+        }
+        let target = self.music_list.selected as isize + rows;
+        self.music_list.selected = target.clamp(0, len as isize - 1) as usize;
+    }
+
+    async fn seek_to_column(&mut self, column: u16) {
+        let slider = self.geometry.slider_geo();
+        let ratio = column.saturating_sub(slider.x) as f64 / slider.width.max(1) as f64;
+        let ratio = ratio.clamp(0., 1.);
+        let length = self.state.playing_music_duration();
+        let target = length.mul_f64(ratio);
+        self.power_bar.current_timer = target;
+        self.state.batch.played_duration = target;
+        self.goto_xs(target).await;
+    }
+
+    async fn volume_to_column(&mut self, column: u16) {
+        // the gauge draws "vol 100%" and a space before its line
+        let area = self.geometry.volume_geo();
+        let line_x = area.x + VOLUME_LABEL_WIDTH + 1;
+        let width = area.width.saturating_sub(VOLUME_LABEL_WIDTH + 1).max(1);
+        let ratio = column.saturating_sub(line_x) as f32 / (width - 1).max(1) as f32;
+        let ratio = ratio.clamp(0., 1.);
+        self.state.set_volume(ratio).await;
+    }
+
+    /// Renders the now-playing bar: track, controls, seek bar and volume in one bordered row
+    pub fn render_bar(&mut self, frame: &mut Frame) {
+        let active = matches!(self.region, Region::Action | Region::Seeker | Region::Volume);
+        let border = if active {
+            self.style.action_style.active_region_color
+        } else {
+            self.style.action_style.passive_region_color
+        };
+        let hilight = Style::new()
+            .fg(self.style.action_style.hilight_color)
+            .add_modifier(Modifier::REVERSED);
+        let action_index = self.get_action_index();
+        let in_actions = matches!(self.region, Region::Action);
+        let chosen = |i: usize| in_actions && action_index == i;
+
+        let music = self.state.playing_music();
+        let name = if music.title.trim().is_empty() {
+            crate::search::file_stem(&music.path)
+        } else {
+            music.title.to_owned()
+        };
+        let mut title = vec![Span::from(" "), Span::from(name).bold()];
+        if !music.artist.trim().is_empty() {
+            title.push(Span::from(format!(" — {}", music.artist)));
+        }
+        title.push(Span::from(" "));
+
+        // repeat and sort: small, on the right; in the controls h/l reach them and Enter changes
+        // them (italic until applied)
+        let mut repeat = Span::from(repeat_label(&self.displayed_repeat));
+        let mut sort = Span::from(sort_label(&self.displayed_sort));
+        if self.displayed_repeat != self.state.batch.repeat {
+            repeat = repeat.italic();
+        }
+        if self.displayed_sort != self.state.batch.sort {
+            sort = sort.italic();
+        }
+        repeat = if chosen(4) { repeat.patch_style(hilight) } else { repeat.dim() };
+        sort = if chosen(5) { sort.patch_style(hilight) } else { sort.dim() };
+        let bar = self.geometry.bar_geo();
+        let (repeat_w, sort_w) = (repeat.width() as u16, sort.width() as u16);
+        // right-aligned in the top border, before the corner and one space
+        let sort_x = (bar.x + bar.width).saturating_sub(2 + sort_w);
+        let repeat_x = sort_x.saturating_sub(3 + repeat_w);
+        self.bar_sort = Rect::new(sort_x, bar.y, sort_w, 1);
+        self.bar_repeat = Rect::new(repeat_x, bar.y, repeat_w, 1);
+        let right = Line::from(vec![
+            Span::from(" "),
+            repeat,
+            Span::from(" · ").dim(),
+            sort,
+            Span::from(" "),
+        ])
+        .right_aligned();
+
+        Block::bordered()
+            .title(Line::from(title))
+            .title(right)
+            .border_style(Style::new().fg(border))
+            .render(self.geometry.bar_geo(), frame.buffer_mut());
+
+        let playing = matches!(self.state.status(), PlayingStatus::Playing);
+        let icons = ["⏮", if playing { "⏸" } else { "⏵" }, "⏭", "⏹"];
+        let controls: Vec<Span> = icons
+            .iter()
+            .enumerate()
+            .map(|(i, icon)| {
+                let span = Span::from(format!(" {icon} "));
+                if chosen(i) {
+                    span.style(hilight)
+                } else {
+                    span
+                }
+            })
+            .collect();
+        Paragraph::new(Line::from(controls))
+            .render(self.geometry.actions_geo(), frame.buffer_mut());
+
+        let elapsed = UI::duration_to_string(self.state.played_duration().as_secs());
+        let total = UI::duration_to_string(self.state.playing_music().length.as_secs());
+        let time_style = Style::new().fg(self.style.seeker_style.passive_region_color);
+        Paragraph::new(elapsed)
+            .style(time_style)
+            .right_aligned()
+            .render(self.geometry.elapsed, frame.buffer_mut());
+        Paragraph::new(total)
+            .style(time_style)
+            .right_aligned()
+            .render(self.geometry.total, frame.buffer_mut());
+
+        let seeker_fg = if matches!(self.region, Region::Seeker) {
+            self.style.seeker_style.active_region_color
+        } else {
+            self.style.seeker_style.fg_seeker_color
+        };
         LineGauge::default()
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(selected_music.title.to_owned()),
-            )
-            .style(style)
-            .unfilled_style(Style::default().fg(Color::Black))
+            .unfilled_style(Style::default().fg(Color::DarkGray))
             .line_set(symbols::line::THICK)
             .filled_style(
                 Style::default()
-                    .fg(self.style.seeker_style.fg_seeker_color)
-                    .bg(self.style.seeker_style.bg_seeker_color)
-                    .add_modifier(Modifier::ITALIC),
+                    .fg(seeker_fg)
+                    .bg(self.style.seeker_style.bg_seeker_color),
             )
-            .label(self.timer())
+            .label("")
             .ratio(self.seeker_percent())
             .render(self.geometry.slider_geo(), frame.buffer_mut());
-    }
 
-    /// calculate_volume_area() -> Rect
-    /// Renders the displayed volume slider
-    pub fn render_volume(&mut self, frame: &mut Frame) {
-        let style = match self.region {
-            Region::Volume => Style::new().fg(self.style.volume_style.active_region_color),
-            _ => Style::new().fg(self.style.volume_style.passive_region_color),
+        let volume_fg = if matches!(self.region, Region::Volume) {
+            self.style.volume_style.active_region_color
+        } else {
+            self.style.volume_style.fg_volume_color
         };
-
+        let volume = self.state.volume().clamp(0., 1.);
         LineGauge::default()
-            .block(Block::default().borders(Borders::ALL).title("Volume"))
-            .style(style)
-            .unfilled_style(Style::default().fg(Color::Black))
+            .style(Style::new().fg(self.style.volume_style.passive_region_color))
+            .unfilled_style(Style::default().fg(Color::DarkGray))
             .filled_style(
                 Style::default()
-                    .fg(self.style.volume_style.fg_volume_color)
-                    .bg(self.style.volume_style.bg_volume_color)
-                    .add_modifier(Modifier::ITALIC),
+                    .fg(volume_fg)
+                    .bg(self.style.volume_style.bg_volume_color),
             )
-            .ratio(self.state.volume() as f64)
+            .label(format!("vol {:>3}%", (volume * 100.).round() as u32))
+            .ratio(volume as f64)
             .render(self.geometry.volume_geo(), frame.buffer_mut());
-    }
-
-    /// Renders the displayed actions
-    pub fn render_actions(&mut self, frame: &mut Frame) {
-        let style = match self.region {
-            Region::Action => Style::new().fg(self.style.action_style.active_region_color),
-            _ => Style::new().fg(self.style.action_style.passive_region_color),
-        };
-
-        let mut actions = vec![
-            Span::from("⏮"),
-            Span::from("⏵"),
-            Span::from("⏭"),
-            Span::from("⏹"),
-        ];
-
-        if self.displayed_repeat.eq(&self.state.batch.repeat) {
-            actions.push(self.displayed_repeat.as_span().underlined());
-        } else {
-            actions.push(self.displayed_repeat.as_span());
-        }
-
-        if self.displayed_sort.eq(&self.state.batch.sort) {
-            actions.push(self.displayed_sort.as_span().underlined());
-        } else {
-            actions.push(self.displayed_sort.as_span());
-        }
-
-        let status = self.state.status();
-        if let PlayingStatus::Playing = status {
-            actions[1] = Span::from("⏸");
-        }
-
-        Tabs::new(actions)
-            .block(Block::default().title("Actions").borders(Borders::ALL))
-            .style(style)
-            .highlight_style(
-                Style::default()
-                    .fg(self.style.action_style.hilight_color)
-                    .underline_color(self.style.action_style.hilight_color),
-            )
-            .select(self.get_action_index())
-            .padding(" ", " ")
-            .render(self.geometry.actions_geo(), frame.buffer_mut());
     }
 
     /// Updates the music playing state
@@ -2030,7 +2130,7 @@ impl<'a> UI<'a> {
         for (index, music) in playlist.musics.iter().enumerate() {
             let music = music.to_owned();
             let title = if music.title.trim().is_empty() {
-                crate::search::file_name(&music.path)
+                crate::search::file_stem(&music.path)
             } else {
                 music.title
             };
@@ -2056,9 +2156,7 @@ impl<'a> UI<'a> {
         self.render_lyrics(frame);
         self.render_playlists(frame);
         self.render_commands(frame);
-        self.render_actions(frame);
-        self.render_volume(frame);
-        self.render_seeker(frame);
+        self.render_bar(frame);
         self.render_soulseek(frame);
         self.render_queue(frame);
         self.render_settings(frame);
@@ -2634,7 +2732,7 @@ impl<'a> UI<'a> {
         let quesize = self.music_list.musics.len();
         let selected_index = self.music_list.selected;
         if selected_index == 0 {
-            self.music_list.selected = quesize - 1;
+            self.music_list.selected = quesize.saturating_sub(1);
         } else {
             self.music_list.selected -= 1;
         }
@@ -4136,5 +4234,25 @@ mod soulseek_tests {
         let new = vec![(3u32, 'c'), (2, 'b')];
         assert_eq!(anchored_index(&old, &new, 1, |a, b| a.0 == b.0), 1);
         assert_eq!(anchored_index(&old, &new, 0, |a, b| a.0 == b.0), 0);
+    }
+}
+
+fn repeat_label(repeat: &Repeat) -> &'static str {
+    match repeat {
+        Repeat::SameMusic => "repeat one",
+        Repeat::AllMusics => "repeat all",
+        Repeat::Dont => "no repeat",
+    }
+}
+
+fn sort_label(sort: &Sort) -> &'static str {
+    match sort {
+        Sort::ByTitleAscending => "title ↑",
+        Sort::ByTitleDescending => "title ↓",
+        Sort::ByDurationAscending => "length ↑",
+        Sort::ByDurationDescending => "length ↓",
+        Sort::ArtistAscending => "artist ↑",
+        Sort::ArtistDescending => "artist ↓",
+        Sort::Shuffle => "shuffle",
     }
 }

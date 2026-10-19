@@ -59,6 +59,23 @@
 |Volume|Normal|`h` or `j`|Decrease Volume|
 |Volume|Normal|`Alt + l` or `Alt + h`|Select the `Seeker` region|
 
+`Actions`, `Seeker` and `Volume` are the parts of the now-playing bar at the bottom: the controls on the left, the seek bar, and the volume on the right. Repeat and sort are shown in the bar's top-right corner; `h`/`l` in the controls reach them.
+
+# Mouse
+
+|where|mouse|action|
+|---|---|---|
+|Music list|click|Select the track|
+|Music list|click the same track again|Play it|
+|Music list|wheel|Scroll|
+|Bar controls|click `⏮` `⏵`/`⏸` `⏭` `⏹`|Previous, play/pause, next, stop|
+|Seek bar|click or drag|Jump to that point|
+|Seek bar|wheel|Seek 5 s|
+|Volume|click, drag or wheel|Set the volume|
+|`repeat …` / `sort …` in the bar title|click|Switch to the next mode|
+
+The client captures the mouse, so selecting text in the terminal needs `Shift` held (in most terminals).
+
 # Search filters
 
 |filter|description|

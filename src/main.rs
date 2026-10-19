@@ -6,7 +6,10 @@ use std::{
 
 use crossterm::{
     event::{self, Event},
-    event::{KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags},
+    event::{
+        DisableMouseCapture, EnableMouseCapture, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     terminal::{
         disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
         LeaveAlternateScreen,
@@ -227,6 +230,7 @@ pub fn init_panic_hook() {
     std::panic::set_hook(Box::new(move |panic_info| {
         // intentionally ignore errors here since we're already in a panic
         let _ = stdout().execute(PopKeyboardEnhancementFlags);
+        let _ = stdout().execute(DisableMouseCapture);
         disable_raw_mode().unwrap();
         stdout().execute(LeaveAlternateScreen).unwrap();
         original_hook(panic_info);
@@ -246,6 +250,7 @@ async fn main() -> Result<()> {
     init_panic_hook();
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
+    stdout().execute(EnableMouseCapture)?;
     // lets terminals that speak the kitty protocol report Ctrl+Enter apart from Enter
     let enhanced = supports_keyboard_enhancement().unwrap_or(false);
     if enhanced {
@@ -303,6 +308,7 @@ async fn main() -> Result<()> {
     if enhanced {
         stdout().execute(PopKeyboardEnhancementFlags)?;
     }
+    stdout().execute(DisableMouseCapture)?;
     disable_raw_mode()?;
     stdout().execute(LeaveAlternateScreen)?;
     Ok(())
@@ -313,10 +319,14 @@ async fn main() -> Result<()> {
 async fn handle_events<'a>(ui: &mut ui::UI<'a>, frame: std::time::Duration) -> io::Result<bool> {
     let mut wait = frame;
     while event::poll(wait)? {
-        if let Event::Key(key) = event::read()? {
-            if ui::Region::handle_events(ui, &key).await? {
-                return Ok(true);
+        match event::read()? {
+            Event::Key(key) => {
+                if ui::Region::handle_events(ui, &key).await? {
+                    return Ok(true);
+                }
             }
+            Event::Mouse(mouse) => ui.handle_mouse(&mouse).await,
+            _ => {}
         }
         wait = std::time::Duration::ZERO;
     }
