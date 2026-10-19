@@ -6,7 +6,11 @@ use std::{
 
 use crossterm::{
     event::{self, Event},
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    event::{KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags},
+    terminal::{
+        disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement, EnterAlternateScreen,
+        LeaveAlternateScreen,
+    },
     ExecutableCommand,
 };
 use parser::*;
@@ -222,6 +226,7 @@ pub fn init_panic_hook() {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         // intentionally ignore errors here since we're already in a panic
+        let _ = stdout().execute(PopKeyboardEnhancementFlags);
         disable_raw_mode().unwrap();
         stdout().execute(LeaveAlternateScreen).unwrap();
         original_hook(panic_info);
@@ -241,6 +246,13 @@ async fn main() -> Result<()> {
     init_panic_hook();
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
+    // lets terminals that speak the kitty protocol report Ctrl+Enter apart from Enter
+    let enhanced = supports_keyboard_enhancement().unwrap_or(false);
+    if enhanced {
+        stdout().execute(PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+        ))?;
+    }
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
 
     let args: Vec<String> = env::args().collect();
@@ -288,6 +300,9 @@ async fn main() -> Result<()> {
         should_quit = handle_events(&mut ui, frame).await?;
     }
 
+    if enhanced {
+        stdout().execute(PopKeyboardEnhancementFlags)?;
+    }
     disable_raw_mode()?;
     stdout().execute(LeaveAlternateScreen)?;
     Ok(())

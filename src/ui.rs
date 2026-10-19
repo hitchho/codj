@@ -539,10 +539,28 @@ pub enum Region {
     Soulseek,
 }
 
+/// Ctrl+Enter searches soulseek even when the library has matches. Terminals without the kitty
+/// keyboard protocol send Ctrl+Enter as plain Enter, so Ctrl+J and Alt+Enter do the same.
+fn is_soulseek_enter(key: &KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Enter => key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT),
+        KeyCode::Char('j') => key.modifiers == KeyModifiers::CONTROL,
+        _ => false,
+    }
+}
+
 impl ListMode {
     pub async fn handle_search<'a>(ui: &mut UI<'a>, key: &KeyEvent) {
         if key.kind == event::KeyEventKind::Press {
             ui.run_list_script(key, ListMode::Search);
+            if is_soulseek_enter(key) {
+                let query = ui.search_bufr.value().trim().to_string();
+                if !query.is_empty() {
+                    ui.leave_search();
+                    ui.soulseek_search(&query).await;
+                }
+                return;
+            }
             if key.modifiers == KeyModifiers::NONE {
                 match key.code {
                     KeyCode::Enter => {
@@ -580,6 +598,14 @@ impl ListMode {
     pub async fn handle_after_search<'a>(ui: &mut UI<'a>, key: &KeyEvent) -> std::io::Result<bool> {
         if key.kind == event::KeyEventKind::Press {
             ui.run_list_script(key, ListMode::AfterSearch);
+            if is_soulseek_enter(key) {
+                let query = ui.search_bufr.value().trim().to_string();
+                if !query.is_empty() {
+                    ui.leave_search();
+                    ui.soulseek_search(&query).await;
+                }
+                return Ok(false);
+            }
             match key.modifiers {
                 KeyModifiers::NONE => match key.code {
                     KeyCode::Char(c) => match c {
@@ -3233,7 +3259,10 @@ impl<'a> UI<'a> {
                 } else if self.music_list.musics.is_empty() {
                     "Search (no matches, Enter: search soulseek)".to_string()
                 } else {
-                    format!("Search ({} matches)", self.music_list.musics.len())
+                    format!(
+                        "Search ({} matches, Ctrl+Enter: search soulseek)",
+                        self.music_list.musics.len()
+                    )
                 };
                 frame.render_widget(
                     Paragraph::new(self.search_bufr.value()).block(Block::bordered().title(title)),

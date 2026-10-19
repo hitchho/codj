@@ -29,6 +29,7 @@
 |List|Normal|`G`|Go to the bottom of the list|
 |List|Normal|`/` or `f`|Enable `Search` mode: case-insensitive regex over title, artist and file name (`artist:`, `genre:`, `title:` to pick one field)|
 |List|Search|`Enter`|Play the selected match, or search soulseek for the query when nothing matches|
+|List|Search|`Ctrl + Enter`|Search soulseek for the query even when the library has matches (`Ctrl + j` or `Alt + Enter` in terminals that send Ctrl+Enter as plain Enter)|
 |List|Search|`Esc`|Close the search, back to the full list with the cursor on the highlighted track|
 |List|Search|`Up` / `Down`|Move through the matches while typing|
 |List|Normal|`:`|Enable `Command` mode|
