@@ -80,6 +80,48 @@ pub struct MixerInfo {
     pub xruns: u64,
 }
 
+/// State of the set runtime, see "Set runtime (D-Bus)" in `docs/dj-api.md`. D-Bus signature
+/// `(ssua(sss)a(ssdd)ibidba(ds))`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, Type)]
+pub struct SetState {
+    /// active set, "" = none
+    pub name: String,
+    pub file: String,
+    /// errors in the file (the last good version stays active)
+    pub errors: u32,
+    /// (id, title, path) in file order
+    pub tracks: Vec<(String, String, String)>,
+    /// (from id, to id, start beat on from's grid, length in beats)
+    pub mixes: Vec<(String, String, f64, f64)>,
+    /// armed or running mix, -1 = none
+    pub armed: i32,
+    /// the armed mix has started
+    pub running: bool,
+    /// deck playing the outgoing track of the armed mix, -1
+    pub out_deck: i32,
+    /// beats since the armed mix's start (negative before it), 0 if none
+    pub mix_beat: f64,
+    pub auto: bool,
+    /// upcoming automation of the armed mix: (mix beat, text), at most 8
+    pub next_items: Vec<(f64, String)>,
+}
+
+impl SetState {
+    pub fn is_active(&self) -> bool {
+        !self.name.is_empty()
+    }
+
+    /// the armed mix as an index, if there is one
+    pub fn armed_mix(&self) -> Option<usize> {
+        usize::try_from(self.armed).ok().filter(|i| *i < self.mixes.len())
+    }
+
+    /// index of the track with this id
+    pub fn track_index(&self, id: &str) -> Option<usize> {
+        self.tracks.iter().position(|t| t.0 == id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -91,5 +133,6 @@ mod tests {
             "(bsssddbddddubddddadsdd(ddd)ddb)"
         );
         assert_eq!(<MixerInfo as Type>::SIGNATURE.to_string(), "(dddsbt)");
+        assert_eq!(<SetState as Type>::SIGNATURE.to_string(), "(ssua(sss)a(ssdd)ibidba(ds))");
     }
 }

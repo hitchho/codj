@@ -1401,6 +1401,22 @@ impl<'a> UI<'a> {
         }
     }
 
+    /// `:edit`: the file to open in `$EDITOR`, once
+    pub fn dj_take_edit(&mut self) -> Option<std::path::PathBuf> {
+        self.dj.as_mut()?.take_edit_request()
+    }
+
+    pub fn dj_edited(&mut self, text: String) {
+        if let Some(dj) = self.dj.as_mut() {
+            dj.edited(text);
+        }
+    }
+
+    /// the keyboard-enhancement levels to push again after the terminal was given away
+    pub fn kbd_levels(&self) -> Vec<crossterm::event::KeyboardEnhancementFlags> {
+        crate::dj::kbd_levels(self.keyboard_enhanced, self.dj_kbd_pushed, self.dj_text_pushed)
+    }
+
     pub fn dj_tick(&mut self) {
         if let Some(dj) = self.dj.as_mut() {
             dj.tick(Instant::now());

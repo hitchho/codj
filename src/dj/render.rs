@@ -10,7 +10,7 @@ use ratatui::{
 };
 
 use super::wave::{draw_strip, time_to_col, Waveform};
-use crate::dj_types::{DeckInfo, MixerInfo};
+use crate::dj_types::{DeckInfo, MixerInfo, SetState};
 use crate::types::Music;
 
 /// Seconds of track shown by the zoomed strip around the playhead
@@ -20,6 +20,9 @@ const CUE_COLORS: [Color; 4] = [Color::Red, Color::Green, Color::Yellow, Color::
 const HOTCUE_KEYS: [[&str; 4]; 2] = [["1", "2", "3", "4"], ["7", "8", "9", "0"]];
 const DIM: Color = Color::DarkGray;
 const MIN_SIZE: (u16, u16) = (60, 14);
+/// rows of the set strip on a tall screen: title, tracks, progress, three rows of items
+const SET_FULL_H: u16 = 6;
+const SET_COLORS: (Color, Color) = (Color::Green, Color::Yellow);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Focus {
@@ -62,6 +65,10 @@ pub struct View<'a> {
     pub lib_total: usize,
     pub lib_sel: usize,
     pub release_events: bool,
+    /// the active set (None: no set runtime, or none active)
+    pub set: Option<&'a SetState>,
+    /// the set's errors, drawn over the decks
+    pub overlay: Option<&'a [String]>,
 }
 
 pub fn fmt_time(secs: f64) -> String {
@@ -105,10 +112,17 @@ pub fn draw(buf: &mut Buffer, area: Rect, v: &View) {
     let body_h = area.height - 2;
     let mixer_h = 4;
     let lib_h = if body_h >= 20 { (body_h / 4).clamp(5, 9) } else { 3 };
-    let decks_h = body_h.saturating_sub(mixer_h + lib_h);
+    let set_h = match (v.set, body_h) {
+        (None, _) => 0,
+        (Some(_), 26..) => SET_FULL_H,
+        (Some(_), 20..) => 4,
+        (Some(_), _) => 1,
+    };
+    let decks_h = body_h.saturating_sub(mixer_h + lib_h + set_h);
     let header = Rect::new(area.x, area.y, area.width, 1);
     let decks = Rect::new(area.x, area.y + 1, area.width, decks_h);
-    let mixer = Rect::new(area.x, decks.bottom(), area.width, mixer_h);
+    let set_area = Rect::new(area.x, decks.bottom(), area.width, set_h);
+    let mixer = Rect::new(area.x, set_area.bottom(), area.width, mixer_h);
     let lib = Rect::new(area.x, mixer.bottom(), area.width, lib_h);
     let status = Rect::new(area.x, area.bottom() - 1, area.width, 1);
 
@@ -123,9 +137,306 @@ pub fn draw(buf: &mut Buffer, area: Rect, v: &View) {
         let info = v.decks.get(i).cloned().unwrap_or_default();
         draw_deck(buf, r, i, &info, v.waves[i], v.release_events, v.doubt[i]);
     }
+    if let Some(set) = v.set {
+        draw_set(buf, set_area, set, v.decks);
+    }
     draw_mixer(buf, mixer, v);
     draw_library(buf, lib, v);
     draw_status(buf, status, v);
+    if let Some(lines) = v.overlay {
+        draw_overlay(buf, decks, lines);
+    }
+}
+
+/// beats to bars, as shown: whole bars plain, else one decimal
+fn fmt_bars(beats: f64) -> String {
+    let bars = beats / 4.0;
+    if (bars - bars.round()).abs() < 0.05 {
+        format!("{}", bars.round() as i64)
+    } else {
+        format!("{bars:.1}")
+    }
+}
+
+/// "bar 16 · swap low" for an upcoming item; texts that already say where keep their own
+fn item_text(beat: f64, text: &str) -> String {
+    if text.starts_with("bar ") || text.starts_with("bars ") {
+        text.to_string()
+    } else {
+        format!("bar {} · {text}", fmt_bars(beat))
+    }
+}
+
+/// Index of the track on air (the armed mix's outgoing one; else one playing on a deck) and the
+/// one coming (the armed mix's incoming one)
+fn current_and_next(set: &SetState, decks: &[DeckInfo]) -> (Option<usize>, Option<usize>) {
+    if let Some(m) = set.armed_mix() {
+        let (from, to, ..) = &set.mixes[m];
+        return (set.track_index(from), set.track_index(to));
+    }
+    let on_air = set
+        .tracks
+        .iter()
+        .position(|t| decks.iter().any(|d| d.loaded && d.playing && d.path == t.2));
+    (on_air, None)
+}
+
+fn draw_set(buf: &mut Buffer, area: Rect, set: &SetState, decks: &[DeckInfo]) {
+    if area.height == 0 || area.width < 20 {
+        return;
+    }
+    let w = area.width as usize;
+    let (cur, next) = current_and_next(set, decks);
+    let title_of = |id: &str| -> String { set.track_index(id).map(|i| set.tracks[i].1.clone()).unwrap_or_else(|| id.to_string()) };
+    let err_style = if set.errors > 0 {
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Green)
+    };
+    let errs = if set.errors > 0 { format!("✗ {} error{} (:errors)", set.errors, if set.errors == 1 { "" } else { "s" }) } else { "✓ no errors".into() };
+    let auto = if set.auto {
+        Span::styled(" AUTO ", Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD))
+    } else {
+        Span::styled("auto off", dim())
+    };
+
+    // compact: one line
+    if area.height == 1 {
+        let narrow = w < 80;
+        let mut spans = vec![
+            Span::styled(" SET ", Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::raw(format!(" {} ", trunc(&set.name, if narrow { 6 } else { 18 }))),
+            Span::styled(if set.errors > 0 { format!("✗{} ", set.errors) } else { "✓ ".into() }, err_style),
+        ];
+        if set.auto {
+            spans.push(Span::styled(if narrow { "AUTO " } else { " AUTO " }, Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)));
+        }
+        if let Some(m) = set.armed_mix() {
+            let len = set.mixes[m].3;
+            spans.push(Span::raw(format!(
+                "{}mix {} {} {}{}/{}",
+                if narrow { " " } else { "  " },
+                m + 1,
+                if set.running { "▶" } else { "armed" },
+                if narrow { "" } else { "bar " },
+                fmt_bars(set.mix_beat.max(0.0)),
+                fmt_bars(len)
+            )));
+            if let Some((b, t)) = set.next_items.first() {
+                spans.push(Span::styled(
+                    format!("{}{}", if narrow { " ▸ " } else { "  next " }, item_text(*b, t)),
+                    Style::default().fg(SET_COLORS.1),
+                ));
+            }
+        } else {
+            spans.push(Span::styled(" no mix armed (F6)", dim()));
+        }
+        Paragraph::new(Line::from(spans)).render(area, buf);
+        return;
+    }
+
+    let mut lines: Vec<Line> = Vec::new();
+    // 1: title, errors, auto, keys
+    let mut head = vec![
+        Span::styled(" SET ", Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(format!(" {} ", trunc(&set.name, 30)), Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(errs, err_style),
+        Span::raw("  "),
+        auto,
+    ];
+    let used: usize = head.iter().map(|s| s.content.chars().count()).sum();
+    let keys = "F6 arm next · F7 auto · F8 disarm";
+    if w > used + keys.len() + 2 {
+        head.push(Span::raw(" ".repeat(w - used - keys.len() - 1)));
+        head.push(Span::styled(keys, dim()));
+    }
+    lines.push(Line::from(head));
+
+    // 2: tracks joined by the mixes
+    lines.push(track_line(set, cur, next, w));
+
+    // 3: progress of the armed mix, or the hint
+    let armed = set.armed_mix();
+    match armed {
+        Some(m) => lines.push(progress_line(set, m, w, &title_of(&set.mixes[m].0), &title_of(&set.mixes[m].1))),
+        None => lines.push(Line::from(Span::styled(
+            match next_unarmed(set, decks) {
+                Some(m) => format!(" no mix armed · F6 arms mix {}: {} → {}", m + 1, trunc(&title_of(&set.mixes[m].0), 24), trunc(&title_of(&set.mixes[m].1), 24)),
+                None => " no mix armed · load an outgoing track (:load <n>), then F6".to_string(),
+            },
+            dim(),
+        ))),
+    }
+
+    // the rest: upcoming items of the armed mix, or the mix list
+    let rows = (area.height as usize).saturating_sub(lines.len());
+    if rows > 0 {
+        let entries: Vec<(String, Style)> = if armed.is_some() {
+            set.next_items
+                .iter()
+                .map(|(b, t)| (item_text(*b, t), Style::default().fg(SET_COLORS.1)))
+                .collect()
+        } else {
+            set.mixes
+                .iter()
+                .enumerate()
+                .map(|(i, m)| (format!("{}. {} → {}  {} bars", i + 1, trunc(&title_of(&m.0), 20), trunc(&title_of(&m.1), 20), fmt_bars(m.3)), dim()))
+                .collect()
+        };
+        let cols = if w >= 100 { 2 } else { 1 };
+        let col_w = w / cols;
+        for r in 0..rows {
+            let mut spans = Vec::new();
+            for c in 0..cols {
+                // fill column by column: items 0..rows in the first, then the second
+                let idx = c * rows + r;
+                let (text, style) = match entries.get(idx) {
+                    Some(e) => e.clone(),
+                    None => continue,
+                };
+                let cell = format!(" {}", trunc(&text, col_w.saturating_sub(2)));
+                let pad = col_w.saturating_sub(cell.chars().count());
+                spans.push(Span::styled(cell, style));
+                spans.push(Span::raw(" ".repeat(pad)));
+            }
+            lines.push(Line::from(spans));
+        }
+        if armed.is_some() && set.next_items.is_empty() {
+            if let Some(l) = lines.get_mut(3) {
+                *l = Line::from(Span::styled(" nothing more to automate in this mix", dim()));
+            }
+        }
+    }
+    Paragraph::new(lines).render(area, buf);
+}
+
+/// the first mix that F6 would arm, for the hint
+fn next_unarmed(set: &SetState, decks: &[DeckInfo]) -> Option<usize> {
+    super::next_mix(set, decks).ok().map(|m| m as usize)
+}
+
+fn track_line(set: &SetState, cur: Option<usize>, next: Option<usize>, w: usize) -> Line<'static> {
+    let n = set.tracks.len();
+    if n == 0 {
+        return Line::from(Span::styled(" no tracks in this set", Style::default().fg(Color::Red)));
+    }
+    // as many tracks as fit with about 16 columns each, around the current one
+    let fit = (w.saturating_sub(2) / 18).clamp(1, n);
+    let focus = cur.or(next).unwrap_or(0);
+    let start = focus.saturating_sub(fit / 2).min(n - fit);
+    let end = start + fit;
+    let mix_between = |a: usize, b: usize| {
+        set.mixes
+            .iter()
+            .enumerate()
+            .find(|(_, m)| set.track_index(&m.0) == Some(a) && set.track_index(&m.1) == Some(b))
+    };
+    // connectors: " ──32▶ " (armed: bold, in colour)
+    let conn_w = 8;
+    let title_w = (w.saturating_sub(2 + conn_w * (fit - 1) + if start > 0 { 2 } else { 0 } + if end < n { 2 } else { 0 }) / fit).max(4);
+    let mut spans = vec![Span::raw(if start > 0 { "‹ " } else { " " }.to_string())];
+    for i in start..end {
+        let label = format!("{} {}", i + 1, set.tracks[i].1);
+        let style = if Some(i) == cur {
+            Style::default().fg(SET_COLORS.0).add_modifier(Modifier::BOLD)
+        } else if Some(i) == next {
+            Style::default().fg(SET_COLORS.1).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        let marker = if Some(i) == cur { "▶" } else if Some(i) == next { "»" } else { " " };
+        spans.push(Span::styled(format!("{marker}{}", trunc(&label, title_w.saturating_sub(1))), style));
+        let used = 1 + trunc(&label, title_w.saturating_sub(1)).chars().count();
+        spans.push(Span::raw(" ".repeat(title_w.saturating_sub(used))));
+        if i + 1 < end {
+            let (text, style) = match mix_between(i, i + 1) {
+                Some((m, mix)) => {
+                    let t = format!("─{}b▶", fmt_bars(mix.3));
+                    let st = if set.armed_mix() == Some(m) {
+                        Style::default().fg(SET_COLORS.1).add_modifier(Modifier::BOLD)
+                    } else {
+                        dim()
+                    };
+                    (t, st)
+                }
+                None => ("─ ─ ─".into(), dim()),
+            };
+            let pad = conn_w.saturating_sub(text.chars().count());
+            spans.push(Span::styled(format!("{}{text}", "─".repeat(pad.min(2))), style));
+            spans.push(Span::raw(" ".repeat(pad.saturating_sub(pad.min(2)))));
+        }
+    }
+    if end < n {
+        spans.push(Span::raw(" ›"));
+    }
+    Line::from(spans)
+}
+
+/// ` MIX 1 warm → mid  ▶ bar 9.5/32 [████▌░░◆░░░◆░░]` with a ◆ at each upcoming item
+fn progress_line(set: &SetState, m: usize, w: usize, from: &str, to: &str) -> Line<'static> {
+    let len = set.mixes[m].3.max(1.0);
+    let state = if set.running {
+        Span::styled("▶ running", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+    } else {
+        let wait = (-set.mix_beat).max(0.0);
+        Span::styled(format!("armed, starts in {} bars", fmt_bars(wait)), Style::default().fg(SET_COLORS.1))
+    };
+    let at = format!(" bar {}/{} ", fmt_bars(set.mix_beat.max(0.0)), fmt_bars(len));
+    let label = format!(" MIX {}: {} → {} ", m + 1, trunc(from, 14), trunc(to, 14));
+    let used = label.chars().count() + state.content.chars().count() + at.chars().count() + 2;
+    let bar_w = w.saturating_sub(used + 1).clamp(8, 80);
+    let pos = (set.mix_beat / len).clamp(0.0, 1.0);
+    let filled = pos * bar_w as f64;
+    let mut cells: Vec<(char, Style)> = (0..bar_w)
+        .map(|i| {
+            if (i as f64) + 1.0 <= filled {
+                ('█', Style::default().fg(Color::Cyan))
+            } else if (i as f64) < filled {
+                ('▌', Style::default().fg(Color::Cyan))
+            } else {
+                ('░', dim())
+            }
+        })
+        .collect();
+    for (beat, _) in &set.next_items {
+        let c = ((beat / len).clamp(0.0, 1.0) * (bar_w - 1) as f64).round() as usize;
+        cells[c.min(bar_w - 1)] = ('◆', Style::default().fg(SET_COLORS.1));
+    }
+    let mut spans = vec![
+        Span::styled(label, Style::default().add_modifier(Modifier::BOLD)),
+        state,
+        Span::styled(at, dim()),
+        Span::styled("[", dim()),
+    ];
+    spans.extend(cells.into_iter().map(|(c, s)| Span::styled(c.to_string(), s)));
+    spans.push(Span::styled("]", dim()));
+    Line::from(spans)
+}
+
+fn draw_overlay(buf: &mut Buffer, over: Rect, lines: &[String]) {
+    if over.width < 24 || over.height < 3 {
+        return;
+    }
+    let w = (over.width - 4).min(110);
+    let h = ((lines.len() as u16) + 2).min(over.height).min(12);
+    let area = Rect::new(over.x + (over.width - w) / 2, over.y + (over.height - h) / 2, w, h);
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            buf[(x, y)].reset();
+        }
+    }
+    let bad = lines.iter().any(|l| l != "no errors");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(if bad { Color::Red } else { Color::Green }))
+        .title(" set errors · Esc closes ");
+    let inner = block.inner(area);
+    block.render(area, buf);
+    let rows = inner.height as usize;
+    for (i, l) in lines.iter().take(rows).enumerate() {
+        let text = if i + 1 == rows && lines.len() > rows { format!("… {} more", lines.len() - rows + 1) } else { l.clone() };
+        buf.set_stringn(inner.x + 1, inner.y + i as u16, text, inner.width.saturating_sub(2) as usize, Style::default());
+    }
 }
 
 fn draw_header(buf: &mut Buffer, area: Rect, v: &View) {
@@ -715,6 +1026,8 @@ mod tests {
             lib_total: 3,
             lib_sel: 1,
             release_events: true,
+            set: None,
+            overlay: None,
         };
         f(&mut v);
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -823,6 +1136,197 @@ mod tests {
             v.input = "q";
         });
         assert!(text.lines().last().unwrap().starts_with(":q█"));
+    }
+
+    fn demo_set() -> SetState {
+        let t = |id: &str, title: &str, path: &str| (id.to_string(), title.to_string(), path.to_string());
+        SetState {
+            name: "demo: 3 tracks".into(),
+            file: "/s/demo.codj".into(),
+            errors: 0,
+            tracks: vec![
+                t("warm", "Aftertekno", "/m/aftertekno.flac"),
+                t("mid", "Smokin", "/m/smokin.flac"),
+                t("peak", "Noita", "/m/noita.flac"),
+            ],
+            mixes: vec![
+                ("warm".into(), "mid".into(), 448.0, 128.0),
+                ("mid".into(), "peak".into(), 384.0, 32.0),
+            ],
+            armed: -1,
+            running: false,
+            out_deck: -1,
+            mix_beat: 0.0,
+            auto: false,
+            next_items: vec![],
+        }
+    }
+
+    fn armed_midway() -> SetState {
+        SetState {
+            armed: 0,
+            running: true,
+            out_deck: 0,
+            mix_beat: 38.0,
+            auto: true,
+            next_items: vec![
+                (64.0, "swap low".into()),
+                (64.0, "bars 16–32 · A filter → −0.6".into()),
+                (112.0, "A loop tail".into()),
+                (128.0, "A stop".into()),
+            ],
+            ..demo_set()
+        }
+    }
+
+    fn with_set(set: SetState) -> impl FnOnce(&mut View) {
+        let set: &'static SetState = Box::leak(Box::new(set));
+        move |v| v.set = Some(set)
+    }
+
+    #[test]
+    fn no_set_no_strip() {
+        let text = render(120, 35, |_| {});
+        assert!(!text.contains(" SET "));
+        // an inactive set (empty name) also draws nothing
+        let text = render(120, 35, |v| {
+            v.set = None;
+        });
+        assert!(!text.contains("MIX"));
+    }
+
+    #[test]
+    fn idle_set_lists_tracks_and_mixes_and_hints_at_arming() {
+        let text = render(120, 35, with_set(demo_set()));
+        println!("{text}");
+        for want in ["SET", "demo: 3 tracks", "✓ no errors", "auto off", "1 Aftertekno", "2 Smokin", "3 Noita", "32b▶", "8b▶",
+            "no mix armed", "F6 arm next", "1. Aftertekno → Smokin", "2. Smokin → Noita"] {
+            assert!(text.contains(want), "missing {want:?}\n{text}");
+        }
+        // the strip sits between the decks and the mixer
+        let at = |needle: &str| text.lines().position(|l| l.contains(needle)).unwrap();
+        assert!(at("DECK A") < at(" SET ") && at(" SET ") < at("Mixer"));
+        assert_eq!(text.lines().count(), 35);
+        // A is playing the first track, so F6 would arm mix 1
+        assert!(text.contains("F6 arms mix 1"), "{text}");
+    }
+
+    #[test]
+    fn set_with_errors_says_so() {
+        let mut set = demo_set();
+        set.errors = 2;
+        let text = render(120, 35, with_set(set));
+        assert!(text.contains("✗ 2 errors (:errors)"), "{text}");
+        let mut set = demo_set();
+        set.errors = 1;
+        assert!(render(120, 35, with_set(set)).contains("✗ 1 error (:errors)"));
+    }
+
+    #[test]
+    fn errors_are_red() {
+        let decks = [deck_a(), deck_b()];
+        let mixer = MixerInfo::default();
+        let mut set = demo_set();
+        set.errors = 3;
+        let mut buf = Buffer::empty(Rect::new(0, 0, 120, 6));
+        draw_set(&mut buf, Rect::new(0, 0, 120, 6), &set, &decks);
+        let red = (0..120).any(|x| buf[(x, 0)].fg == Color::Red && buf[(x, 0)].symbol() == "✗");
+        assert!(red);
+        let mut ok = demo_set();
+        ok.errors = 0;
+        let mut buf = Buffer::empty(Rect::new(0, 0, 120, 6));
+        draw_set(&mut buf, Rect::new(0, 0, 120, 6), &ok, &decks);
+        assert!((0..120).all(|x| buf[(x, 0)].fg != Color::Red));
+        let _ = mixer;
+    }
+
+    #[test]
+    fn armed_mix_midway_shows_progress_markers_and_next_items() {
+        let text = render(120, 35, with_set(armed_midway()));
+        println!("{text}");
+        for want in [
+            "MIX 1: Aftertekno → Smokin", "▶ running", "bar 9.5/32", "AUTO",
+            "bar 16 · swap low", "bars 16–32 · A filter → −0.6", "bar 28 · A loop tail", "bar 32 · A stop",
+        ] {
+            assert!(text.contains(want), "missing {want:?}\n{text}");
+        }
+        // 4 upcoming items -> 4 markers, 38 of 128 beats done: roughly 30 % filled
+        let bar = text.lines().find(|l| l.contains("MIX 1")).unwrap();
+        assert!(bar.matches('◆').count() >= 3, "{bar}");
+        assert!(bar.contains('█') && bar.contains('░'));
+        // consumed items are gone from the markers: fewer items, fewer diamonds
+        let mut later = armed_midway();
+        later.mix_beat = 120.0;
+        later.next_items = vec![(128.0, "A stop".into())];
+        let bar2 = render(120, 35, with_set(later)).lines().find(|l| l.contains("MIX 1")).unwrap().to_string();
+        assert_eq!(bar2.matches('◆').count(), 1, "{bar2}");
+        // current track in the strip is marked, next too
+        assert!(text.contains("▶1 Aftertekno") && text.contains("»2 Smokin"), "{text}");
+    }
+
+    #[test]
+    fn armed_but_waiting_counts_down() {
+        let mut set = armed_midway();
+        set.running = false;
+        set.mix_beat = -16.0;
+        set.auto = false;
+        let text = render(120, 35, with_set(set));
+        assert!(text.contains("armed, starts in 4 bars"), "{text}");
+        assert!(text.contains("bar 0/32"), "{text}");
+        assert!(text.contains("auto off"));
+    }
+
+    #[test]
+    fn auto_badge() {
+        let mut set = demo_set();
+        set.auto = true;
+        let text = render(120, 35, with_set(set));
+        assert!(text.contains(" AUTO ") && !text.contains("auto off"), "{text}");
+    }
+
+    #[test]
+    fn set_strip_degrades() {
+        for (w, h) in [(100, 30), (80, 24), (70, 20), (60, 14)] {
+            for set in [demo_set(), armed_midway()] {
+                let text = render(w, h, with_set(set));
+                assert_eq!(text.lines().count(), h as usize);
+                assert!(text.contains("SET"), "{w}x{h}\n{text}");
+                assert!(text.contains("DECK A") && text.contains("Mixer") && text.contains("Library"), "{w}x{h}");
+            }
+        }
+        let text = render(80, 24, with_set(armed_midway()));
+        println!("{text}");
+        assert!(text.contains("MIX 1"));
+        let text = render(60, 14, with_set(armed_midway()));
+        println!("{text}");
+        assert!(text.contains("mix 1 ▶ 9.5/32") && text.contains("bar 16 · swap low"), "{text}");
+        let wide = render(100, 14, with_set(armed_midway()));
+        assert!(wide.contains("mix 1 ▶ bar 9.5/32") && wide.contains("next bar 16 · swap low"), "{wide}");
+    }
+
+    #[test]
+    fn many_tracks_show_a_window_around_the_current_one() {
+        let mut set = armed_midway();
+        set.tracks = (0..12).map(|i| (format!("t{i}"), format!("Track {i}"), format!("/m/{i}.flac"))).collect();
+        set.mixes = (0..11).map(|i| (format!("t{i}"), format!("t{}", i + 1), 64.0, 128.0)).collect();
+        set.armed = 7;
+        let text = render(120, 35, with_set(set));
+        assert!(text.contains("8 Track 7") && text.contains("9 Track 8"), "{text}");
+        assert!(text.contains('‹') && text.contains('›'));
+        assert!(!text.contains("1 Track 0"));
+    }
+
+    #[test]
+    fn error_overlay() {
+        let lines = vec!["demo.codj:12:5: unknown track \"mid2\"".to_string(), "demo.codj:20:1: bar 40 is past the end".to_string()];
+        let text = render(120, 35, |v| {
+            let l: &'static [String] = Box::leak(lines.into_boxed_slice());
+            v.overlay = Some(l);
+        });
+        assert!(text.contains("set errors") && text.contains("demo.codj:12:5: unknown track"), "{text}");
+        assert!(text.contains("demo.codj:20:1"));
+        // an empty overlay-less screen has none
+        assert!(!render(120, 35, |_| {}).contains("set errors"));
     }
 
     #[test]

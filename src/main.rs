@@ -188,6 +188,19 @@ pub trait Server {
     async fn dj_decks(&self) -> Result<Vec<dj_types::DeckInfo>>;
     async fn dj_mixer(&self) -> Result<dj_types::MixerInfo>;
     /// waveform overview: u32 LE column count, u32 LE duration ms, then 6 bytes per column
+    // set runtime, see "Set runtime (D-Bus)" in docs/dj-api.md; mixes and tracks count from 0
+    async fn set_use(&self, name: &str) -> Result<String>;
+    async fn set_arm(&self, mix: u32) -> Result<String>;
+    async fn set_disarm(&self) -> Result<String>;
+    async fn set_auto(&self, on: bool) -> Result<String>;
+    async fn set_preview(&self, mix: u32, bars_before: f64) -> Result<String>;
+    async fn set_load(&self, track: u32) -> Result<String>;
+    async fn set_state(&self) -> Result<dj_types::SetState>;
+    /// (name, file, error count) of every set file in the set folder
+    async fn set_list(&self) -> Result<Vec<(String, String, u32)>>;
+    /// `file:line:col: message` per error of a set's latest save
+    async fn set_errors(&self, name: &str) -> Result<Vec<String>>;
+
     async fn get_waveform(&self, path: &str, columns: u32) -> Result<Vec<u8>>;
     /// (xruns, second output underruns, second output skips, sample rate)
     async fn audio_health(&self) -> Result<(u64, u64, u64, u32)>;
@@ -459,6 +472,10 @@ async fn main() -> Result<()> {
             ui.fps_controller.frame_duration()
         };
         should_quit = handle_events(&mut ui, frame).await?;
+        if let Some(path) = ui.dj_take_edit() {
+            let text = edit_in_terminal(&mut ui, &mut terminal, &path);
+            ui.dj_edited(text);
+        }
         ui.dj_tick();
     }
 
@@ -468,6 +485,40 @@ async fn main() -> Result<()> {
     disable_raw_mode()?;
     stdout().execute(LeaveAlternateScreen)?;
     Ok(())
+}
+
+/// `:edit`: gives the terminal to `$EDITOR` and takes it back. Leaves raw mode, mouse capture and
+/// the alternate screen and pops every keyboard-enhancement level, runs the editor on the file
+/// (codjd reloads a set when it is saved), then restores all of it, including the levels DJ mode
+/// had pushed, and forces a full redraw. The restore runs whatever the editor did.
+fn edit_in_terminal<B: ratatui::backend::Backend>(
+    ui: &mut ui::UI<'_>,
+    terminal: &mut Terminal<B>,
+    path: &std::path::Path,
+) -> String {
+    let levels = ui.kbd_levels();
+    kbd_pop_all();
+    let _ = stdout().execute(DisableMouseCapture);
+    let _ = disable_raw_mode();
+    let _ = stdout().execute(LeaveAlternateScreen);
+
+    let line = dj::editor_line(env::var("EDITOR").ok().as_deref(), env::var("VISUAL").ok().as_deref());
+    let result = std::process::Command::new("sh").arg("-c").arg(&line).arg(path).status();
+
+    let _ = enable_raw_mode();
+    let _ = stdout().execute(EnterAlternateScreen);
+    let _ = stdout().execute(EnableMouseCapture);
+    for flags in levels {
+        kbd_push(flags);
+    }
+    let _ = terminal.hide_cursor();
+    let _ = terminal.clear();
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    match result {
+        Ok(status) if status.success() => format!("edited {name}: codjd reloads it on save (:errors shows problems)"),
+        Ok(status) => format!("editor exited with {status}"),
+        Err(e) => format!("could not run the editor: {e}"),
+    }
 }
 
 /// Waits up to one frame for input, then handles every queued key before the next draw. Handling

@@ -136,6 +136,12 @@ pub enum Nav {
     Load(Deck),
     /// load the highlighted track onto the deck that is not playing
     LoadSmart,
+    /// arm the next mix of the active set (F6)
+    SetArmNext,
+    /// auto mode on / off (F7)
+    SetAuto,
+    /// cancel the armed mix's remaining automation (F8)
+    SetDisarm,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -210,6 +216,9 @@ pub fn bind(k: &NKey) -> Option<Binding> {
             (KeyCode::F(1), false) => Some(Tap(self::Tap::Headphones(0))),
             (KeyCode::F(2), false) => Some(Tap(self::Tap::Headphones(1))),
             (KeyCode::F(5), false) => Some(Tap(self::Tap::Quantize)),
+            (KeyCode::F(6), false) => Some(Nav(self::Nav::SetArmNext)),
+            (KeyCode::F(7), false) => Some(Nav(self::Nav::SetAuto)),
+            (KeyCode::F(8), false) => Some(Nav(self::Nav::SetDisarm)),
             (KeyCode::Esc, false) => Some(Nav(self::Nav::Exit)),
             (KeyCode::Tab, false) => Some(Nav(self::Nav::Search)),
             (KeyCode::Up, false) => Some(Nav(self::Nav::LibUp)),
@@ -793,6 +802,9 @@ mod tests {
         assert_eq!(f(1), Some(Binding::Tap(Tap::Headphones(0))));
         assert_eq!(f(2), Some(Binding::Tap(Tap::Headphones(1))));
         assert_eq!(f(5), Some(Binding::Tap(Tap::Quantize)));
+        assert_eq!(f(6), Some(Binding::Nav(Nav::SetArmNext)));
+        assert_eq!(f(7), Some(Binding::Nav(Nav::SetAuto)));
+        assert_eq!(f(8), Some(Binding::Nav(Nav::SetDisarm)));
     }
 
     #[test]
