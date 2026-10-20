@@ -6,9 +6,9 @@ return function(obj)
   if obj:code().Char == "r" then
     local conn = ldbus.bus.get("session")
     local msg = ldbus.message.new_method_call(
-      "net.rotko.Musa",
-      "/net/rotko/Musa",
-      "net.rotko.Musa.Player",
+      "net.rotko.Codj",
+      "/net/rotko/Codj",
+      "net.rotko.Codj.Player",
       "ReloadConfig"
     )
     conn:send_with_reply_and_block(msg)
@@ -16,9 +16,9 @@ return function(obj)
     local conn = ldbus.bus.get("session")
     -- create a dbus message
     local msg = ldbus.message.new_method_call(
-      "net.rotko.Musa",
-      "/net/rotko/Musa",
-      "net.rotko.Musa.Player",
+      "net.rotko.Codj",
+      "/net/rotko/Codj",
+      "net.rotko.Codj.Player",
       "GetVolume"
     )
     -- append an iterator (can be used to pass arguments)
@@ -32,9 +32,9 @@ return function(obj)
     local volume_level = subiter:get_basic();
     -- new dbus message (to change volume)
     local msg = ldbus.message.new_method_call(
-      "net.rotko.Musa",
-      "/net/rotko/Musa",
-      "net.rotko.Musa.Player",
+      "net.rotko.Codj",
+      "/net/rotko/Codj",
+      "net.rotko.Codj.Player",
       "Volume"
     )
     -- append volume level to call
@@ -50,9 +50,9 @@ return function(obj)
     local conn = ldbus.bus.get("session")
     -- create a dbus message
     local msg = ldbus.message.new_method_call(
-      "net.rotko.Musa",
-      "/net/rotko/Musa",
-      "net.rotko.Musa.Player",
+      "net.rotko.Codj",
+      "/net/rotko/Codj",
+      "net.rotko.Codj.Player",
       "GetVolume"
     )
     -- append an iterator (can be used to pass arguments)
@@ -66,9 +66,9 @@ return function(obj)
     local volume_level = subiter:get_basic();
     -- new dbus message (to change volume)
     local msg = ldbus.message.new_method_call(
-      "net.rotko.Musa",
-      "/net/rotko/Musa",
-      "net.rotko.Musa.Player",
+      "net.rotko.Codj",
+      "/net/rotko/Codj",
+      "net.rotko.Codj.Player",
       "Volume"
     )
     -- append volume level to call

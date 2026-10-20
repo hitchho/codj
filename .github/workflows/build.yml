@@ -1,4 +1,4 @@
-name: "Build musa via Nix"
+name: "Build codj via Nix"
 
 on:
   push:

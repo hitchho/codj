@@ -4,18 +4,17 @@ authors = [
     "yasssine <yassine.bna@proton.me>",
     "Tommi Niemi <tommi@rotko.net>",
 ]
-# "musa" is taken on crates.io; the binary is still called musa
-name = "musa-player"
+name = "codj"
 version = "0.2.0"
 edition = "2021"
 readme = "README.md"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/yassinebenarbia/mplayer-client"
-description = "musa: terminal music player with built-in Soulseek, the TUI for musad"
+description = "codj: terminal music player with built-in Soulseek, the TUI for codjd"
 keywords = ["music", "music-player", "tui", "soulseek", "dbus"]
 
 [[bin]]
-name = "musa"
+name = "codj"
 path = "src/main.rs"
 
 

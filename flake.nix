@@ -20,7 +20,7 @@
       in
       {
         defaultPackage = naersk-lib.buildPackage {
-          name = "musa";
+          name = "codj";
           src = ./.;
           buildInputs = with pkgs; [
             pkg-config

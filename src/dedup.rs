@@ -137,7 +137,7 @@ mod tests {
 
     #[test]
     fn lossless_beats_bigger_lossy() {
-        let dir = std::env::temp_dir().join(format!("musa-dedup-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("codj-dedup-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mp3 = dir.join("a.mp3");
         let flac = dir.join("a.flac");

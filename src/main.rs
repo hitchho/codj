@@ -52,9 +52,9 @@ use crate::types::{OuterPlaylist, PlaylistOpperation};
 // NOTE: the return status of most functions is not currently documented, tho
 // usually they represent the success of the opperaiton/call.
 #[proxy(
-    interface = "net.rotko.Musa.Player",
-    default_service = "net.rotko.Musa",
-    default_path = "/net/rotko/Musa"
+    interface = "net.rotko.Codj.Player",
+    default_service = "net.rotko.Codj",
+    default_path = "/net/rotko/Codj"
 )]
 pub trait Server {
     /// Toggle playing status
@@ -194,7 +194,7 @@ pub trait Server {
     /// Signal fires when a finished download was added to the library
     #[zbus(signal)]
     async fn music_added(&self, path: &str) -> zbus::Result<()>;
-    /// a file appeared in the music folder from outside musad
+    /// a file appeared in the music folder from outside codjd
     #[zbus(signal)]
     async fn library_changed(&self, path: &str) -> zbus::Result<()>;
 
@@ -251,20 +251,20 @@ pub trait Server {
     async fn slsk_move_download(&self, id: u32, up: bool) -> Result<String>;
 }
 
-/// Checks that musad answers; if not, starts it (from PATH or next to this binary) in its own
-/// session so it keeps running after musa exits, and waits up to 5 s for it
-async fn ensure_musad(proxy: &ServerProxy<'_>) -> bool {
+/// Checks that codjd answers; if not, starts it (from PATH or next to this binary) in its own
+/// session so it keeps running after codj exits, and waits up to 5 s for it
+async fn ensure_codjd(proxy: &ServerProxy<'_>) -> bool {
     if proxy.get_playing_index().await.is_ok() {
         return true;
     }
     let beside = env::current_exe()
         .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join("musad")))
+        .and_then(|exe| exe.parent().map(|dir| dir.join("codjd")))
         .filter(|p| p.is_file());
     let in_path = || {
         env::var_os("PATH").and_then(|paths| {
             env::split_paths(&paths)
-                .map(|dir| dir.join("musad"))
+                .map(|dir| dir.join("codjd"))
                 .find(|p| p.is_file())
         })
     };
@@ -289,7 +289,7 @@ async fn ensure_musad(proxy: &ServerProxy<'_>) -> bool {
     if command.status().map_or(true, |s| !s.success()) {
         return false;
     }
-    eprintln!("starting musad...");
+    eprintln!("starting codjd...");
     for _ in 0..50 {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         if proxy.get_playing_index().await.is_ok() {
@@ -299,14 +299,14 @@ async fn ensure_musad(proxy: &ServerProxy<'_>) -> bool {
     false
 }
 
-/// ~/.cache/musad/musad.log, for a musad started by musa
+/// ~/.cache/codjd/codjd.log, for a codjd started by codj
 fn dirs_log_file() -> Option<std::path::PathBuf> {
     let dir = env::var_os("XDG_CACHE_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache")))?
-        .join("musad");
+        .join("codjd");
     std::fs::create_dir_all(&dir).ok()?;
-    Some(dir.join("musad.log"))
+    Some(dir.join("codjd.log"))
 }
 
 pub fn init_panic_hook() {
@@ -335,11 +335,11 @@ async fn main() -> Result<()> {
         panic!("Could not connect to the bus address, aborting...");
     });
     let proxy = ServerProxy::new(&connection).await?;
-    if !ensure_musad(&proxy).await {
+    if !ensure_codjd(&proxy).await {
         eprintln!(
-            "musad is not running and couldn't be started.\n\
-             Start it with `musad` (or `cargo run` in the musad repo), or put musad in your PATH \
-             so musa can start it."
+            "codjd is not running and couldn't be started.\n\
+             Start it with `codjd` (or `cargo run` in the codjd repo), or put codjd in your PATH \
+             so codj can start it."
         );
         std::process::exit(1);
     }
@@ -360,15 +360,16 @@ async fn main() -> Result<()> {
     let config_path = if args.len() > 1 {
         args[1].clone()
     } else {
-        // ~/.config/musa, or the config from before the rename
+        // ~/.config/codj, or a config from before a rename (musa, mplayer-client)
         let home = env::var("HOME").unwrap().to_string();
-        let new = format!("{home}/.config/musa/config.toml");
-        let old = format!("{home}/.config/mplayer-client/config.toml");
-        if !std::path::Path::new(&new).exists() && std::path::Path::new(&old).exists() {
-            old
-        } else {
-            new
-        }
+        let new = format!("{home}/.config/codj/config.toml");
+        [
+            format!("{home}/.config/musa/config.toml"),
+            format!("{home}/.config/mplayer-client/config.toml"),
+        ]
+        .into_iter()
+        .find(|old| !std::path::Path::new(&new).exists() && std::path::Path::new(old).exists())
+        .unwrap_or(new)
     };
     let config = if args.len() > 1 {
         Config::parse_config(&config_path).unwrap()

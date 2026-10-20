@@ -1,4 +1,4 @@
-//! MCP server over stdio (`musa mcp [--live]`) so agents can read the library and drive musad.
+//! MCP server over stdio (`codj mcp [--live]`) so agents can read the library and drive codjd.
 //! Runs before any terminal setup; stdout carries only protocol, everything else goes to stderr.
 //!
 //! Without `--live`, tools that change what the audience hears (player deck, master, crossfader)
@@ -64,7 +64,7 @@ pub fn needs_live(effect: Effect) -> bool {
 pub fn refusal(tool: &str) -> String {
     format!(
         "{tool} refused: it changes what the audience hears and this MCP server is not live. \
-         Restart it with `musa mcp --live` to allow it. Reads, queue edits and deck 1 (cue deck) \
+         Restart it with `codj mcp --live` to allow it. Reads, queue edits and deck 1 (cue deck) \
          are always allowed."
     )
 }
@@ -228,7 +228,7 @@ pub fn timestamp(secs: u64) -> String {
 
 fn log_change(what: &str) {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    eprintln!("[{}] musa mcp: {what}", timestamp(now));
+    eprintln!("[{}] codj mcp: {what}", timestamp(now));
 }
 
 fn to_text(v: Value) -> Result<String, String> {
@@ -326,13 +326,13 @@ pub struct DeckSetArgs {
 // ---- server ----
 
 #[derive(Clone)]
-pub struct Musa {
+pub struct Codj {
     live: bool,
     proxy: Arc<Mutex<Option<ServerProxy<'static>>>>,
     tool_router: ToolRouter<Self>,
 }
 
-const NOT_RUNNING: &str = "musad is not running (or not reachable on the session D-Bus). \
+const NOT_RUNNING: &str = "codjd is not running (or not reachable on the session D-Bus). \
 Start it, then retry; this server does not start it.";
 
 fn dbus_err(e: zbus::Error) -> String {
@@ -340,7 +340,7 @@ fn dbus_err(e: zbus::Error) -> String {
     if text.contains("ServiceUnknown") || text.contains("NameHasNoOwner") || text.contains("not provided by any") {
         return NOT_RUNNING.to_string();
     }
-    format!("musad call failed: {text}")
+    format!("codjd call failed: {text}")
 }
 
 /// Runs a D-Bus call with a timeout
@@ -355,22 +355,22 @@ macro_rules! ask {
             }
             Err(_) => {
                 $self.forget().await;
-                return Err("musad did not answer in time".to_string());
+                return Err("codjd did not answer in time".to_string());
             }
         }
     }};
 }
 
-impl Musa {
+impl Codj {
     pub fn new(live: bool) -> Self {
-        Musa {
+        Codj {
             live,
             proxy: Arc::new(Mutex::new(None)),
             tool_router: Self::tool_router(),
         }
     }
 
-    /// Connected proxy; probes musad so a missing daemon gives one clear message
+    /// Connected proxy; probes codjd so a missing daemon gives one clear message
     async fn proxy(&self) -> Result<ServerProxy<'static>, String> {
         let mut slot = self.proxy.lock().await;
         if let Some(p) = slot.as_ref() {
@@ -424,7 +424,7 @@ fn reply_ok(reply: String) -> Result<String, String> {
 }
 
 #[tool_router]
-impl Musa {
+impl Codj {
     #[tool(description = "List library tracks (the current playlist). Optional regex query like the TUI search (title:/artist:/genre: prefixes). Default 50 results.")]
     async fn library(&self, Parameters(a): Parameters<LibraryArgs>) -> Result<String, String> {
         let list = indexed(&self.playlist().await?);
@@ -622,38 +622,38 @@ impl Musa {
 
 #[tool_handler(
     router = self.tool_router,
-    name = "musa",
-    instructions = "Control musa/musad. `library` lists tracks; their `index` is what play_index and queue_add take. Tools marked LIVE are refused unless the server was started with `musa mcp --live`."
+    name = "codj",
+    instructions = "Control codj/codjd. `library` lists tracks; their `index` is what play_index and queue_add take. Tools marked LIVE are refused unless the server was started with `codj mcp --live`."
 )]
-impl ServerHandler for Musa {}
+impl ServerHandler for Codj {}
 
-/// `musa mcp [--live]`; returns the exit code
+/// `codj mcp [--live]`; returns the exit code
 pub async fn run(args: &[String]) -> i32 {
     let mut live = false;
     for a in args {
         match a.as_str() {
             "--live" => live = true,
             other => {
-                eprintln!("usage: musa mcp [--live]\nunknown option {other}");
+                eprintln!("usage: codj mcp [--live]\nunknown option {other}");
                 return 2;
             }
         }
     }
     eprintln!(
-        "musa mcp: serving on stdio ({})",
+        "codj mcp: serving on stdio ({})",
         if live { "LIVE: player and master controls allowed" } else { "safe mode, restart with --live to allow player controls" }
     );
-    let service = match Musa::new(live).serve(rmcp::transport::stdio()).await {
+    let service = match Codj::new(live).serve(rmcp::transport::stdio()).await {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("musa mcp: {e}");
+            eprintln!("codj mcp: {e}");
             return 1;
         }
     };
     match service.waiting().await {
         Ok(_) => 0,
         Err(e) => {
-            eprintln!("musa mcp: {e}");
+            eprintln!("codj mcp: {e}");
             1
         }
     }
@@ -757,8 +757,8 @@ mod tests {
 
     #[tokio::test]
     async fn live_refusal_happens_before_dbus() {
-        // no musad needed: the guardrail answers first
-        let s = Musa::new(false);
+        // no codjd needed: the guardrail answers first
+        let s = Codj::new(false);
         let err = s.toggle().await.unwrap_err();
         assert!(err.contains("--live"));
         let err = s.set_volume(Parameters(VolumeArgs { volume: 2.0 })).await.unwrap_err();

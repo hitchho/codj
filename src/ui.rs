@@ -3608,7 +3608,7 @@ impl<'a> UI<'a> {
     }
 
     async fn soulseek_search(&mut self, query: &str) {
-        // connect on first use, using the [soulseek] config. musad connects in the background;
+        // connect on first use, using the [soulseek] config. codjd connects in the background;
         // the search runs from poll_soulseek_results once it's logged in
         match self.state.proxy.slsk_state().await {
             Ok(ConnectionState::Ready) => {}
@@ -4329,8 +4329,8 @@ mod soulseek_tests {
     }
 
     #[test]
-    fn download_signature_matches_musad() {
-        // musad's Download over D-Bus; both ends must change together
+    fn download_signature_matches_codjd() {
+        // codjd's Download over D-Bus; both ends must change together
         assert_eq!(
             <Download as zbus::zvariant::Type>::SIGNATURE.to_string(),
             "(usssttuusuuus)"

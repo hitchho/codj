@@ -1,4 +1,4 @@
-//! Minimal status-bar mode (`musa status`, `musa toggle`, ...) for polybar, waybar and i3blocks.
+//! Minimal status-bar mode (`codj status`, `codj toggle`, ...) for polybar, waybar and i3blocks.
 //! Runs before any terminal setup and never touches the TUI.
 
 use std::{
@@ -59,7 +59,7 @@ pub fn display_title(title: &str, path: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Empty, or the "Unknown" musad fills in for a missing tag
+/// Empty, or the "Unknown" codjd fills in for a missing tag
 fn missing(tag: &str) -> bool {
     let tag = tag.trim();
     tag.is_empty() || tag.eq_ignore_ascii_case("unknown")
@@ -187,7 +187,7 @@ async fn follow(o: &Opts) {
         ]);
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         loop {
-            // musad going away makes the calls fail (or time out), which sends us back to reconnecting
+            // codjd going away makes the calls fail (or time out), which sends us back to reconnecting
             let snap = tokio::time::timeout(Duration::from_secs(3), snapshot(&p)).await;
             let Ok(Ok(snap)) = snap else { break };
             if !show(render(&o.format, &snap, o.max_width)) {
@@ -223,7 +223,7 @@ pub async fn run(args: &[String]) -> i32 {
         let o = match parse_opts(rest) {
             Ok(o) => o,
             Err(e) => {
-                eprintln!("musa status: {e}");
+                eprintln!("codj status: {e}");
                 return 2;
             }
         };
@@ -241,13 +241,13 @@ pub async fn run(args: &[String]) -> i32 {
                 0
             }
             Err(e) => {
-                eprintln!("musa status: {e}");
+                eprintln!("codj status: {e}");
                 1
             }
         };
     }
     let Some(p) = connect().await else {
-        eprintln!("musa {cmd}: musad is not running");
+        eprintln!("codj {cmd}: codjd is not running");
         return 1;
     };
     let res = match cmd {
@@ -268,7 +268,7 @@ pub async fn run(args: &[String]) -> i32 {
     match res {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("musa {cmd}: {e}");
+            eprintln!("codj {cmd}: {e}");
             1
         }
     }

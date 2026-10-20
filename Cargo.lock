@@ -305,6 +305,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "codj"
+version = "0.2.0"
+dependencies = [
+ "basic-toml",
+ "crossterm 0.27.0",
+ "dirs",
+ "flate2",
+ "futures",
+ "md5",
+ "mlua",
+ "ratatui 0.28.1",
+ "regex",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml_edit 0.22.27",
+ "tui-input",
+ "zbus",
+]
+
+[[package]]
 name = "compact_str"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -997,29 +1020,6 @@ dependencies = [
  "cc",
  "cfg-if",
  "pkg-config",
-]
-
-[[package]]
-name = "musa-player"
-version = "0.2.0"
-dependencies = [
- "basic-toml",
- "crossterm 0.27.0",
- "dirs",
- "flate2",
- "futures",
- "md5",
- "mlua",
- "ratatui 0.28.1",
- "regex",
- "rmcp",
- "schemars",
- "serde",
- "serde_json",
- "tokio",
- "toml_edit 0.22.27",
- "tui-input",
- "zbus",
 ]
 
 [[package]]

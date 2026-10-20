@@ -9,12 +9,12 @@ genre = false # display genre, default to false
 [scripts]
 # region_name = path/to/script.lua
 # only full path work for now
-all = "/home/user/.config/musa/lua/all.lua"
-list = "/home/user/.config/musa/lua/list.lua"
-# lyrics = "/home/user/.config/musa/list.lua"
-# actions = "/home/user/.config/musa/actions.lua"
-# seeker = "/home/user/.config/musa/seeker.lua"
-# volume = "/home/user/.config/musa/volume.lua"
+all = "/home/user/.config/codj/lua/all.lua"
+list = "/home/user/.config/codj/lua/list.lua"
+# lyrics = "/home/user/.config/codj/list.lua"
+# actions = "/home/user/.config/codj/actions.lua"
+# seeker = "/home/user/.config/codj/seeker.lua"
+# volume = "/home/user/.config/codj/volume.lua"
 
 [soulseek]
 # soulseek network search for music

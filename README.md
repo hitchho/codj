@@ -1,8 +1,10 @@
-<h1 align="center">musa</h1>
+<h1 align="center">codj</h1>
 
-**musa** is a terminal music player with built-in [Soulseek](https://www.slsknet.org) search and downloads, written in [Rust](https://www.rust-lang.org). It is the TUI for [**musad**](https://github.com/yassinebenarbia/mplayer-server), the player daemon, and talks to it over [D-Bus](https://www.freedesktop.org/wiki/Software/dbus/#whatisd-bus). Music keeps playing, and downloads keep going, when musa is closed.
+**codj** is a terminal music player with built-in [Soulseek](https://www.slsknet.org) search and downloads, written in [Rust](https://www.rust-lang.org). It is the TUI for [**codjd**](https://github.com/yassinebenarbia/mplayer-server), the player daemon, and talks to it over [D-Bus](https://www.freedesktop.org/wiki/Software/dbus/#whatisd-bus). Music keeps playing, and downloads keep going, when codj is closed.
 
-*musa* is Finnish for "music".
+*codj* reads two ways: **co-DJ** (agents can plan and mix with you over MCP) and **code + DJ** (sets are written as code, in your own vim). It is growing into a keyboard-driven DJ system; see the [DJ mode design](https://github.com/yassinebenarbia/mplayer-server/blob/main/docs/dj-mode.md). It was called *musa* before.
+
+Configs in `~/.config/musa` and `~/.config/mplayer-client` from before the renames are still read.
 
 # Showcase
 ||||
@@ -16,16 +18,16 @@ ___
 - vim-style keys: `j`/`k`, `gg`/`G`, `h`/`l` seek, `H`/`L` volume, `ZZ` / `:q` to quit
 - regex search over title, artist and file name (`f` or `/`); no match? `Enter` searches Soulseek
 - play queue (`q` to queue, `Shift+Q` to open it)
-- "more like this" (`m`): musad analyzes your library locally and queues similar-sounding tracks
+- "more like this" (`m`): codjd analyzes your library locally and queues similar-sounding tracks
 - Soulseek search, filtering, downloads with a concurrency limit and reorderable queue; finished downloads show up in the library
 - `:settings` panel, saved straight to your config file
 - lyrics, playlists and Lua scripting
 
 # Usage
-- Install and run `musad`.
-- Install musa from this repo: `cargo install --path .` (the binary is called `musa`).
-- Copy the [config file](./config.example.toml) to `$HOME/.config/musa/config.toml` and adjust it (optional).
-- Run `musa`.
+- Install and run `codjd`.
+- Install codj from this repo: `cargo install --path .` (the binary is called `codj`).
+- Copy the [config file](./config.example.toml) to `$HOME/.config/codj/config.toml` and adjust it (optional).
+- Run `codj`.
 >[!NOTE]
 > You can also pass the config file as the first argument. A config at the old `$HOME/.config/mplayer-client/config.toml` is still read if the new one doesn't exist.
 
@@ -34,11 +36,11 @@ ___
 
 # Status bar widget
 
-`musa status` prints one line (`▶ Aftertekno — Pneumatix 02:18/07:17`, `⏸` when paused, `■` when stopped) and exits; with `--follow` it keeps printing whenever the track, pause state or the second changes, and survives musad restarts (prints an empty line, or `--offline TEXT`, while musad is away).
+`codj status` prints one line (`▶ Aftertekno — Pneumatix 02:18/07:17`, `⏸` when paused, `■` when stopped) and exits; with `--follow` it keeps printing whenever the track, pause state or the second changes, and survives codjd restarts (prints an empty line, or `--offline TEXT`, while codjd is away).
 
 ```
-musa status [--follow] [--format "{icon} {title} — {artist} {elapsed}/{total}"] [--max-width N] [--offline TEXT]
-musa toggle | next | prev | vol+ | vol-     # one-shot controls, exit 1 if musad isn't running
+codj status [--follow] [--format "{icon} {title} — {artist} {elapsed}/{total}"] [--max-width N] [--offline TEXT]
+codj toggle | next | prev | vol+ | vol-     # one-shot controls, exit 1 if codjd isn't running
 ```
 
 `--max-width` shortens the title with `…`; `{artist}` and its ` — ` vanish when a track has no artist. Volume moves in steps of 5%.
@@ -46,34 +48,34 @@ musa toggle | next | prev | vol+ | vol-     # one-shot controls, exit 1 if musad
 Polybar:
 
 ```
-[module/musa]
+[module/codj]
 type = custom/script
-exec = musa status --follow --max-width 40
+exec = codj status --follow --max-width 40
 tail = true
-click-left = musa toggle
-click-right = musa next
-scroll-up = musa vol+
-scroll-down = musa vol-
+click-left = codj toggle
+click-right = codj next
+scroll-up = codj vol+
+scroll-down = codj vol-
 ```
 
 Waybar:
 
 ```
-"custom/musa": {
-    "exec": "musa status --follow --max-width 40",
-    "on-click": "musa toggle",
-    "on-click-right": "musa next",
-    "on-scroll-up": "musa vol+",
-    "on-scroll-down": "musa vol-"
+"custom/codj": {
+    "exec": "codj status --follow --max-width 40",
+    "on-click": "codj toggle",
+    "on-click-right": "codj next",
+    "on-scroll-up": "codj vol+",
+    "on-scroll-down": "codj vol-"
 }
 ```
 
 # Agents (MCP)
 
-`musa mcp` is an [MCP](https://modelcontextprotocol.io) server on stdio, so agents can browse the library, queue tracks and drive musad. It needs a running `musad` (it never starts one; tools return an error if it is away). Claude Code config (`.mcp.json` or `claude mcp add`):
+`codj mcp` is an [MCP](https://modelcontextprotocol.io) server on stdio, so agents can browse the library, queue tracks and drive codjd. It needs a running `codjd` (it never starts one; tools return an error if it is away). Claude Code config (`.mcp.json` or `claude mcp add`):
 
 ```
-{ "mcpServers": { "musa": { "command": "musa", "args": ["mcp"] } } }
+{ "mcpServers": { "codj": { "command": "codj", "args": ["mcp"] } } }
 ```
 
 Tools: `library`, `now_playing`, `queue`, `track_features`, `similar`, `analysis_status`, `play_index`, `toggle`, `next`, `previous`, `seek`, `set_volume`, `queue_add`, `queue_remove`, `queue_similar`, `deck_state`, `deck_load`, `deck_play`, `deck_pause`, `deck_seek`, `deck_set`, `audio_health`, `audio_devices`.
@@ -88,4 +90,4 @@ Live guardrail: by default anything that changes what the audience hears is refu
 > and many others
 
 # License and origin
-musa is a fork of [mplayer-client](https://github.com/yassinebenarbia/mplayer-client) by yassinebenarbia, renamed and extended (Soulseek, play queue, search, settings and more). It is licensed under the [GPL-3.0-or-later](./LICENCE), like the original.
+codj is a fork of [mplayer-client](https://github.com/yassinebenarbia/mplayer-client) by yassinebenarbia, renamed and extended (Soulseek, play queue, search, settings and more). It is licensed under the [GPL-3.0-or-later](./LICENCE), like the original.

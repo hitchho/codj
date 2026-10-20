@@ -12,7 +12,7 @@
 |List|Normal|`Enter`|Play the music under selection|
 |List|Normal|`s`|Scroll to the currently playing music|
 |List|Normal|`q`|Add the music under selection to the play queue (the list title shows the queue length)|
-|List|Normal|`m`|Queue 5 tracks that sound like the one under selection (needs musad's audio analysis; the list title shows the highlighted track's estimated BPM and loudness)|
+|List|Normal|`m`|Queue 5 tracks that sound like the one under selection (needs codjd's audio analysis; the list title shows the highlighted track's estimated BPM and loudness)|
 |List|Normal|`Shift + q`|Open / close the queue panel|
 |List|Normal|`h` / `l`|Seek 5 seconds back / forward|
 |List|Normal|`Shift + h` / `Shift + l`|Volume down / up|
@@ -161,7 +161,7 @@ When a download is queued, up to 3 other users who had the same file in the sear
 
 # Configuration
 
-Config file is optional, but if you want to have it, you can to either pass it as the first argument to `musa` or put it on `$HOME/.config/musa/config.toml` (the old `$HOME/.config/mplayer-client/config.toml` is still read if that doesn't exist)
+Config file is optional, but if you want to have it, you can to either pass it as the first argument to `codj` or put it on `$HOME/.config/codj/config.toml` (the old `$HOME/.config/mplayer-client/config.toml` is still read if that doesn't exist)
 ```Toml
 # EVERY OPTION CAN BE EMITTED
 [config]
@@ -174,12 +174,12 @@ genre = false # display genre, default to false
 [scripts]
 # region_name = path/to/script.lua
 # only full path work for now
-all = "/home/user/.config/musa/lua/all.lua"
-list = "/home/user/.config/musa/lua/list.lua"
-# lyrics = "/home/user/.config/musa/list.lua"
-# actions = "/home/user/.config/musa/actions.lua"
-# seeker = "/home/user/.config/musa/seeker.lua"
-# volume = "/home/user/.config/musa/volume.lua"
+all = "/home/user/.config/codj/lua/all.lua"
+list = "/home/user/.config/codj/lua/list.lua"
+# lyrics = "/home/user/.config/codj/list.lua"
+# actions = "/home/user/.config/codj/actions.lua"
+# seeker = "/home/user/.config/codj/seeker.lua"
+# volume = "/home/user/.config/codj/volume.lua"
 
 [soulseek]
 # soulseek network search for music
@@ -201,7 +201,7 @@ password = "your_password"
 
 ## Soulseek Sharing
 
-Soulseek requires users to share files to participate in the network. By default, musa shares a virtual dummy.mp3 file (100KB, 128kbps, 3 minutes) to satisfy this requirement without exposing any real files.
+Soulseek requires users to share files to participate in the network. By default, codj shares a virtual dummy.mp3 file (100KB, 128kbps, 3 minutes) to satisfy this requirement without exposing any real files.
 
 If you want to share a real directory, set `share_dir` in your config. Otherwise, the dummy file is used automatically.
 
