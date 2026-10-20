@@ -33,6 +33,8 @@ use zbus::{proxy, Connection, Result};
 mod allowed_commands;
 mod bar;
 mod dedup;
+mod dj;
+mod dj_types;
 mod mcp;
 mod search;
 mod settings;
@@ -164,6 +166,23 @@ pub trait Server {
     async fn dj_mode(&self, mode: &str) -> Result<String>;
     /// per deck: (position s, playing, decoded s, decoding finished)
     async fn dj_state(&self) -> Result<Vec<(f64, bool, f64, bool)>>;
+    /// CDJ cue button: press sets / previews / jumps to the cue point, release ends the preview
+    async fn dj_cue(&self, deck: u32, pressed: bool) -> Result<String>;
+    /// match this deck's tempo and beat phase to the other deck
+    async fn dj_sync(&self, deck: u32) -> Result<String>;
+    /// temporary tempo bend, -1..1 (= -4..+4 %), 0 releases
+    async fn dj_nudge(&self, deck: u32, amount: f64) -> Result<String>;
+    /// jump by `beats` (negative = back), keeping the beat phase
+    async fn dj_beat_jump(&self, deck: u32, beats: f64) -> Result<String>;
+    /// loop of `beats` from the current beat; 0 exits the loop
+    async fn dj_loop(&self, deck: u32, beats: f64) -> Result<String>;
+    /// slot 0..7, action "set" | "jump" | "clear"
+    async fn dj_hotcue(&self, deck: u32, slot: u32, action: &str) -> Result<String>;
+    /// state of both decks, for polling
+    async fn dj_decks(&self) -> Result<Vec<dj_types::DeckInfo>>;
+    async fn dj_mixer(&self) -> Result<dj_types::MixerInfo>;
+    /// waveform overview: u32 LE column count, u32 LE duration ms, then 6 bytes per column
+    async fn get_waveform(&self, path: &str, columns: u32) -> Result<Vec<u8>>;
     /// (xruns, second output underruns, second output skips, sample rate)
     async fn audio_health(&self) -> Result<(u64, u64, u64, u32)>;
     async fn audio_devices(&self) -> Result<Vec<String>>;
@@ -309,11 +328,39 @@ fn dirs_log_file() -> Option<std::path::PathBuf> {
     Some(dir.join("codjd.log"))
 }
 
+/// How many keyboard-enhancement levels this process has pushed, so the panic hook and exit can
+/// pop exactly that many (DJ mode pushes a second one for key-release reporting)
+static KBD_DEPTH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+pub fn kbd_push(flags: KeyboardEnhancementFlags) {
+    if stdout().execute(PushKeyboardEnhancementFlags(flags)).is_ok() {
+        KBD_DEPTH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+pub fn kbd_pop() {
+    if KBD_DEPTH.load(std::sync::atomic::Ordering::SeqCst) > 0
+        && stdout().execute(PopKeyboardEnhancementFlags).is_ok()
+    {
+        KBD_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+fn kbd_pop_all() {
+    while KBD_DEPTH.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+        let before = KBD_DEPTH.load(std::sync::atomic::Ordering::SeqCst);
+        kbd_pop();
+        if KBD_DEPTH.load(std::sync::atomic::Ordering::SeqCst) == before {
+            break;
+        }
+    }
+}
+
 pub fn init_panic_hook() {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
         // intentionally ignore errors here since we're already in a panic
-        let _ = stdout().execute(PopKeyboardEnhancementFlags);
+        kbd_pop_all();
         let _ = stdout().execute(DisableMouseCapture);
         disable_raw_mode().unwrap();
         stdout().execute(LeaveAlternateScreen).unwrap();
@@ -351,9 +398,7 @@ async fn main() -> Result<()> {
     // lets terminals that speak the kitty protocol report Ctrl+Enter apart from Enter
     let enhanced = supports_keyboard_enhancement().unwrap_or(false);
     if enhanced {
-        stdout().execute(PushKeyboardEnhancementFlags(
-            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
-        ))?;
+        kbd_push(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES);
     }
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
 
@@ -378,6 +423,7 @@ async fn main() -> Result<()> {
     };
 
     let mut ui = ui::UI::new(proxy);
+    ui.keyboard_enhanced = enhanced;
     ui.config_path = Some(config_path.into());
 
     ui.update_from_config(&config);
@@ -391,20 +437,26 @@ async fn main() -> Result<()> {
         terminal.draw(|frame| {
             ui.render(frame);
         })?;
-        ui.update_state().await;
-        if last_soulseek_poll.map_or(true, |t| t.elapsed() >= soulseek_poll) {
-            ui.poll_soulseek_results().await;
-            ui.poll_queue().await;
-            ui.poll_analysis().await;
-            last_soulseek_poll = Some(std::time::Instant::now());
-        }
-        let frame = ui.fps_controller.frame_duration();
+        let frame = if ui.dj_active() {
+            // live mode: the deck state comes from its own 30 Hz poller; no library or Soulseek
+            // polling while performing
+            std::time::Duration::from_millis(33)
+        } else {
+            ui.update_state().await;
+            if last_soulseek_poll.map_or(true, |t| t.elapsed() >= soulseek_poll) {
+                ui.poll_soulseek_results().await;
+                ui.poll_queue().await;
+                ui.poll_analysis().await;
+                last_soulseek_poll = Some(std::time::Instant::now());
+            }
+            ui.fps_controller.frame_duration()
+        };
         should_quit = handle_events(&mut ui, frame).await?;
+        ui.dj_tick();
     }
 
-    if enhanced {
-        stdout().execute(PopKeyboardEnhancementFlags)?;
-    }
+    ui.leave_dj();
+    kbd_pop_all();
     stdout().execute(DisableMouseCapture)?;
     disable_raw_mode()?;
     stdout().execute(LeaveAlternateScreen)?;
@@ -417,6 +469,7 @@ async fn handle_events<'a>(ui: &mut ui::UI<'a>, frame: std::time::Duration) -> i
     let mut wait = frame;
     while event::poll(wait)? {
         match event::read()? {
+            Event::Key(key) if ui.dj_active() => ui.dj_key(&key),
             Event::Key(key) => {
                 if ui::Region::handle_events(ui, &key).await? {
                     return Ok(true);

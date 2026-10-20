@@ -372,6 +372,12 @@ pub struct UI<'a> {
     pub soulseek_connected: bool,
     /// Soulseek config from config file (for connect params)
     pub soulseek_config: Option<crate::parser::SoulseekSettings>,
+    /// the terminal speaks the kitty keyboard protocol (set by main)
+    pub keyboard_enhanced: bool,
+    /// live DJ mode, when on; it replaces the whole normal view
+    dj: Option<Box<crate::dj::DjScreen>>,
+    /// DJ mode pushed the extra keyboard flags that report key releases
+    dj_kbd_pushed: bool,
 }
 
 #[allow(unused)]
@@ -1321,6 +1327,56 @@ impl<'a> UI<'a> {
             soulseek_visible: false,
             soulseek_connected: false,
             soulseek_config: None,
+            keyboard_enhanced: false,
+            dj: None,
+            dj_kbd_pushed: false,
+        }
+    }
+
+    pub fn dj_active(&self) -> bool {
+        self.dj.is_some()
+    }
+
+    /// `:dj` / `M`: switches to the live DJ screen. With a kitty-protocol terminal this also asks
+    /// for key release events, which hold-to-preview and hold-to-nudge need.
+    pub async fn enter_dj(&mut self) {
+        if self.dj.is_some() {
+            return;
+        }
+        self.fetch_playlist_data().await;
+        let library = self.music_list.unfiltered_music_list.clone();
+        if self.keyboard_enhanced {
+            use crossterm::event::KeyboardEnhancementFlags as F;
+            crate::kbd_push(
+                F::DISAMBIGUATE_ESCAPE_CODES | F::REPORT_EVENT_TYPES | F::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
+            );
+            self.dj_kbd_pushed = true;
+        }
+        let conn = self.state.proxy.inner().connection().clone();
+        self.dj = Some(Box::new(crate::dj::DjScreen::new(conn, library, self.dj_kbd_pushed)));
+    }
+
+    /// Back to the normal view (audio keeps playing; nothing is stopped)
+    pub fn leave_dj(&mut self) {
+        if self.dj.take().is_none() {
+            return;
+        }
+        if self.dj_kbd_pushed {
+            crate::kbd_pop();
+            self.dj_kbd_pushed = false;
+        }
+    }
+
+    pub fn dj_key(&mut self, key: &KeyEvent) {
+        let Some(dj) = self.dj.as_mut() else { return };
+        if dj.handle_key(key, Instant::now()) == crate::dj::Outcome::Exit {
+            self.leave_dj();
+        }
+    }
+
+    pub fn dj_tick(&mut self) {
+        if let Some(dj) = self.dj.as_mut() {
+            dj.tick(Instant::now());
         }
     }
 
@@ -2195,6 +2251,10 @@ impl<'a> UI<'a> {
 
     /// Renders the displayed UI
     pub fn render(&mut self, frame: &mut Frame) {
+        if let Some(dj) = self.dj.as_mut() {
+            dj.render(frame);
+            return;
+        }
         self.update_geometry(frame);
         self.render_list(frame);
         self.render_search(frame);
@@ -2340,6 +2400,8 @@ impl<'a> UI<'a> {
         match c {
             'G' => self.goto_bottom(),
             'Q' => self.toggle_queue().await,
+            // D is taken by the lyrics download
+            'M' => self.enter_dj().await,
             'H' => self.decrease_volume().await,
             'L' => self.increase_volume().await,
             // ZZ quits, like vim
@@ -3505,6 +3567,7 @@ impl<'a> UI<'a> {
                 self.soulseek_disconnect().await;
             }
             CommandName::Settings => self.open_settings(),
+            CommandName::Dj => self.enter_dj().await,
             CommandName::Duplicates => {
                 self.music_list.show_duplicates = !self.music_list.show_duplicates;
                 let selected = self.selected_path();
