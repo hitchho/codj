@@ -174,6 +174,9 @@ pub trait Server {
     /// Signal fires when a finished download was added to the library
     #[zbus(signal)]
     async fn music_added(&self, path: &str) -> zbus::Result<()>;
+    /// a file appeared in the music folder from outside musad
+    #[zbus(signal)]
+    async fn library_changed(&self, path: &str) -> zbus::Result<()>;
 
     #[zbus(signal)]
     async fn playlists_updated(

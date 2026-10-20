@@ -3,7 +3,7 @@ use futures::executor::block_on;
 use std::{collections::HashMap, time::Duration};
 
 use crate::{
-    EndedStream, Metadata, MusicAddedStream, MusicPlayedStream, OuterMusic, PausedStream, PlayingStatus, Playlist,
+    EndedStream, LibraryChangedStream, Metadata, MusicAddedStream, MusicPlayedStream, OuterMusic, PausedStream, PlayingStatus, Playlist,
     PlaylistCreatedStream, PlaylistDeletedStream, PlaylistLoadedStream, PlaylistsUpdatedStream,
     Repeat, ResumedStream, ServerProxy, Sort, SortedStream, VolumeChangedStream,
 };
@@ -63,6 +63,7 @@ pub struct Streams {
     pub playlist_deleted: Option<PlaylistDeletedStream>,
     pub playlist_created: Option<PlaylistCreatedStream>,
     pub music_added: Option<MusicAddedStream>,
+    pub library_changed: Option<LibraryChangedStream>,
 }
 
 /// Handle state management with the bus server

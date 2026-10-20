@@ -1483,6 +1483,33 @@ impl<'a> UI<'a> {
         if let Some(path) = added {
             self.on_music_added(&path).await;
         }
+
+        // drain: a whole album moved in arrives as many signals, one refresh is enough
+        let mut changed = false;
+        if let Some(stream) = self.state.dbus_streams.library_changed.as_mut() {
+            while let Poll::Ready(Some(_)) = stream.poll_next_unpin(&mut ctx) {
+                changed = true;
+            }
+        }
+        if changed {
+            self.on_library_changed().await;
+        }
+    }
+
+    /// Files arrived from outside: reload the list, keeping the cursor on the same track
+    async fn on_library_changed(&mut self) {
+        let selected = self.selected_path();
+        self.fetch_playlist_data().await;
+        if matches!(self.mode, ListMode::Search | ListMode::AfterSearch) {
+            self.music_list.search(self.search_bufr.value().to_owned());
+        }
+        if let Some(i) = selected.and_then(|path| {
+            self.music_list.musics.iter().position(|m| {
+                <&std::path::Path>::from(&m.path) == std::path::Path::new(&path)
+            })
+        }) {
+            self.music_list.selected = i;
+        }
     }
 
     /// A finished download joined the library: reload the list and put the cursor on it, unless
@@ -2928,6 +2955,8 @@ impl<'a> UI<'a> {
         self.state.dbus_streams.playlist_created =
             Some(self.state.proxy.receive_playlist_created().await.unwrap());
         self.state.dbus_streams.music_added = self.state.proxy.receive_music_added().await.ok();
+        self.state.dbus_streams.library_changed =
+            self.state.proxy.receive_library_changed().await.ok();
         //----------------------------------------------------
         //TODO: make this something more readable
         self.displayed_repeat = self.state.get_repeat();
