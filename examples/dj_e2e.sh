@@ -5,6 +5,8 @@
 #   cargo build --examples && cargo build
 #   dbus-run-session -- examples/dj_e2e.sh
 #
+# Phase 2 drives the set runtime (:set, F6/F7/F8, :preview, :edit with a fake $EDITOR).
+#
 # tmux does not forward the kitty keyboard protocol, so this exercises the no-release fallback.
 set -u
 [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ] || { echo "run under dbus-run-session"; exit 2; }
@@ -19,8 +21,9 @@ export CODJ_FAKE_ISOLATED=1 CODJ_FAKE_LOG=$W/calls.log
 sleep 1
 T="tmux -L codjdje2e"
 $T new-session -d -x 140 -y 40 -s dj "$BIN/codj 2>$W/codj.err; sleep 30"
-cap() { $T capture-pane -p -t dj > "$W/cap-$1.txt"; }
-keys() { for k in "$@"; do $T send-keys -t dj -- "$k"; sleep 0.12; done; }
+S=dj
+cap() { $T capture-pane -p -t $S > "$W/cap-$1.txt"; }
+keys() { for k in "$@"; do $T send-keys -t $S -- "$k"; sleep 0.12; done; }
 sleep 2
 cap normal
 keys M; sleep 0.5; cap entered
@@ -36,5 +39,47 @@ keys Enter; sleep 0.5; cap back_to_normal
 keys M; sleep 0.3; keys Escape; sleep 0.5; cap esc_exit
 $T kill-server
 kill $FAKE
+wait $FAKE 2>/dev/null
 echo "== calls received by the fake"; cat "$W/calls.log"
 echo "== codj stderr"; cat "$W/codj.err"
+
+# --- phase 2: the set runtime (fresh fake: both decks empty, no set active)
+export CODJ_FAKE_LOG=$W/calls-set.log
+rm -f "$W"/calls-set.log "$W"/edit.log
+cat > "$W/fake-editor.sh" <<EOF2
+#!/bin/sh
+echo "editor got: \$*" >> $W/edit.log
+sleep 0.3
+EOF2
+chmod +x "$W/fake-editor.sh"
+"$BIN/examples/fake_codjd" 2>"$W/fake2.err" & FAKE=$!
+sleep 1
+S=djset
+$T new-session -d -x 140 -y 40 -s $S "EDITOR=$W/fake-editor.sh $BIN/codj 2>$W/codj-set.err; sleep 30"
+sleep 2
+# a ':' command followed by Enter
+cmd() { keys ':'; $T send-keys -t $S -l -- "$1"; sleep 0.15; $T send-keys -t $S Enter; sleep 0.5; }
+keys M; sleep 0.5
+cmd arm\ 1; cap set_none_active           # no set yet: a note, no call
+cmd set; cap set_list
+cmd set\ broken; cap set_broken
+cmd errors; cap set_errors                 # overlay
+keys Escape; sleep 0.3
+cmd set\ demo; sleep 0.5
+cmd arm\ 1; cap set_arm_unloaded          # outgoing track not on a deck: daemon says load first
+keys Enter x; sleep 0.5                    # Aftertekno onto A, play
+keys F6; sleep 1; cap set_armed            # waiting for the mix start
+sleep 6; cap set_running                   # started, first items consumed
+cmd auto\ on; cap set_auto
+keys F8; sleep 0.8; cap set_disarmed
+keys F6; sleep 0.8; keys F7; sleep 0.8; cap set_f6_f7
+cmd preview\ 2\ 4; cap set_preview
+cmd load\ 3; cap set_load
+cmd edit; sleep 1.2; cap set_after_edit    # the TUI came back after the editor
+keys Escape; sleep 0.5
+$T kill-server
+kill $FAKE
+echo "== set calls received by the fake"; cat "$W/calls-set.log"
+echo "== editor"; cat "$W/edit.log"
+echo "== codj stderr (set phase)"; cat "$W/codj-set.err"
+exit 0

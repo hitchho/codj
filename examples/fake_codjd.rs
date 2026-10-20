@@ -20,7 +20,7 @@ use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use dj_types::{DeckInfo, MixerInfo};
+use dj_types::{DeckInfo, MixerInfo, SetState};
 use types::{OuterMusic, OuterPlaylist, PlayerStatus, PlayingStatus, Repeat, Sort};
 
 struct Deck {
@@ -32,10 +32,35 @@ struct Deck {
     follow: bool,
 }
 
+/// The fake set runtime: sets "demo" (3 tracks, 2 mixes) and "broken" (the same with 2 errors)
+#[derive(Default)]
+struct SetRt {
+    active: String,
+    armed: i32,
+    running: bool,
+    out_deck: i32,
+    auto: bool,
+}
+
+/// (id, title, path)
+const SET_TRACKS: [(&str, &str, &str); 3] = [
+    ("warm", "Aftertekno", "/fake/Aftertekno.flac"),
+    ("mid", "Smokin", "/fake/Smokin.flac"),
+    ("peak", "Kaiku", "/fake/Kaiku.flac"),
+];
+/// (from, to, start beat, length in beats): 16 and 8 bars, starting early so a test sees them run
+const SET_MIXES: [(&str, &str, f64, f64); 2] = [("warm", "mid", 8.0, 64.0), ("mid", "peak", 8.0, 32.0)];
+/// per mix: (mix beat, text) in order
+const SET_ITEMS: [&[(f64, &str)]; 2] = [
+    &[(0.0, "B low kill"), (0.0, "bars 0–16 · B fader 0 → 1"), (32.0, "swap low"), (32.0, "bars 8–16 · A filter → −0.6"), (56.0, "A loop tail"), (64.0, "A stop")],
+    &[(0.0, "B low kill"), (16.0, "swap low"), (24.0, "A loop 2 beats"), (32.0, "A stop")],
+];
+
 struct State {
     decks: [Deck; 2],
     mixer: MixerInfo,
     at: Instant,
+    set: SetRt,
 }
 
 impl State {
@@ -74,6 +99,128 @@ impl State {
             d.beat_phase = beats.fract();
             d.beat_in_bar = (beats.floor() as u32 % 4) + 1;
         }
+        self.advance_set();
+    }
+
+    fn track_deck(&self, id: &str) -> Option<usize> {
+        let path = SET_TRACKS.iter().find(|t| t.0 == id)?.2;
+        self.decks.iter().position(|d| d.info.loaded && d.info.path == path)
+    }
+
+    /// beats since the armed mix's start on the outgoing deck's grid
+    fn mix_beat(&self) -> f64 {
+        let (Some(m), Some(deck)) = (usize::try_from(self.set.armed).ok(), usize::try_from(self.set.out_deck).ok()) else {
+            return 0.0;
+        };
+        let d = &self.decks[deck].info;
+        d.position / Self::spb(d) - SET_MIXES[m].2
+    }
+
+    /// starts the armed mix when its time comes, finishes it, arms the next one in auto mode
+    fn advance_set(&mut self) {
+        let Some(m) = usize::try_from(self.set.armed).ok() else { return };
+        let beat = self.mix_beat();
+        if !self.set.running && beat >= 0.0 {
+            self.set.running = true;
+            let incoming = 1 - self.set.out_deck as usize;
+            self.decks[incoming].info.playing = true;
+            self.decks[incoming].info.fader = 1.0;
+        }
+        if self.set.running && beat >= SET_MIXES[m].3 {
+            let out = self.set.out_deck as usize;
+            self.decks[out].info.playing = false;
+            self.set.armed = -1;
+            self.set.running = false;
+            self.set.out_deck = -1;
+            if self.set.auto {
+                if let Some(next) = SET_MIXES.get(m + 1).and_then(|n| self.track_deck(n.0).map(|_| m + 1)) {
+                    let _ = self.arm(next);
+                }
+            }
+        }
+    }
+
+    /// loads the track onto the deck, as `DjLoad` does
+    fn load_track(&mut self, deck: usize, path: &str) {
+        let bpm = fake_bpm(path);
+        let keep = self.decks[deck].info.clone();
+        let stem = std::path::Path::new(path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        self.decks[deck] = Deck {
+            info: DeckInfo {
+                loaded: true,
+                path: path.into(),
+                title: stem,
+                artist: "Fake Artist".into(),
+                duration: 240.0,
+                rate: 1.0,
+                bpm,
+                track_bpm: bpm,
+                beat_phase: 0.0,
+                beat_in_bar: 1,
+                hotcues: vec![-1.0; 8],
+                key: ["8A", "9A", "5B", "12A"][(bpm * 10.0) as usize % 4].into(),
+                gain_db: -1.5,
+                eq: keep.eq,
+                filter: keep.filter,
+                fader: keep.fader.max(0.0),
+                headphones: keep.headphones,
+                ..Default::default()
+            },
+            nudge: 0.0,
+            preview: false,
+            follow: false,
+        };
+        // loading onto either deck of a running mix disarms it
+        if self.set.running {
+            self.set.armed = -1;
+            self.set.running = false;
+            self.set.out_deck = -1;
+        }
+    }
+
+    fn arm(&mut self, mix: usize) -> Result<(), String> {
+        if self.set.active.is_empty() {
+            return Err("no active set".into());
+        }
+        let Some(&(from, to, ..)) = SET_MIXES.get(mix) else {
+            return Err(format!("no mix {mix}"));
+        };
+        let Some(out) = self.track_deck(from) else {
+            return Err(format!("load {from} first"));
+        };
+        let to_path = SET_TRACKS.iter().find(|t| t.0 == to).unwrap().2;
+        let incoming = 1 - out;
+        if self.decks[incoming].info.path != to_path {
+            self.load_track(incoming, to_path);
+        }
+        self.decks[incoming].info.playing = false;
+        self.decks[incoming].info.synced = true;
+        self.decks[incoming].info.fader = 0.0;
+        self.set.armed = mix as i32;
+        self.set.running = false;
+        self.set.out_deck = out as i32;
+        Ok(())
+    }
+
+    fn set_state(&mut self) -> SetState {
+        let active = !self.set.active.is_empty();
+        let m = usize::try_from(self.set.armed).ok();
+        let beat = self.mix_beat();
+        SetState {
+            name: self.set.active.clone(),
+            file: if active { format!("/fake/sets/{}.codj", self.set.active) } else { String::new() },
+            errors: if self.set.active == "broken" { 2 } else { 0 },
+            tracks: if active { SET_TRACKS.iter().map(|t| (t.0.into(), t.1.into(), t.2.into())).collect() } else { vec![] },
+            mixes: if active { SET_MIXES.iter().map(|m| (m.0.into(), m.1.into(), m.2, m.3)).collect() } else { vec![] },
+            armed: self.set.armed,
+            running: self.set.running,
+            out_deck: self.set.out_deck,
+            mix_beat: if m.is_some() { beat } else { 0.0 },
+            auto: self.set.auto,
+            next_items: m
+                .map(|m| SET_ITEMS[m].iter().filter(|(b, _)| *b >= beat.max(0.0) && (*b > beat || !self.set.running)).take(8).map(|(b, t)| (*b, t.to_string())).collect())
+                .unwrap_or_default(),
+        }
     }
 }
 
@@ -83,6 +230,11 @@ struct Fake {
 }
 
 impl Fake {
+    fn use_set(&self, st: &mut State, name: &str) -> String {
+        st.set = SetRt { active: name.to_string(), armed: -1, out_deck: -1, ..Default::default() };
+        "ok".into()
+    }
+
     fn log(&self, line: String) {
         if let Some(path) = &self.log {
             if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(path) {
@@ -197,38 +349,7 @@ impl Fake {
             return "cannot open file".into();
         }
         match self.with(deck, |s, i| {
-            let stem = std::path::Path::new(&path)
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            let bpm = fake_bpm(&path);
-            let keep = s.decks[i].info.clone();
-            s.decks[i] = Deck {
-                info: DeckInfo {
-                    loaded: true,
-                    path: path.clone(),
-                    title: stem,
-                    artist: "Fake Artist".into(),
-                    duration: 240.0,
-                    rate: 1.0,
-                    bpm,
-                    track_bpm: bpm,
-                    beat_phase: 0.0,
-                    beat_in_bar: 1,
-                    hotcues: vec![-1.0; 8],
-                    key: ["8A", "9A", "5B", "12A"][(bpm * 10.0) as usize % 4].into(),
-                    gain_db: -1.5,
-                    // keep the mixer position of the strip
-                    eq: keep.eq,
-                    filter: keep.filter,
-                    fader: keep.fader.max(0.0),
-                    headphones: keep.headphones,
-                    ..Default::default()
-                },
-                nudge: 0.0,
-                preview: false,
-                follow: false,
-            };
+            s.load_track(i, &path);
             "ok".to_string()
         }) {
             Ok(r) => r,
@@ -384,6 +505,102 @@ impl Fake {
         })
     }
 
+    async fn set_use(&self, name: String) -> String {
+        self.log(format!("SetUse {name}"));
+        let mut st = self.st.lock().unwrap();
+        match name.as_str() {
+            "" | "demo" | "broken" => {}
+            "demo.codj" => return self.use_set(&mut st, "demo"),
+            other => return format!("no set named {other}"),
+        }
+        self.use_set(&mut st, &name)
+    }
+
+    async fn set_arm(&self, mix: u32) -> String {
+        self.log(format!("SetArm {mix}"));
+        let mut st = self.st.lock().unwrap();
+        st.advance();
+        st.arm(mix as usize).err().unwrap_or_else(|| "ok".into())
+    }
+
+    async fn set_disarm(&self) -> String {
+        self.log("SetDisarm".into());
+        let mut st = self.st.lock().unwrap();
+        st.set.armed = -1;
+        st.set.running = false;
+        st.set.out_deck = -1;
+        "ok".into()
+    }
+
+    async fn set_auto(&self, on: bool) -> String {
+        self.log(format!("SetAuto {on}"));
+        self.st.lock().unwrap().set.auto = on;
+        "ok".into()
+    }
+
+    async fn set_preview(&self, mix: u32, bars_before: f64) -> String {
+        self.log(format!("SetPreview {mix} {bars_before}"));
+        let mut st = self.st.lock().unwrap();
+        st.advance();
+        let Some(&(from, ..)) = SET_MIXES.get(mix as usize) else { return format!("no mix {mix}") };
+        if st.set.active.is_empty() {
+            return "no active set".into();
+        }
+        let path = SET_TRACKS.iter().find(|t| t.0 == from).unwrap().2;
+        let out = st.track_deck(from).unwrap_or_else(|| {
+            let free = if st.decks[0].info.playing { 1 } else { 0 };
+            st.load_track(free, path);
+            free
+        });
+        if let Err(e) = st.arm(mix as usize) {
+            return e;
+        }
+        let d = &mut st.decks[out].info;
+        let spb = State::spb(d);
+        d.position = ((SET_MIXES[mix as usize].2 - bars_before * 4.0) * spb).max(0.0);
+        d.playing = true;
+        "ok".into()
+    }
+
+    async fn set_load(&self, track: u32) -> String {
+        self.log(format!("SetLoad {track}"));
+        let mut st = self.st.lock().unwrap();
+        st.advance();
+        if st.set.active.is_empty() {
+            return "no active set".into();
+        }
+        let Some(&(_, _, path)) = SET_TRACKS.get(track as usize) else { return format!("no track {track}") };
+        let free = if st.decks[0].info.playing && !st.decks[1].info.playing { 1 } else { 0 };
+        st.load_track(free, path);
+        "ok".into()
+    }
+
+    async fn set_state(&self) -> SetState {
+        let mut st = self.st.lock().unwrap();
+        st.advance();
+        st.set_state()
+    }
+
+    async fn set_list(&self) -> Vec<(String, String, u32)> {
+        self.log("SetList".into());
+        vec![
+            ("demo".into(), "/fake/sets/demo.codj".into(), 0),
+            ("broken".into(), "/fake/sets/broken.codj".into(), 2),
+        ]
+    }
+
+    async fn set_errors(&self, name: String) -> Vec<String> {
+        self.log(format!("SetErrors {name}"));
+        if name == "broken" {
+            vec![
+                "/fake/sets/broken.codj:12:5: unknown track \"mid2\" (did you mean \"mid\"?)".into(),
+                "/fake/sets/broken.codj:20:1: bar 40 is past the end of the mix (32 bars)".into(),
+            ]
+        } else {
+            vec![]
+        }
+    }
+
     async fn dj_decks(&self) -> Vec<DeckInfo> {
         let mut st = self.st.lock().unwrap();
         st.advance();
@@ -436,6 +653,7 @@ async fn main() -> zbus::Result<()> {
             decks: [blank(), blank()],
             mixer: MixerInfo { mode: "internal".into(), master: 1.0, quantize: true, ..Default::default() },
             at: Instant::now(),
+            set: SetRt { armed: -1, out_deck: -1, ..Default::default() },
         })),
         log: std::env::var("CODJ_FAKE_LOG").ok(),
     };
