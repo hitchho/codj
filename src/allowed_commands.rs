@@ -28,6 +28,7 @@ pub enum CommandName {
     SoulseekConnect,
     SoulseekDisconnect,
     Settings,
+    Duplicates,
 }
 
 impl CommandName {
@@ -62,6 +63,7 @@ impl CommandName {
             // no arguments
             CommandName::SoulseekDisconnect => 0,
             CommandName::Settings => 0,
+            CommandName::Duplicates => 0,
         }
     }
 }
@@ -86,6 +88,7 @@ impl FromStr for CommandName {
             "slsk_connect" => Ok(Self::SoulseekConnect),
             "slsk_disconnect" => Ok(Self::SoulseekDisconnect),
             "settings" | "set" => Ok(Self::Settings),
+            "dupes" | "duplicates" => Ok(Self::Duplicates),
             _ => Err(std::io::Error::other(format!(
                 "Unkown command variant {}",
                 s

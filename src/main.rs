@@ -31,6 +31,7 @@ use utils::RunStatus;
 use zbus::{proxy, Connection, Result};
 
 mod allowed_commands;
+mod dedup;
 mod search;
 mod settings;
 mod parser;

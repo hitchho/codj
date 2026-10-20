@@ -1672,12 +1672,12 @@ impl<'a> UI<'a> {
     fn render_list_with_genre(&mut self, frame: &mut Frame) {
         let mut rows = vec![];
         let playing_index = self.music_list.playing_index;
-        for (index, music) in self.music_list.musics.iter().enumerate() {
+        for music in self.music_list.musics.iter() {
             let mut title = music.title.to_owned();
             let artist = music.artist.to_owned();
             let time = UI::duration_to_string(music.length.as_secs());
             let genre = music.genre.to_owned();
-            if playing_index == index {
+            if playing_index == music.index {
                 title.insert_str(0, self.style.list_style.playing_selector.as_str());
                 rows.push(
                     Row::new(vec![title, artist, genre, time])
@@ -1739,11 +1739,11 @@ impl<'a> UI<'a> {
     fn render_list_without_genre(&mut self, frame: &mut Frame) {
         let mut rows = vec![];
         let playing_index = self.music_list.playing_index;
-        for (index, music) in self.music_list.musics.iter().enumerate() {
+        for music in self.music_list.musics.iter() {
             let mut title = music.title.to_owned();
             let artist = music.artist.to_owned();
             let time = UI::duration_to_string(music.length.as_secs());
-            if playing_index == index {
+            if playing_index == music.index {
                 title.insert_str(0, self.style.list_style.playing_selector.as_str());
                 rows.push(
                     Row::new(vec![title, artist, time])
@@ -2177,6 +2177,13 @@ impl<'a> UI<'a> {
                 index,
             });
         }
+        self.music_list.hidden_duplicates = 0;
+        if !self.music_list.show_duplicates {
+            let all = std::mem::take(&mut self.music_list.unfiltered_music_list);
+            let (kept, hidden) = crate::dedup::hide_duplicates(all, crate::dedup::file_quality);
+            self.music_list.unfiltered_music_list = kept;
+            self.music_list.hidden_duplicates = hidden;
+        }
         self.music_list.musics = self.music_list.unfiltered_music_list.clone();
         self.music_list.playing_index = playlist.playing_index as usize;
         self.state.fetch_playlist_data().await
@@ -2253,6 +2260,9 @@ impl<'a> UI<'a> {
         let mut title = "Musics".to_string();
         if !self.queue.is_empty() {
             title += &format!(" · queue {}", self.queue.len());
+        }
+        if self.music_list.hidden_duplicates > 0 {
+            title += &format!(" · {} copies hidden", self.music_list.hidden_duplicates);
         }
         if let Some((note, at)) = &self.list_note {
             if at.elapsed() < Duration::from_secs(4) {
@@ -2829,7 +2839,10 @@ impl<'a> UI<'a> {
 
     /// Selects the currently playing song in the music list
     pub fn goto_playing(&mut self) {
-        self.music_list.selected = self.music_list.playing_index;
+        let playing = self.music_list.playing_index;
+        if let Some(i) = self.music_list.musics.iter().position(|m| m.index == playing) {
+            self.music_list.selected = i;
+        }
     }
 
     /// Selects the last element in the music list
@@ -3485,6 +3498,24 @@ impl<'a> UI<'a> {
                 self.soulseek_disconnect().await;
             }
             CommandName::Settings => self.open_settings(),
+            CommandName::Duplicates => {
+                self.music_list.show_duplicates = !self.music_list.show_duplicates;
+                let selected = self.selected_path();
+                self.fetch_playlist_data().await;
+                if let Some(i) = selected.and_then(|p| {
+                    self.music_list.musics.iter().position(|m| {
+                        <&std::path::Path>::from(&m.path) == std::path::Path::new(&p)
+                    })
+                }) {
+                    self.music_list.selected = i;
+                }
+                let note = if self.music_list.show_duplicates {
+                    "showing every copy"
+                } else {
+                    "hiding duplicate copies"
+                };
+                self.list_note = Some((note.to_string(), Instant::now()));
+            }
         }
         Ok(false)
     }
@@ -3892,9 +3923,13 @@ pub struct Musics {
     pub state: TableState,
     /// full music list (not filtered)
     pub unfiltered_music_list: Vec<Music>,
-    /// index of the currently playing song in the full music list
+    /// playlist index (`Music::index`) of the currently playing song
     playing_index: usize,
     pub setp_szie: usize,
+    /// list every copy of a song instead of only the best one (`:dupes` toggles)
+    pub show_duplicates: bool,
+    /// copies left out of the list
+    pub hidden_duplicates: usize,
 }
 
 impl Musics {

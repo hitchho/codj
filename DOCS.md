@@ -103,6 +103,7 @@ The client captures the mouse, so selecting text in the terminal needs `Shift` h
 |`:slsk_disconnect`|Disconnect from soulseek network|
 |`:slsk <query>` | `:soulseek <query>`|Search for music on soulseek network (connects on first use)|
 |`:slsk`|Open the soulseek panel|
+|`:dupes` | `:duplicates`|Show every copy of a song, or (default) only the best one: lossless over lossy, then the bigger file. Copies are the same title and artist with about the same length; untagged files are never merged. The list title says how many are hidden|
 |`:settings` | `:set`|Open the soulseek settings panel: `j`/`k` move, `Enter` edits, `Space` toggles, `Esc` closes. Changes are saved to your config file right away (comments kept); ranking settings apply to the current results immediately|
 
 # Soulseek
