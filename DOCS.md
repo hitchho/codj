@@ -104,6 +104,7 @@ The client captures the mouse, so selecting text in the terminal needs `Shift` h
 |`:slsk <query>` | `:soulseek <query>`|Search for music on soulseek network (connects on first use)|
 |`:slsk`|Open the soulseek panel|
 |`:dupes` | `:duplicates`|Show every copy of a song, or (default) only the best one: lossless over lossy, then the bigger file. Copies are the same title and artist with about the same length; untagged files are never merged. The list title says how many are hidden|
+|`:dj`|Open the live [DJ mode](#dj-mode) (also `Shift + m` in the list)|
 |`:settings` | `:set`|Open the soulseek settings panel: `j`/`k` move, `Enter` edits, `Space` toggles, `Esc` closes. Changes are saved to your config file right away (comments kept); ranking settings apply to the current results immediately|
 
 # Soulseek
@@ -158,6 +159,81 @@ Files are saved as `<name>.part` until they are complete.
 ## Retrying From Another User
 
 When a download is queued, up to 3 other users who had the same file in the search results (same file name, size within 1%) are remembered, best ranked first. If the download fails (peer unreachable, denied, upload failed, timeout) or stays queued at the uploader for 5 minutes without the transfer starting, the next of those users is tried automatically, in the same list position. The `source` column shows `retry 2/3 from <user>` while that happens, and the reason when a download failed for good.
+
+# DJ mode
+
+Two decks, a mixer and a library on one screen, played from the keyboard. Open it with `:dj` or `Shift + m` in the list (`Shift + d` already downloads lyrics). It needs a codjd with the deck API (`docs/dj-api.md`); against an older codjd the screen opens and says so in the status line.
+
+```
+ DJ   Esc back · Tab search · < > load A/B · ...                         ● live
+┌ DECK A  ▶ playing ────────────────┐┌ DECK B  ⏸ paused ─────────────────┐
+│ title — artist                    ││                                   │
+│ 129.55 BPM (trk 127.98) key 8A +1.23% SYNC                            │
+│ 01:23.4 -5:53  LOOP 4  HP ●       ││ time, loop, headphone-cue         │
+│ 1 ███ 2 ██░ 3 ░░░ 4 ░░░          ││ phase meter: the 4 beats, current lit
+│  1 0:12  2 --  3 1:35  4 --  more ○○○○   hot cues                     │
+│ ▾▆▆█▆▆█▆▆ (overview + playhead)   ││                                   │
+│ ╎█ ╎██┃██╎██│██ (zoomed strip)    ││ 8 s around the playhead, beat grid│
+├ Mixer  quantize ON · internal · xruns 0 · phase Δ +0.03 ────────────────┤
+│ A  LOW ──│██ MID … HI … FLT … FAD ████░                                  │
+│ B  …                                                                    │
+│ XF A ━━━━━━◆━━━━━━ B                                                    │
+┌ Library ────────────────────────────────────────────────────────────────┐
+```
+
+The waveform is fetched once per loaded track (`GetWaveform`) and drawn with block characters coloured by band (low red, mid green, high blue); bright up to the rms level, dim up to the peak. The deck state is polled at 30 Hz only while DJ mode is open; a failing poll shows in the status line and header (`○ no data`), never a crash. Leaving DJ mode (or quitting) never stops the music.
+
+## Keys
+
+Letters are the same in every terminal; `Alt` combinations are the mixer. Digits for hot cues and `Shift + digit` use the US layout.
+
+|Control|Deck A (left hand)|Deck B (right hand)|
+|-------|------------------|-------------------|
+|Cue (hold = preview)|`z`|`/`|
+|Play / pause|`x`|`.`|
+|Sync to the other deck|`c`|`,`|
+|Loop 4 beats on / off|`v`|`m`|
+|Pitch − / +|`a` / `s`|`k` / `l`|
+|Nudge − / + (hold)|`q` / `w`|`o` / `p`|
+|Hot cue 1–4 (empty: set, set: jump)|`1` `2` `3` `4`|`7` `8` `9` `0`|
+|Clear hot cue|`Shift + 1`…`4`|`Shift + 7`…`0`|
+|Beat jump back / forward (4 beats)|`d` / `f`|`j` / `;`|
+|EQ low + / −|`Alt + q` / `Alt + a`|`Alt + u` / `Alt + j`|
+|EQ mid + / −|`Alt + w` / `Alt + s`|`Alt + i` / `Alt + k`|
+|EQ high + / −|`Alt + e` / `Alt + d`|`Alt + o` / `Alt + l`|
+|Filter + / − (+ high-pass, − low-pass)|`Alt + r` / `Alt + f`|`Alt + p` / `Alt + ;`|
+|Channel fader up / down|`g` / `b`|`h` / `n`|
+
+|Key|Does|
+|---|----|
+|`t` / `y`|Crossfader toward A / toward B|
+|`F1` / `F2`|Headphone cue on deck A / B|
+|`F5`|Quantize on / off (mixer-wide)|
+|`Up` / `Down`, `PageUp` / `PageDown`|Move in the library|
+|`<` or `Shift + a`|Load the highlighted track onto deck A (`Shift + ,`)|
+|`>` or `Shift + b`|Load it onto deck B (`Shift + .`)|
+|`Enter`|Load it onto the deck that is not playing (A when both are idle)|
+|`Tab`|Type in the library search (same regex and `artist:`/`title:`/`genre:` filters as the list); `Tab` or `Enter` hands the keys back to the decks, `Esc` clears the search|
+|`Shift + ;` (`:`)|DJ command line: `:q` back to the normal view, `:load a`, `:load b`|
+|`Esc`|Back to the normal view|
+
+Tap vs hold: tapping EQ, filter, faders and crossfader steps 0.05, pitch steps 0.1 %. Holding ramps after 0.2 s with an ease-in to a full sweep in about 1.5 s (pitch ramps slowly, 1 to 4 %/s). Values are sent at most about 30 times a second per control and coalesced, so a slow bus never builds a backlog; the screen always shows what codjd reports.
+
+## Hold and release
+
+Hold-to-preview cue, hold-to-nudge and the ramps need to know when a key is released. In terminals with the kitty keyboard protocol (kitty, foot, WezTerm, Ghostty, Alacritty) DJ mode asks for key press/repeat/release events while it is open (`DISAMBIGUATE_ESCAPE_CODES | REPORT_EVENT_TYPES | REPORT_ALL_KEYS_AS_ESCAPE_CODES`; letters only report releases with the last flag) and gives the extra flags back when you leave DJ mode, on exit and in the panic hook. While you type in the search box or command line the extra flags are off, so typed text arrives as text.
+
+Without release events (other terminals, tmux) DJ mode says so in the status line and falls back:
+
+- cue: press starts the preview, press again ends it (on a playing deck a press just stops at the cue point)
+- nudge: a tap bends the tempo for 0.3 s; holding the key keeps it alive through the keyboard's auto-repeat
+- EQ, filter, faders, crossfader, pitch: one step per key event, so holding sweeps at your key repeat rate
+
+Auto-repeat of a tap key (play, sync, loop, hot cue, beat jump) is ignored.
+
+## Testing without codjd's engine
+
+`examples/fake_codjd.rs` serves the deck API with plausible changing state and logs every call, `examples/dj_e2e.sh` runs codj against it in tmux, all on an isolated bus (`dbus-run-session`); neither touches the real session bus.
 
 # Configuration
 
