@@ -155,7 +155,7 @@ Files are saved as `<name>.part` until they are complete.
 
 ## Retrying From Another User
 
-When a download is queued, up to 3 other users who had the same file in the search results (same file name, size within 1%) are remembered, best ranked first. If the download fails (peer unreachable, denied, upload failed, timeout) or stays queued at the uploader for 5 minutes without moving, the next of those users is tried automatically, in the same list position. The `source` column shows `retry 2/3 from <user>` while that happens, and the reason when a download failed for good.
+When a download is queued, up to 3 other users who had the same file in the search results (same file name, size within 1%) are remembered, best ranked first. If the download fails (peer unreachable, denied, upload failed, timeout) or stays queued at the uploader for 5 minutes without the transfer starting, the next of those users is tried automatically, in the same list position. The `source` column shows `retry 2/3 from <user>` while that happens, and the reason when a download failed for good.
 
 # Configuration
 

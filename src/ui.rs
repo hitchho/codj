@@ -4201,6 +4201,15 @@ mod soulseek_tests {
     }
 
     #[test]
+    fn download_signature_matches_musad() {
+        // musad's Download over D-Bus; both ends must change together
+        assert_eq!(
+            <Download as zbus::zvariant::Type>::SIGNATURE.to_string(),
+            "(usssttuusuuus)"
+        );
+    }
+
+    #[test]
     fn download_retry_info() {
         assert_eq!(dl(DownloadState::Downloading, 0, "").retry_info(), "");
         assert_eq!(dl(DownloadState::Failed, 0, "denied: Banned").retry_info(), "denied: Banned");
