@@ -143,11 +143,18 @@ Results are automatically sorted by quality score which considers:
 ## Download States
 
 Downloads are shown with colored status:
-- **Gray**: Pending (queued)
+- **Gray**: Pending (waiting for a free download slot)
+- **Blue**: Queued at the uploader (waiting for them to start sending)
 - **Yellow**: Connecting to peer
 - **Cyan**: Downloading (with progress bar)
 - **Green**: Complete
 - **Red**: Failed or Cancelled
+
+Files are saved as `<name>.part` until they are complete.
+
+## Retrying From Another User
+
+When a download is queued, up to 3 other users who had the same file in the search results (same file name, size within 1%) are remembered, best ranked first. If the download fails (peer unreachable, denied, upload failed, timeout) or stays queued at the uploader for 5 minutes without moving, the next of those users is tried automatically, in the same list position. The `source` column shows `retry 2/3 from <user>` while that happens, and the reason when a download failed for good.
 
 # Configuration
 

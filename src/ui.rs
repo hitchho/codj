@@ -2665,6 +2665,7 @@ impl<'a> UI<'a> {
             .map(|dl| {
                 let (state_str, style) = match dl.state {
                     DownloadState::Pending => ("pending", Style::default().fg(Color::Gray)),
+                    DownloadState::Queued => ("queued", Style::default().fg(Color::Blue)),
                     DownloadState::Connecting => ("connecting", Style::default().fg(Color::Yellow)),
                     DownloadState::Downloading => ("downloading", Style::default().fg(Color::Cyan)),
                     DownloadState::Complete => ("complete", Style::default().fg(Color::Green)),
@@ -2691,21 +2692,23 @@ impl<'a> UI<'a> {
                     Cell::from(state_str),
                     Cell::from(bar),
                     Cell::from(progress),
+                    Cell::from(dl.retry_info()),
                 ])
                 .style(style)
             })
             .collect();
 
         let widths = [
-            Constraint::Percentage(50),
+            Constraint::Percentage(40),
             Constraint::Length(12),
             Constraint::Length(12),
-            Constraint::Length(8),
+            Constraint::Length(7),
+            Constraint::Fill(1),
         ];
 
         let table = Table::new(rows, widths)
             .header(
-                Row::new(vec!["file", "state", "progress", "%"])
+                Row::new(vec!["file", "state", "progress", "%", "source"])
                     .style(Style::default().add_modifier(Modifier::BOLD)),
             )
             .block(
@@ -4160,6 +4163,38 @@ mod soulseek_tests {
         assert_eq!(hits.iter().map(|r| r.username.as_str()).collect::<Vec<_>>(), vec!["a", "c"]);
         // half-typed regex is matched literally
         assert!(filter_results(&all, "(").is_empty());
+    }
+
+    fn dl(state: DownloadState, attempt: u32, err: &str) -> Download {
+        Download {
+            id: 1,
+            username: "carol".into(),
+            remote_path: "a\\b.flac".into(),
+            local_path: "/tmp/b.flac".into(),
+            size: 10,
+            downloaded: 0,
+            state,
+            quality_score: 0,
+            display_name: "b.flac".into(),
+            token: 0,
+            attempt,
+            max_attempts: 3,
+            last_error: err.into(),
+        }
+    }
+
+    #[test]
+    fn download_retry_info() {
+        assert_eq!(dl(DownloadState::Downloading, 0, "").retry_info(), "");
+        assert_eq!(dl(DownloadState::Failed, 0, "denied: Banned").retry_info(), "denied: Banned");
+        assert_eq!(
+            dl(DownloadState::Queued, 2, "peer connection failed").retry_info(),
+            "retry 2/3 from carol"
+        );
+        assert_eq!(
+            dl(DownloadState::Failed, 3, "upload failed").retry_info(),
+            "retry 3/3 from carol: upload failed"
+        );
     }
 
     #[test]
