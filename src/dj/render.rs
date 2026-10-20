@@ -46,6 +46,8 @@ pub struct View<'a> {
     pub decks: &'a [DeckInfo],
     pub mixer: &'a MixerInfo,
     pub waves: [WaveView<'a>; 2],
+    /// the tempo detectors disagree on the deck's track (likely a half/double/triplet grid)
+    pub doubt: [bool; 2],
     /// the last poll of the deck state worked
     pub link_ok: bool,
     /// last polling or call error
@@ -119,7 +121,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, v: &View) {
             Rect::new(decks.x + half, decks.y, decks.width - half, decks.height)
         };
         let info = v.decks.get(i).cloned().unwrap_or_default();
-        draw_deck(buf, r, i, &info, v.waves[i], v.release_events);
+        draw_deck(buf, r, i, &info, v.waves[i], v.release_events, v.doubt[i]);
     }
     draw_mixer(buf, mixer, v);
     draw_library(buf, lib, v);
@@ -159,7 +161,15 @@ fn draw_status(buf: &mut Buffer, area: Rect, v: &View) {
     }
 }
 
-fn draw_deck(buf: &mut Buffer, area: Rect, idx: usize, d: &DeckInfo, wave: WaveView, release: bool) {
+fn draw_deck(
+    buf: &mut Buffer,
+    area: Rect,
+    idx: usize,
+    d: &DeckInfo,
+    wave: WaveView,
+    release: bool,
+    doubt: bool,
+) {
     if area.width < 12 || area.height < 3 {
         return;
     }
@@ -200,6 +210,10 @@ fn draw_deck(buf: &mut Buffer, area: Rect, idx: usize, d: &DeckInfo, wave: WaveV
         tempo.push(Span::styled(format!("{:6.2}", d.bpm), Style::default().add_modifier(Modifier::BOLD)));
         tempo.push(Span::raw(" BPM "));
         tempo.push(Span::styled(format!("(trk {:.2})", d.track_bpm), dim()));
+        if doubt {
+            // the detectors disagree: maybe half, double or 1.5x; fix with :grid
+            tempo.push(Span::styled("?", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
+        }
     } else {
         tempo.push(Span::styled("no beat grid", Style::default().fg(Color::Yellow)));
     }
@@ -690,6 +704,7 @@ mod tests {
             decks: &decks,
             mixer: &mixer,
             waves: [WaveView::Ready(&wf), WaveView::Loading],
+            doubt: [false, true],
             link_ok: true,
             error: None,
             note: None,

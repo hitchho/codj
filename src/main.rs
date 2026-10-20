@@ -170,6 +170,12 @@ pub trait Server {
     async fn dj_cue(&self, deck: u32, pressed: bool) -> Result<String>;
     /// match this deck's tempo and beat phase to the other deck
     async fn dj_sync(&self, deck: u32) -> Result<String>;
+    /// corrects a deck's detected tempo by a factor (2, 0.5, 1.5, 0.6667; 0 resets), saved per
+    /// track; replies "ok <bpm>" or an error
+    async fn dj_grid_scale(&self, deck: u32, factor: f64) -> Result<String>;
+    /// (bpm, first_beat_s, downbeat_offset, beats_per_bar, confidence, variable, octave_doubt,
+    /// analyzed)
+    async fn get_grid(&self, path: &str) -> Result<(f64, f64, u32, u32, f64, bool, bool, bool)>;
     /// temporary tempo bend, -1..1 (= -4..+4 %), 0 releases
     async fn dj_nudge(&self, deck: u32, amount: f64) -> Result<String>;
     /// jump by `beats` (negative = back), keeping the beat phase

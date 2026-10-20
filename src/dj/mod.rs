@@ -60,6 +60,8 @@ struct Shared {
     /// last non-ok reply of a call
     call_error: Option<(String, Instant)>,
     waves: [WaveSlot; 2],
+    /// per deck: (path, the detectors disagree on its tempo), fetched once per load
+    doubt: [Option<(String, bool)>; 2],
 }
 
 /// Short text for a D-Bus failure; an old codjd without the deck API gets a clear hint
@@ -115,6 +117,7 @@ impl Session {
             poll_error: None,
             call_error: None,
             waves: [WaveSlot::Empty, WaveSlot::Empty],
+            doubt: [None, None],
         }));
         let (tx, mut rx) = mpsc::unbounded_channel::<DjCall>();
 
@@ -181,10 +184,47 @@ impl Session {
         }
     }
 
+    /// Corrects a deck's grid (`DjGridScale`); the reply shows like any call's, and the deck's
+    /// tempo-doubt flag is fetched again
+    fn grid_scale(&self, deck: u8, factor: f64) {
+        let (shared, conn) = (self.shared.clone(), self.conn.clone());
+        tokio::spawn(async move {
+            let reply = async {
+                let proxy = ServerProxy::new(&conn).await?;
+                proxy.dj_grid_scale(deck as u32, factor).await
+            }
+            .await;
+            let mut s = shared.lock().unwrap();
+            s.doubt[deck as usize] = None;
+            let text = match reply {
+                Ok(r) if r.starts_with("ok") => format!("grid {}: {} BPM", ["A", "B"][deck as usize], r.trim_start_matches("ok ")),
+                Ok(r) => r,
+                Err(e) => describe_error("DjGridScale", &e),
+            };
+            s.call_error = Some((text, Instant::now()));
+        });
+    }
+
     /// Fetches the waveform for any loaded track we do not have one for yet
     fn ensure_waves(&self) {
         let mut s = self.shared.lock().unwrap();
         for i in 0..2 {
+            // whether the tempo detectors disagree: shown as a "?" next to the BPM
+            let want = s.decks[i].loaded.then(|| s.decks[i].path.clone());
+            let have = s.doubt[i].as_ref().map(|(p, _)| p.clone());
+            if let Some(p) = want.filter(|p| have.as_deref() != Some(p.as_str())) {
+                s.doubt[i] = Some((p.clone(), false));
+                let (shared, conn) = (self.shared.clone(), self.conn.clone());
+                tokio::spawn(async move {
+                    let grid = async { ServerProxy::new(&conn).await.ok()?.get_grid(&p).await.ok() }.await;
+                    if let Some(g) = grid {
+                        let mut s = shared.lock().unwrap();
+                        if s.doubt[i].as_ref().map(|(q, _)| q.as_str()) == Some(p.as_str()) {
+                            s.doubt[i] = Some((p, g.6));
+                        }
+                    }
+                });
+            }
             let d = &s.decks[i];
             let want = d.loaded.then(|| d.path.clone());
             let have = s.waves[i].path().map(str::to_string);
@@ -239,11 +279,13 @@ pub struct Pane {
 }
 
 /// What a `:` command asks for
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub enum Command {
     /// back to the normal view
     Exit,
     Load(u8),
+    /// correct a deck's detected tempo by a factor; 0 resets
+    Grid(u8, f64),
     Nothing,
     Unknown(String),
 }
@@ -258,8 +300,29 @@ pub fn parse_command(cmd: &str) -> Command {
             Some("b" | "B") => Command::Load(1),
             _ => Command::Unknown("usage: load a|b".into()),
         },
+        Some("grid") => {
+            let deck = match words.next() {
+                Some("a" | "A") => Some(0),
+                Some("b" | "B") => Some(1),
+                _ => None,
+            };
+            let factor = match words.next() {
+                Some("x2" | "*2" | "double") => Some(2.),
+                Some("/2" | "half") => Some(0.5),
+                Some("x1.5" | "*1.5") => Some(1.5),
+                Some("/1.5") => Some(2. / 3.),
+                Some("reset") => Some(0.),
+                _ => None,
+            };
+            match (deck, factor) {
+                (Some(d), Some(f)) => Command::Grid(d, f),
+                _ => Command::Unknown("usage: grid a|b x2|/2|x1.5|/1.5|reset".into()),
+            }
+        }
         None => Command::Nothing,
-        Some(other) => Command::Unknown(format!("unknown DJ command: {other} (q: back, load a|b)")),
+        Some(other) => Command::Unknown(format!(
+            "unknown DJ command: {other} (q: back, load a|b, grid a|b x2|/2|x1.5|/1.5|reset)"
+        )),
     }
 }
 
@@ -452,6 +515,7 @@ impl DjScreen {
         match parse_command(cmd) {
             Command::Exit => return Outcome::Exit,
             Command::Load(d) => self.load(d),
+            Command::Grid(d, f) => self.session.grid_scale(d, f),
             Command::Nothing => {}
             Command::Unknown(msg) => self.set_note(msg),
         }
@@ -480,6 +544,7 @@ impl DjScreen {
             WaveSlot::Ready(_, wf) => (Some(wf.clone()), WaveKind::Ready),
         };
         let waves: Vec<_> = s.waves.iter().map(wave_view).collect();
+        let doubt = [0, 1].map(|i| s.doubt[i].as_ref().is_some_and(|(_, d)| *d));
         let view_of = |i: usize| match (&waves[i].0, &waves[i].1) {
             (Some(wf), _) => WaveView::Ready(wf),
             (None, WaveKind::Loading) => WaveView::Loading,
@@ -500,6 +565,7 @@ impl DjScreen {
             decks: &s.decks,
             mixer: &s.mixer,
             waves: [view_of(0), view_of(1)],
+            doubt,
             link_ok,
             error: error.as_deref(),
             note,
@@ -626,6 +692,10 @@ mod tests {
         assert_eq!(parse_command("load A"), Command::Load(0));
         assert_eq!(parse_command(""), Command::Nothing);
         assert!(matches!(parse_command("load"), Command::Unknown(_)));
+        assert_eq!(parse_command("grid a x2"), Command::Grid(0, 2.));
+        assert_eq!(parse_command("grid B /1.5"), Command::Grid(1, 2. / 3.));
+        assert_eq!(parse_command("grid a reset"), Command::Grid(0, 0.));
+        assert!(matches!(parse_command("grid c x2"), Command::Unknown(_)));
         assert!(matches!(parse_command("qa!"), Command::Unknown(_)));
     }
 

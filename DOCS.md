@@ -214,7 +214,7 @@ Letters are the same in every terminal; `Alt` combinations are the mixer. Digits
 |`>` or `Shift + b`|Load it onto deck B (`Shift + .`)|
 |`Enter`|Load it onto the deck that is not playing (A when both are idle)|
 |`Tab`|Type in the library search (same regex and `artist:`/`title:`/`genre:` filters as the list); `Tab` or `Enter` hands the keys back to the decks, `Esc` clears the search|
-|`Shift + ;` (`:`)|DJ command line: `:q` back to the normal view, `:load a`, `:load b`|
+|`Shift + ;` (`:`)|DJ command line: `:q` back to the normal view, `:load a`, `:load b`, `:grid a x2` / `/2` / `x1.5` / `/1.5` / `reset` to correct a deck's detected tempo (saved per track). A yellow `?` after the BPM means the tempo detectors disagree, so the grid is likely half, double or 1.5× off. Sync refuses changes over ±16 % and says which tempos clash.|
 |`Esc`|Back to the normal view|
 
 Tap vs hold: tapping EQ, filter, faders and crossfader steps 0.05, pitch steps 0.1 %. Holding ramps after 0.2 s with an ease-in to a full sweep in about 1.5 s (pitch ramps slowly, 1 to 4 %/s). Values are sent at most about 30 times a second per control and coalesced, so a slow bus never builds a backlog; the screen always shows what codjd reports.
