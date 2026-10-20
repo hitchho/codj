@@ -8,7 +8,8 @@
 |Any|Normal|`Alt + k`|Select the region `above`|
 |List|Normal|`j`|Scroll down|
 |List|Normal|`k`|Scroll up|
-|List|Normal|`Space` or `Enter`|Play the music under selection|
+|Any|Any|`Space`|Pause / continue (except while typing in search, the command line or a filter)|
+|List|Normal|`Enter`|Play the music under selection|
 |List|Normal|`s`|Scroll to the currently playing music|
 |List|Normal|`q`|Add the music under selection to the play queue (the list title shows the queue length)|
 |List|Normal|`m`|Queue 5 tracks that sound like the one under selection (needs musad's audio analysis; the list title shows the highlighted track's estimated BPM and loudness)|
@@ -38,7 +39,7 @@
 |List|Command|`Enter`|Execute command|
 |List|After Search|`j`|Scroll down|
 |List|After Search|`k`|Scroll up|
-|List|After Search|`Space` or `Enter`|Play the music under selection|
+|List|After Search|`Enter`|Play the music under selection|
 |List|After Search|`p`|Toggle `play` for the currently playing song|
 |Playlist|Normal|`j`|Move down|
 |Playlist|Normal|`k`|Move up|
@@ -48,7 +49,7 @@
 |Lyrics|Normal|`Enter`|Play music from line if possible|
 |Actions|Normal|`l`|Move right|
 |Actions|Normal|`h`|Move left|
-|Actions|Normal|`Space` or `Enter`|Apply selected action (available only for `next, previous, play and stop` actions)|
+|Actions|Normal|`Enter`|Apply selected action (available only for `next, previous, play and stop` actions)|
 |Actions|Normal|`Tab`|Cycle through next option (available only for repeat and list fields)|
 |Actions|Normal|`Shift + Tab`|Cycle through previous option (available only for repeat and list fields)|
 |Seeker|Any|`k`|Toggle between `continue` playing and `pause`|
@@ -121,7 +122,7 @@ Soulseek uses optimistic registration - if you connect with a username that does
 |Soulseek|`f` or `/`|Filter the results by file name (case-insensitive regex). `Enter` keeps the filter, `Esc` clears it, arrows move while typing|
 |Soulseek|`j`|Move down in the focused list|
 |Soulseek|`k`|Move up in the focused list|
-|Soulseek|`Enter` or `Space`|Queue selected result for download (results focused)|
+|Soulseek|`Enter`|Queue selected result for download (results focused)|
 |Soulseek|`x`, `dd` or `Delete`|Remove the selected download, cancelling it if still running (downloads focused)|
 |Soulseek|`Shift + j` / `Shift + k`|Move the selected download down / up; waiting downloads start top first (`max_concurrent_downloads` run at once)|
 |Soulseek|`:`|Open the command input, returns to the soulseek panel afterwards|

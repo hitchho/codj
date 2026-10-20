@@ -573,7 +573,6 @@ impl ListMode {
                         'k' => ui.list_up(),
                         '/' | 'f' => ui.change_list_mode(ListMode::Search),
                         'q' => ui.change_list_mode(ListMode::Select),
-                        ' ' => ui.play_after_search().await,
                         _ => {}
                     },
                     KeyCode::Enter => ui.play_after_search().await,
@@ -615,7 +614,6 @@ impl ListMode {
                                     ui.change_list_mode(ListMode::Command);
                                     ui.select_region(Region::Command);
                                 }
-                                ' ' => ui.play_selected_music().await,
                                 's' => ui.goto_playing(),
                                 'g' => ui.anticipate('g'),
                                 'q' => ui.queue_selected(false).await,
@@ -706,6 +704,15 @@ impl Region {
         // the settings panel sits on top and takes every key while open
         if ui.settings_view.is_some() {
             ui.handle_settings_key(key).await;
+            return Ok(false);
+        }
+        // Space pauses/continues everywhere, except while typing
+        if key.code == KeyCode::Char(' ')
+            && key.modifiers == KeyModifiers::NONE
+            && key.kind == KeyEventKind::Press
+            && !ui.typing()
+        {
+            ui.toggle_play().await;
             return Ok(false);
         }
         if ui.queue_view.is_some() {
@@ -832,7 +839,7 @@ impl Region {
                         ui.soulseek_visible = false;
                         ui.region = Region::List;
                     }
-                    KeyCode::Enter | KeyCode::Char(' ') => {
+                    KeyCode::Enter => {
                         ui.soulseek_download_selected().await;
                     }
                     KeyCode::Char('x') | KeyCode::Delete => ui.soulseek_remove_key().await,
@@ -2262,6 +2269,13 @@ impl<'a> UI<'a> {
         }
     }
 
+    /// A text field has the keys (search, command line, soulseek filter)
+    fn typing(&self) -> bool {
+        matches!(self.mode, ListMode::Search | ListMode::Command)
+            || matches!(self.region, Region::Search | Region::Command)
+            || self.soulseek_filtering
+    }
+
     /// `m`: queue tracks that sound like the highlighted one
     async fn queue_similar(&mut self) {
         let Some(path) = self.selected_path() else { return };
@@ -2843,7 +2857,12 @@ impl<'a> UI<'a> {
     /// - if stopping
     ///     - play
     pub async fn toggle_play(&mut self) {
-        self.state.toggle_play().await;
+        // nothing loaded yet: start the highlighted track
+        if matches!(self.state.status(), PlayingStatus::Stopped) {
+            self.play_selected_music().await;
+        } else {
+            self.state.toggle_play().await;
+        }
     }
 
     /// derives the displayed lyrics state:  

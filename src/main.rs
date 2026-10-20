@@ -225,6 +225,64 @@ pub trait Server {
     async fn slsk_move_download(&self, id: u32, up: bool) -> Result<String>;
 }
 
+/// Checks that musad answers; if not, starts it (from PATH or next to this binary) in its own
+/// session so it keeps running after musa exits, and waits up to 5 s for it
+async fn ensure_musad(proxy: &ServerProxy<'_>) -> bool {
+    if proxy.get_playing_index().await.is_ok() {
+        return true;
+    }
+    let beside = env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("musad")))
+        .filter(|p| p.is_file());
+    let in_path = || {
+        env::var_os("PATH").and_then(|paths| {
+            env::split_paths(&paths)
+                .map(|dir| dir.join("musad"))
+                .find(|p| p.is_file())
+        })
+    };
+    // `setsid -f` reports success even when the program is missing, so look first
+    let Some(program) = beside.or_else(in_path) else {
+        return false;
+    };
+    let log = dirs_log_file();
+    let mut command = std::process::Command::new("setsid");
+    command.arg("-f").arg(&program).stdin(std::process::Stdio::null());
+    match log.and_then(|p| std::fs::File::create(p).ok()) {
+        Some(file) => {
+            let err = file.try_clone().ok();
+            command.stdout(file);
+            command.stderr(err.map_or(std::process::Stdio::null(), Into::into));
+        }
+        None => {
+            command.stdout(std::process::Stdio::null());
+            command.stderr(std::process::Stdio::null());
+        }
+    }
+    if command.status().map_or(true, |s| !s.success()) {
+        return false;
+    }
+    eprintln!("starting musad...");
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if proxy.get_playing_index().await.is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
+/// ~/.cache/musad/musad.log, for a musad started by musa
+fn dirs_log_file() -> Option<std::path::PathBuf> {
+    let dir = env::var_os("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache")))?
+        .join("musad");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join("musad.log"))
+}
+
 pub fn init_panic_hook() {
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
@@ -243,9 +301,14 @@ async fn main() -> Result<()> {
         panic!("Could not connect to the bus address, aborting...");
     });
     let proxy = ServerProxy::new(&connection).await?;
-    proxy.get_playing_index().await.unwrap_or_else(|_| {
-        panic!("musad is not running, start it first. aborting..");
-    });
+    if !ensure_musad(&proxy).await {
+        eprintln!(
+            "musad is not running and couldn't be started.\n\
+             Start it with `musad` (or `cargo run` in the musad repo), or put musad in your PATH \
+             so musa can start it."
+        );
+        std::process::exit(1);
+    }
 
     init_panic_hook();
     enable_raw_mode()?;
