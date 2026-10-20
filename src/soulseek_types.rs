@@ -26,6 +26,8 @@ pub enum DownloadState {
     Complete,
     Failed,
     Cancelled,
+    /// waiting in the uploader's queue
+    Queued,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, zbus::zvariant::Type)]
@@ -73,6 +75,12 @@ pub struct Download {
     pub quality_score: u32,
     pub display_name: String,
     pub token: u32,
+    /// 0 for the source picked by the user, n for the nth other user tried
+    pub attempt: u32,
+    /// how many other users may be tried in total
+    pub max_attempts: u32,
+    /// why the previous source was given up on, or why this one failed
+    pub last_error: String,
 }
 
 impl Download {
@@ -86,5 +94,20 @@ impl Download {
 
     pub fn progress_percent(&self) -> String {
         format!("{:.1}%", self.progress() * 100.0)
+    }
+
+    /// what the downloads table says about retries: "retry 2/3 from bob" while another user
+    /// is being tried, the reason once it failed for good
+    pub fn retry_info(&self) -> String {
+        let retry = (self.attempt > 0)
+            .then(|| format!("retry {}/{} from {}", self.attempt, self.max_attempts, self.username));
+        match (self.state, retry) {
+            (DownloadState::Failed, Some(r)) if !self.last_error.is_empty() => {
+                format!("{}: {}", r, self.last_error)
+            }
+            (DownloadState::Failed, None) => self.last_error.clone(),
+            (_, Some(r)) => r,
+            (_, None) => String::new(),
+        }
     }
 }

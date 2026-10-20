@@ -124,6 +124,7 @@ Soulseek uses optimistic registration - if you connect with a username that does
 |Soulseek|`j`|Move down in the focused list|
 |Soulseek|`k`|Move up in the focused list|
 |Soulseek|`Enter`|Queue selected result for download (results focused)|
+|Soulseek|`a`|Download the whole folder (album) of the selected result: every file that user has in the same folder among the results, in track order, filtered by your `formats`/bitrate/size settings, saved into a subfolder named after the remote folder (results focused)|
 |Soulseek|`x`, `dd` or `Delete`|Remove the selected download, cancelling it if still running (downloads focused)|
 |Soulseek|`Shift + j` / `Shift + k`|Move the selected download down / up; waiting downloads start top first (`max_concurrent_downloads` run at once)|
 |Soulseek|`:`|Open the command input, returns to the soulseek panel afterwards|
@@ -145,11 +146,18 @@ Results are automatically sorted by quality score which considers:
 ## Download States
 
 Downloads are shown with colored status:
-- **Gray**: Pending (queued)
+- **Gray**: Pending (waiting for a free download slot)
+- **Blue**: Queued at the uploader (waiting for them to start sending)
 - **Yellow**: Connecting to peer
 - **Cyan**: Downloading (with progress bar)
 - **Green**: Complete
 - **Red**: Failed or Cancelled
+
+Files are saved as `<name>.part` until they are complete.
+
+## Retrying From Another User
+
+When a download is queued, up to 3 other users who had the same file in the search results (same file name, size within 1%) are remembered, best ranked first. If the download fails (peer unreachable, denied, upload failed, timeout) or stays queued at the uploader for 5 minutes without the transfer starting, the next of those users is tried automatically, in the same list position. The `source` column shows `retry 2/3 from <user>` while that happens, and the reason when a download failed for good.
 
 # Configuration
 

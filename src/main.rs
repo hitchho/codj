@@ -217,6 +217,7 @@ pub trait Server {
     async fn slsk_search(&self, query: String) -> Result<String>;
     async fn slsk_get_results(&self) -> Result<Vec<RankedFile>>;
     async fn slsk_download(&self, username: String, filename: String) -> Result<String>;
+    async fn slsk_download_folder(&self, username: String, filename: String) -> Result<String>;
     async fn slsk_get_downloads(&self) -> Result<Vec<Download>>;
     async fn slsk_cancel_download(&self, id: u32) -> Result<String>;
     async fn slsk_clear_finished(&self) -> Result<String>;
