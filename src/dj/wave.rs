@@ -76,13 +76,14 @@ impl Waveform {
 }
 
 impl Bar {
-    /// 0..1 height of the peak
+    /// 0..1 height of the peak. A mild curve on the companded byte: loud masters sit near the
+    /// top all the time, this keeps the difference between kicks and gaps visible.
     pub fn height(&self) -> f64 {
-        *self.peak.iter().max().unwrap_or(&0) as f64 / 255.0
+        (*self.peak.iter().max().unwrap_or(&0) as f64 / 255.0).powf(1.5)
     }
 
     pub fn rms_height(&self) -> f64 {
-        *self.rms.iter().max().unwrap_or(&0) as f64 / 255.0
+        (*self.rms.iter().max().unwrap_or(&0) as f64 / 255.0).powf(1.5)
     }
 
     /// Colour by band energy: low red/orange, mid green, high blue, mixed by their share

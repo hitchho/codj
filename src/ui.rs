@@ -378,6 +378,9 @@ pub struct UI<'a> {
     dj: Option<Box<crate::dj::DjScreen>>,
     /// DJ mode pushed the extra keyboard flags that report key releases
     dj_kbd_pushed: bool,
+    /// while the DJ search box or command line is open, release reporting is switched off again
+    /// so typed text arrives as text
+    dj_text_pushed: bool,
 }
 
 #[allow(unused)]
@@ -1330,6 +1333,7 @@ impl<'a> UI<'a> {
             keyboard_enhanced: false,
             dj: None,
             dj_kbd_pushed: false,
+            dj_text_pushed: false,
         }
     }
 
@@ -1361,9 +1365,29 @@ impl<'a> UI<'a> {
         if self.dj.take().is_none() {
             return;
         }
+        if self.dj_text_pushed {
+            crate::kbd_pop();
+            self.dj_text_pushed = false;
+        }
         if self.dj_kbd_pushed {
             crate::kbd_pop();
             self.dj_kbd_pushed = false;
+        }
+    }
+
+    /// Typed text needs the plain protocol (shifted symbols arrive as the key plus Shift while
+    /// every key is reported as an escape code), so typing pops back to the base level
+    fn sync_dj_kbd(&mut self) {
+        if !self.dj_kbd_pushed {
+            return;
+        }
+        let typing = self.dj.as_ref().is_some_and(|d| d.typing());
+        if typing && !self.dj_text_pushed {
+            crate::kbd_push(crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES);
+            self.dj_text_pushed = true;
+        } else if !typing && self.dj_text_pushed {
+            crate::kbd_pop();
+            self.dj_text_pushed = false;
         }
     }
 
@@ -1371,6 +1395,8 @@ impl<'a> UI<'a> {
         let Some(dj) = self.dj.as_mut() else { return };
         if dj.handle_key(key, Instant::now()) == crate::dj::Outcome::Exit {
             self.leave_dj();
+        } else {
+            self.sync_dj_kbd();
         }
     }
 

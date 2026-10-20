@@ -132,7 +132,8 @@ impl Session {
                     .await;
                     let mut s = shared.lock().unwrap();
                     match both {
-                        Ok(Ok((decks, mixer))) => {
+                        Ok(Ok((mut decks, mixer))) => {
+                            decks.resize_with(2, DeckInfo::default);
                             s.decks = decks;
                             s.mixer = mixer;
                             s.poll_error = None;
@@ -223,110 +224,96 @@ pub enum Outcome {
     Exit,
 }
 
-pub struct DjScreen {
-    session: Session,
-    keys: DjKeys,
-    focus: Focus,
+/// The library list with its search box and the `:` command line: everything about typing and
+/// browsing, kept apart from the daemon so it can be tested
+pub struct Pane {
+    pub focus: Focus,
     input: Input,
     /// the search that filters `lib`
     search: String,
     all: Vec<Music>,
     lib: Vec<Music>,
-    lib_sel: usize,
-    note: Option<(String, Instant)>,
+    sel: usize,
 }
 
-impl DjScreen {
-    pub fn new(conn: Connection, library: Vec<Music>, release_events: bool) -> Self {
-        let note = if release_events {
-            None
-        } else {
-            Some((
-                "No key-release events in this terminal: cue toggles, nudge is a short bend, holds step per key repeat. Use kitty/foot/WezTerm/Ghostty for hold."
-                    .to_string(),
-                Instant::now() + Duration::from_secs(12),
-            ))
-        };
-        DjScreen {
-            session: Session::start(conn),
-            keys: DjKeys::new(release_events),
+/// What a `:` command asks for
+#[derive(Debug, PartialEq, Eq)]
+pub enum Command {
+    /// back to the normal view
+    Exit,
+    Load(u8),
+    Nothing,
+    Unknown(String),
+}
+
+/// `:` commands inside DJ mode. Quitting codj is deliberately not one of them.
+pub fn parse_command(cmd: &str) -> Command {
+    let mut words = cmd.split_whitespace();
+    match words.next() {
+        Some("q" | "quit" | "q!" | "dj" | "normal" | "back" | "x" | "wq") => Command::Exit,
+        Some("load") => match words.next() {
+            Some("a" | "A") => Command::Load(0),
+            Some("b" | "B") => Command::Load(1),
+            _ => Command::Unknown("usage: load a|b".into()),
+        },
+        None => Command::Nothing,
+        Some(other) => Command::Unknown(format!("unknown DJ command: {other} (q: back, load a|b)")),
+    }
+}
+
+impl Pane {
+    pub fn new(library: Vec<Music>) -> Self {
+        Pane {
             focus: Focus::Decks,
             input: Input::default(),
             search: String::new(),
             lib: library.clone(),
             all: library,
-            lib_sel: 0,
-            note,
+            sel: 0,
         }
     }
 
-    fn set_note(&mut self, text: impl Into<String>) {
-        self.note = Some((text.into(), Instant::now() + NOTE_FOR));
+    pub fn typing(&self) -> bool {
+        self.focus != Focus::Decks
     }
 
     fn refilter(&mut self) {
         self.lib = crate::search::search_musics(&self.search, &self.all);
-        self.lib_sel = self.lib_sel.min(self.lib.len().saturating_sub(1));
+        self.sel = self.sel.min(self.lib.len().saturating_sub(1));
     }
 
-    fn selected_path(&self) -> Option<String> {
-        self.lib
-            .get(self.lib_sel)
-            .map(|m| <&std::path::Path>::from(&m.path).to_string_lossy().into_owned())
+    pub fn selected(&self) -> Option<&Music> {
+        self.lib.get(self.sel)
     }
 
-    fn load(&mut self, deck: u8) {
-        match self.selected_path() {
-            Some(path) => {
-                let name = self.lib[self.lib_sel].title.clone();
-                self.session.send(vec![DjCall::Load { deck: deck as u32, path }]);
-                self.set_note(format!("loading {name} onto deck {}", if deck == 0 { "A" } else { "B" }));
-            }
-            None => self.set_note("nothing selected in the library"),
-        }
+    pub fn selected_path(&self) -> Option<String> {
+        self.selected().map(|m| <&std::path::Path>::from(&m.path).to_string_lossy().into_owned())
     }
 
-    /// Handles a key; performance keys are queued for the next [`tick`]
-    pub fn handle_key(&mut self, key: &KeyEvent, now: Instant) -> Outcome {
-        match self.focus {
-            Focus::Search | Focus::Command => return self.handle_typing(key),
-            Focus::Decks => {}
-        }
-        let Some(nav) = self.keys.on_key(key, now) else {
-            return Outcome::Stay;
-        };
-        let page = 5usize;
-        match nav {
-            Nav::Exit => return Outcome::Exit,
-            Nav::Command => {
-                self.input = Input::default();
-                self.focus = Focus::Command;
-            }
-            Nav::Search => {
-                self.input = Input::new(self.search.clone());
-                self.focus = Focus::Search;
-            }
-            Nav::LibUp => self.lib_sel = self.lib_sel.saturating_sub(1),
-            Nav::LibDown => self.lib_sel = (self.lib_sel + 1).min(self.lib.len().saturating_sub(1)),
-            Nav::LibPageUp => self.lib_sel = self.lib_sel.saturating_sub(page),
-            Nav::LibPageDown => self.lib_sel = (self.lib_sel + page).min(self.lib.len().saturating_sub(1)),
-            Nav::Load(d) => self.load(d),
-            Nav::LoadSmart => {
-                // the deck that is not playing; both idle: A
-                let playing = |i: usize| self.session.shared.lock().unwrap().decks[i].playing;
-                let deck = if playing(0) && !playing(1) { 1 } else { 0 };
-                self.load(deck);
-            }
-        }
-        Outcome::Stay
+    pub fn start_search(&mut self) {
+        self.input = Input::new(self.search.clone());
+        self.focus = Focus::Search;
     }
 
-    fn handle_typing(&mut self, key: &KeyEvent) -> Outcome {
+    pub fn start_command(&mut self) {
+        self.input = Input::default();
+        self.focus = Focus::Command;
+    }
+
+    pub fn scroll(&mut self, by: isize) {
+        let last = self.lib.len().saturating_sub(1) as isize;
+        self.sel = (self.sel as isize + by).clamp(0, last) as usize;
+    }
+
+    /// A key while the search box or command line is open. Returns the command line's text when
+    /// it was submitted.
+    pub fn handle_typing(&mut self, key: &KeyEvent) -> Option<String> {
         if key.kind == KeyEventKind::Release {
-            return Outcome::Stay;
+            return None;
         }
         let searching = self.focus == Focus::Search;
         let plain = key.modifiers.difference(KeyModifiers::SHIFT).is_empty();
+        let mut submitted = None;
         match key.code {
             KeyCode::Esc => {
                 if searching {
@@ -337,18 +324,13 @@ impl DjScreen {
             }
             KeyCode::Tab if searching => self.focus = Focus::Decks,
             KeyCode::Enter => {
-                if searching {
-                    self.focus = Focus::Decks;
-                } else {
-                    let cmd = self.input.value().trim().to_string();
-                    self.focus = Focus::Decks;
-                    return self.run_command(&cmd);
+                if !searching {
+                    submitted = Some(self.input.value().trim().to_string());
                 }
+                self.focus = Focus::Decks;
             }
-            KeyCode::Up if searching => self.lib_sel = self.lib_sel.saturating_sub(1),
-            KeyCode::Down if searching => {
-                self.lib_sel = (self.lib_sel + 1).min(self.lib.len().saturating_sub(1))
-            }
+            KeyCode::Up if searching => self.scroll(-1),
+            KeyCode::Down if searching => self.scroll(1),
             KeyCode::Char(c) if plain => {
                 self.input.handle(InputRequest::InsertChar(c));
             }
@@ -369,30 +351,94 @@ impl DjScreen {
         if searching && self.focus == Focus::Search {
             self.search = self.input.value().to_string();
             self.refilter();
-            self.lib_sel = 0;
+            self.sel = 0;
+        }
+        submitted
+    }
+}
+
+pub struct DjScreen {
+    session: Session,
+    keys: DjKeys,
+    pane: Pane,
+    note: Option<(String, Instant)>,
+}
+
+impl DjScreen {
+    pub fn new(conn: Connection, library: Vec<Music>, release_events: bool) -> Self {
+        let note = (!release_events).then(|| {
+            (
+                "No key-release events in this terminal: cue toggles, nudge is a short bend, holds step per key repeat. Use kitty/foot/WezTerm/Ghostty for hold."
+                    .to_string(),
+                Instant::now() + Duration::from_secs(12),
+            )
+        });
+        DjScreen {
+            session: Session::start(conn),
+            keys: DjKeys::new(release_events),
+            pane: Pane::new(library),
+            note,
+        }
+    }
+
+    /// the search box or command line has the keyboard (text is typed, not performed)
+    pub fn typing(&self) -> bool {
+        self.pane.typing()
+    }
+
+    fn set_note(&mut self, text: impl Into<String>) {
+        self.note = Some((text.into(), Instant::now() + NOTE_FOR));
+    }
+
+    fn load(&mut self, deck: u8) {
+        match (self.pane.selected_path(), self.pane.selected()) {
+            (Some(path), Some(m)) => {
+                let name = m.title.clone();
+                self.session.send(vec![DjCall::Load { deck: deck as u32, path }]);
+                self.set_note(format!("loading {name} onto deck {}", if deck == 0 { "A" } else { "B" }));
+            }
+            _ => self.set_note("nothing selected in the library"),
+        }
+    }
+
+    /// Handles a key; performance keys are queued for the next [`tick`]
+    pub fn handle_key(&mut self, key: &KeyEvent, now: Instant) -> Outcome {
+        if self.pane.typing() {
+            return match self.pane.handle_typing(key) {
+                Some(cmd) => self.run_command(&cmd),
+                None => Outcome::Stay,
+            };
+        }
+        let Some(nav) = self.keys.on_key(key, now) else {
+            return Outcome::Stay;
+        };
+        match nav {
+            Nav::Exit => return Outcome::Exit,
+            Nav::Command => self.pane.start_command(),
+            Nav::Search => self.pane.start_search(),
+            Nav::LibUp => self.pane.scroll(-1),
+            Nav::LibDown => self.pane.scroll(1),
+            Nav::LibPageUp => self.pane.scroll(-5),
+            Nav::LibPageDown => self.pane.scroll(5),
+            Nav::Load(d) => self.load(d),
+            Nav::LoadSmart => {
+                // the deck that is not playing; both idle: A
+                let playing = |i: usize| self.session.shared.lock().unwrap().decks[i].playing;
+                let deck = if playing(0) && !playing(1) { 1 } else { 0 };
+                self.load(deck);
+            }
         }
         Outcome::Stay
     }
 
-    /// `:` commands inside DJ mode. Quitting codj is deliberately not one of them.
     fn run_command(&mut self, cmd: &str) -> Outcome {
-        let mut words = cmd.split_whitespace();
-        match words.next() {
-            Some("q" | "quit" | "q!" | "dj" | "normal" | "back" | "x" | "wq") => Outcome::Exit,
-            Some("load") => {
-                match words.next() {
-                    Some("a" | "A") => self.load(0),
-                    Some("b" | "B") => self.load(1),
-                    _ => self.set_note("usage: load a|b"),
-                }
-                Outcome::Stay
-            }
-            None => Outcome::Stay,
-            Some(other) => {
-                self.set_note(format!("unknown DJ command: {other} (q: back, load a|b)"));
-                Outcome::Stay
-            }
+        match parse_command(cmd) {
+            Command::Exit => return Outcome::Exit,
+            Command::Load(d) => self.load(d),
+            Command::Nothing => {}
+            Command::Unknown(msg) => self.set_note(msg),
         }
+        Outcome::Stay
     }
 
     /// Call every loop iteration: advances ramps, sends calls, fetches waveforms
@@ -423,6 +469,7 @@ impl DjScreen {
             (None, WaveKind::Missing) => WaveView::Missing,
             _ => WaveView::None,
         };
+        let link_ok = s.poll_error.is_none();
         let error = s
             .poll_error
             .clone()
@@ -436,14 +483,15 @@ impl DjScreen {
             decks: &s.decks,
             mixer: &s.mixer,
             waves: [view_of(0), view_of(1)],
+            link_ok,
             error: error.as_deref(),
             note,
-            focus: self.focus,
-            input: self.input.value(),
-            search: &self.search,
-            lib: &self.lib,
-            lib_total: self.all.len(),
-            lib_sel: self.lib_sel,
+            focus: self.pane.focus,
+            input: self.pane.input.value(),
+            search: &self.pane.search,
+            lib: &self.pane.lib,
+            lib_total: self.pane.all.len(),
+            lib_sel: self.pane.sel,
             release_events: self.keys.release_events(),
         };
         render::draw(frame.buffer_mut(), area, &view);
@@ -455,4 +503,122 @@ enum WaveKind {
     Loading,
     Missing,
     Ready,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::KeyEventState;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent { code, modifiers: KeyModifiers::NONE, kind: KeyEventKind::Press, state: KeyEventState::NONE }
+    }
+
+    fn music(title: &str, artist: &str) -> Music {
+        Music {
+            title: title.into(),
+            artist: artist.into(),
+            path: std::path::PathBuf::from(format!("/m/{title}.flac")).into(),
+            ..Default::default()
+        }
+    }
+
+    fn pane() -> Pane {
+        Pane::new(vec![
+            music("Aftertekno", "Pneumatix"),
+            music("Smokin", "Aasi"),
+            music("Hot minute", "Nlogax"),
+        ])
+    }
+
+    fn type_str(p: &mut Pane, s: &str) {
+        for c in s.chars() {
+            p.handle_typing(&key(KeyCode::Char(c)));
+        }
+    }
+
+    #[test]
+    fn search_filters_with_the_library_regex() {
+        let mut p = pane();
+        p.start_search();
+        assert!(p.typing());
+        type_str(&mut p, "artist:^n");
+        assert_eq!(p.lib.len(), 1);
+        assert_eq!(p.selected().unwrap().title, "Hot minute");
+        // Enter keeps the filter and gives the keyboard back to the decks
+        assert_eq!(p.handle_typing(&key(KeyCode::Enter)), None);
+        assert!(!p.typing());
+        assert_eq!(p.lib.len(), 1);
+        // Tab edits it again, Esc clears it
+        p.start_search();
+        assert_eq!(p.input.value(), "artist:^n");
+        p.handle_typing(&key(KeyCode::Esc));
+        assert_eq!(p.lib.len(), 3);
+        assert!(!p.typing());
+    }
+
+    #[test]
+    fn typed_performance_letters_go_to_the_search_box() {
+        let mut p = pane();
+        p.start_search();
+        type_str(&mut p, "zxcv");
+        assert_eq!(p.input.value(), "zxcv");
+        assert!(p.lib.is_empty());
+        p.handle_typing(&key(KeyCode::Backspace));
+        assert_eq!(p.input.value(), "zxc");
+    }
+
+    #[test]
+    fn release_events_do_not_type() {
+        let mut p = pane();
+        p.start_search();
+        let mut e = key(KeyCode::Char('a'));
+        e.kind = KeyEventKind::Release;
+        p.handle_typing(&e);
+        assert_eq!(p.input.value(), "");
+    }
+
+    #[test]
+    fn scrolling_stays_in_range() {
+        let mut p = pane();
+        p.scroll(-1);
+        assert_eq!(p.sel, 0);
+        p.scroll(10);
+        assert_eq!(p.sel, 2);
+        assert_eq!(p.selected_path().unwrap(), "/m/Hot minute.flac");
+    }
+
+    #[test]
+    fn command_line_returns_the_command_on_enter_only() {
+        let mut p = pane();
+        p.start_command();
+        assert_eq!(p.handle_typing(&key(KeyCode::Char('q'))), None);
+        assert_eq!(p.handle_typing(&key(KeyCode::Enter)), Some("q".to_string()));
+        assert!(!p.typing());
+        p.start_command();
+        type_str(&mut p, "load a");
+        p.handle_typing(&key(KeyCode::Esc));
+        assert!(!p.typing());
+    }
+
+    #[test]
+    fn commands() {
+        assert_eq!(parse_command("q"), Command::Exit);
+        assert_eq!(parse_command("dj"), Command::Exit);
+        assert_eq!(parse_command("load b"), Command::Load(1));
+        assert_eq!(parse_command("load A"), Command::Load(0));
+        assert_eq!(parse_command(""), Command::Nothing);
+        assert!(matches!(parse_command("load"), Command::Unknown(_)));
+        assert!(matches!(parse_command("qa!"), Command::Unknown(_)));
+    }
+
+    #[test]
+    fn friendly_errors() {
+        let e = zbus::Error::MethodError(
+            zbus::names::OwnedErrorName::try_from("org.freedesktop.DBus.Error.UnknownMethod").unwrap(),
+            Some("Unknown method 'DjDecks'".into()),
+            zbus::message::Message::method_call("/", "x").unwrap().build(&()).unwrap(),
+        );
+        assert_eq!(describe_error("DjDecks", &e), "codjd has no deck API (DjDecks): update codjd");
+    }
 }

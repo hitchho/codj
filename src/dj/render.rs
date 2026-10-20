@@ -46,6 +46,8 @@ pub struct View<'a> {
     pub decks: &'a [DeckInfo],
     pub mixer: &'a MixerInfo,
     pub waves: [WaveView<'a>; 2],
+    /// the last poll of the deck state worked
+    pub link_ok: bool,
     /// last polling or call error
     pub error: Option<&'a str>,
     pub note: Option<&'a str>,
@@ -125,7 +127,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, v: &View) {
 }
 
 fn draw_header(buf: &mut Buffer, area: Rect, v: &View) {
-    let live = v.error.is_none();
+    let live = v.link_ok;
     let left = Line::from(vec![
         Span::styled(" DJ ", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
         Span::styled(
@@ -688,6 +690,7 @@ mod tests {
             decks: &decks,
             mixer: &mixer,
             waves: [WaveView::Ready(&wf), WaveView::Loading],
+            link_ok: true,
             error: None,
             note: None,
             focus: Focus::Decks,
@@ -755,6 +758,7 @@ mod tests {
         let text = render(120, 35, |v| {
             static EMPTY: std::sync::OnceLock<Vec<DeckInfo>> = std::sync::OnceLock::new();
             v.decks = EMPTY.get_or_init(|| vec![DeckInfo::default(), DeckInfo::default()]);
+            v.link_ok = false;
             v.error = Some("codjd has no deck API (DjDecks): update codjd");
         });
         assert!(text.contains("— empty —"));
