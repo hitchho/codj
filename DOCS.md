@@ -209,15 +209,44 @@ Letters are the same in every terminal; `Alt` combinations are the mixer. Digits
 |`t` / `y`|Crossfader toward A / toward B|
 |`F1` / `F2`|Headphone cue on deck A / B|
 |`F5`|Quantize on / off (mixer-wide)|
+|`F6` / `F7` / `F8`|[Set](#sets-in-dj-mode): arm the next mix / auto mode on-off / disarm|
 |`Up` / `Down`, `PageUp` / `PageDown`|Move in the library|
 |`<` or `Shift + a`|Load the highlighted track onto deck A (`Shift + ,`)|
 |`>` or `Shift + b`|Load it onto deck B (`Shift + .`)|
 |`Enter`|Load it onto the deck that is not playing (A when both are idle)|
 |`Tab`|Type in the library search (same regex and `artist:`/`title:`/`genre:` filters as the list); `Tab` or `Enter` hands the keys back to the decks, `Esc` clears the search|
 |`Shift + ;` (`:`)|DJ command line: `:q` back to the normal view, `:load a`, `:load b`, `:grid a x2` / `/2` / `x1.5` / `/1.5` / `reset` to correct a deck's detected tempo (saved per track). A yellow `?` after the BPM means the tempo detectors disagree, so the grid is likely half, double or 1.5× off. Sync refuses changes over ±16 % and says which tempos clash.|
-|`Esc`|Back to the normal view|
+|`Esc`|Closes the set error overlay if open, else back to the normal view|
 
 Tap vs hold: tapping EQ, filter, faders and crossfader steps 0.05, pitch steps 0.1 %. Holding ramps after 0.2 s with an ease-in to a full sweep in about 1.5 s (pitch ramps slowly, 1 to 4 %/s). Values are sent at most about 30 times a second per control and coalesced, so a slow bus never builds a backlog; the screen always shows what codjd reports.
+
+## Sets in DJ mode
+
+A set is a text file (`docs/set-language.md` in the codjd repo): tracks, cues and the transitions between them in bars and beats. codjd runs the mixes; DJ mode shows the set and arms mixes. All of it needs a codjd with the "Set runtime (D-Bus)" methods (`docs/dj-api.md`); against an older codjd the strip never appears and a set command says `codjd has no set runtime: update codjd`.
+
+Mixes and tracks are numbered from 1 on screen (the bus counts from 0).
+
+|Command|Does|
+|-------|----|
+|`:set`|List the sets with their error counts in the status line|
+|`:set <name>`|Make a set active (name, file name or stem); `:set none` deactivates|
+|`:arm <n>` / `:arm next`|Arm mix `n`: its outgoing track must be on a deck, the incoming one is loaded on the other deck, synced; the mix runs by itself when the outgoing deck reaches the mix start. `next` picks the mix after a running one, else the first whose outgoing track is on a deck (a playing one first)|
+|`:disarm`|Cancel the armed or running mix's remaining automation; controls stay where they are|
+|`:auto on` / `:auto off`|Auto mode: after a mix ends, the next one whose outgoing track is on air is armed (`:auto` alone toggles)|
+|`:preview <n> [bars]`|Audition mix `n`: both tracks loaded, the outgoing deck `bars` (default 8) before the mix start, armed and playing|
+|`:load <n>`|Load track `n` of the set onto the free deck with the set's grid/gain overrides (`:load a` / `:load b` still load the library selection)|
+|`:errors`|The active set's errors as `file:line:col: message` in an overlay; `Esc` closes it|
+|`:edit`|Open the set file in `$EDITOR` (else `$VISUAL`, else `vi`). The terminal is handed over (raw mode, alternate screen, mouse capture and keyboard-protocol flags are given back), the audio keeps playing, and everything is restored when the editor exits; codjd reloads the file when you save|
+
+|Key|Does|
+|---|----|
+|`F6`|Arm the next mix (same as `:arm next`); a mix that is armed but not yet started is not re-armed|
+|`F7`|Auto mode on / off|
+|`F8`|Disarm|
+
+`Enter` is not used for this: it loads the library selection onto the free deck.
+
+While a set is active a strip sits between the decks and the mixer: the set name, `✓ no errors` or `✗ N errors` in red, `AUTO` when auto mode is on, the track list with the track on air (`▶`, green) and the incoming one (`»`, yellow) and the mixes as segments between them (`───16b▶` is a 16-bar mix, bold when armed). For the armed mix there is a progress bar over its length in bars with the current bar and a `◆` at each upcoming automation item, and below it the next items (`bar 16 · swap low`). Without an armed mix the strip lists the mixes and which one F6 would arm. It is 6 rows on a tall screen, 4 on a medium one and one line on a small one. `SetState` is polled at about 7 Hz while a set is active, once a second otherwise.
 
 ## Hold and release
 
@@ -233,7 +262,7 @@ Auto-repeat of a tap key (play, sync, loop, hot cue, beat jump) is ignored.
 
 ## Testing without codjd's engine
 
-`examples/fake_codjd.rs` serves the deck API with plausible changing state and logs every call, `examples/dj_e2e.sh` runs codj against it in tmux, all on an isolated bus (`dbus-run-session`); neither touches the real session bus.
+`examples/fake_codjd.rs` serves the deck API (and a fake set runtime: sets `demo` and `broken`, 3 tracks, 2 mixes, an armed mix that advances) with plausible changing state and logs every call, `examples/dj_e2e.sh` runs codj against it in tmux, all on an isolated bus (`dbus-run-session`); neither touches the real session bus.
 
 # Configuration
 
