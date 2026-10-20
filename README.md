@@ -32,6 +32,42 @@ ___
 # Keybinds and Configurations
 [docs](./DOCS.md)
 
+# Status bar widget
+
+`musa status` prints one line (`▶ Aftertekno — Pneumatix 02:18/07:17`, `⏸` when paused, `■` when stopped) and exits; with `--follow` it keeps printing whenever the track, pause state or the second changes, and survives musad restarts (prints an empty line, or `--offline TEXT`, while musad is away).
+
+```
+musa status [--follow] [--format "{icon} {title} — {artist} {elapsed}/{total}"] [--max-width N] [--offline TEXT]
+musa toggle | next | prev | vol+ | vol-     # one-shot controls, exit 1 if musad isn't running
+```
+
+`--max-width` shortens the title with `…`; `{artist}` and its ` — ` vanish when a track has no artist. Volume moves in steps of 5%.
+
+Polybar:
+
+```
+[module/musa]
+type = custom/script
+exec = musa status --follow --max-width 40
+tail = true
+click-left = musa toggle
+click-right = musa next
+scroll-up = musa vol+
+scroll-down = musa vol-
+```
+
+Waybar:
+
+```
+"custom/musa": {
+    "exec": "musa status --follow --max-width 40",
+    "on-click": "musa toggle",
+    "on-click-right": "musa next",
+    "on-scroll-up": "musa vol+",
+    "on-scroll-down": "musa vol-"
+}
+```
+
 # Thanks to:
 - [Ratatui](https://github.com/ratatui-org/ratatui)
 - [Lofty-rs](https://github.com/Serial-ATA/lofty-rs)
