@@ -33,6 +33,7 @@ use zbus::{proxy, Connection, Result};
 mod allowed_commands;
 mod bar;
 mod dedup;
+mod mcp;
 mod search;
 mod settings;
 mod parser;
@@ -152,6 +153,23 @@ pub trait Server {
     async fn playing(&self) -> Result<OuterMusic>;
     fn toggle_mute(&self) -> Result<RunStatus>;
     /// Signal fires when volume changes
+    /// Decks (DJ groundwork): replies "ok" or an error message
+    async fn dj_load(&self, deck: u32, path: &str) -> Result<String>;
+    async fn dj_play(&self, deck: u32) -> Result<String>;
+    async fn dj_pause(&self, deck: u32) -> Result<String>;
+    async fn dj_seek(&self, deck: u32, seconds: f64) -> Result<String>;
+    /// controls: rate, gain, fader, cue (per deck); crossfader, master, cue_mix
+    async fn dj_set(&self, control: &str, deck: u32, value: f64) -> Result<String>;
+    /// "internal" or "external"
+    async fn dj_mode(&self, mode: &str) -> Result<String>;
+    /// per deck: (position s, playing, decoded s, decoding finished)
+    async fn dj_state(&self) -> Result<Vec<(f64, bool, f64, bool)>>;
+    /// (xruns, second output underruns, second output skips, sample rate)
+    async fn audio_health(&self) -> Result<(u64, u64, u64, u32)>;
+    async fn audio_devices(&self) -> Result<Vec<String>>;
+    /// playlist indices of the n tracks most like `path`, nearest first
+    async fn similar_to(&self, path: &str, n: u32) -> Result<Vec<u32>>;
+
     #[zbus(signal)]
     async fn volume_changed(&self, amount: f32) -> zbus::Result<()>;
     /// Signal fires when player is in pausing state
@@ -308,6 +326,10 @@ async fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
     if args.len() > 1 && bar::is_subcommand(&args[1]) {
         std::process::exit(bar::run(&args[1..]).await);
+    }
+    // MCP server on stdio: no terminal setup, stdout carries only protocol
+    if args.len() > 1 && args[1] == "mcp" {
+        std::process::exit(mcp::run(&args[2..]).await);
     }
     let connection = Connection::session().await.unwrap_or_else(|_| {
         panic!("Could not connect to the bus address, aborting...");

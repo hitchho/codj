@@ -68,6 +68,18 @@ Waybar:
 }
 ```
 
+# Agents (MCP)
+
+`musa mcp` is an [MCP](https://modelcontextprotocol.io) server on stdio, so agents can browse the library, queue tracks and drive musad. It needs a running `musad` (it never starts one; tools return an error if it is away). Claude Code config (`.mcp.json` or `claude mcp add`):
+
+```
+{ "mcpServers": { "musa": { "command": "musa", "args": ["mcp"] } } }
+```
+
+Tools: `library`, `now_playing`, `queue`, `track_features`, `similar`, `analysis_status`, `play_index`, `toggle`, `next`, `previous`, `seek`, `set_volume`, `queue_add`, `queue_remove`, `queue_similar`, `deck_state`, `deck_load`, `deck_play`, `deck_pause`, `deck_seek`, `deck_set`, `audio_health`, `audio_devices`.
+
+Live guardrail: by default anything that changes what the audience hears is refused: `play_index`, `toggle`, `next`, `previous`, `seek`, `set_volume`, every `deck_*` call on deck 0 and `deck_set` of `master` or `crossfader`. Reads, queue edits and deck 1 (the cue deck) always work. Use `"args": ["mcp", "--live"]` to allow everything. State-changing calls are logged to stderr with a timestamp.
+
 # Thanks to:
 - [Ratatui](https://github.com/ratatui-org/ratatui)
 - [Lofty-rs](https://github.com/Serial-ATA/lofty-rs)
