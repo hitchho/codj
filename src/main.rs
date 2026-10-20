@@ -211,6 +211,8 @@ pub trait Server {
     ) -> Result<String>;
     async fn slsk_disconnect(&self) -> Result<String>;
     async fn slsk_state(&self) -> Result<ConnectionState>;
+    /// last connect outcome or error
+    async fn slsk_status(&self) -> Result<String>;
     async fn slsk_search(&self, query: String) -> Result<String>;
     async fn slsk_get_results(&self) -> Result<Vec<RankedFile>>;
     async fn slsk_download(&self, username: String, filename: String) -> Result<String>;

@@ -336,6 +336,8 @@ pub struct UI<'a> {
     selected_features: Option<(String, f64, f64)>,
     /// short-lived message in the music list title
     list_note: Option<(String, Instant)>,
+    /// search to run once the soulseek connect finishes
+    soulseek_pending_query: Option<String>,
     /// where the repeat and sort labels were drawn in the bar, for clicks
     bar_repeat: Rect,
     bar_sort: Rect,
@@ -1300,6 +1302,7 @@ impl<'a> UI<'a> {
             analysis_progress: (0, 0),
             selected_features: None,
             list_note: None,
+            soulseek_pending_query: None,
             bar_repeat: Rect::default(),
             bar_sort: Rect::default(),
             last_click: None,
@@ -3601,9 +3604,26 @@ impl<'a> UI<'a> {
     }
 
     async fn soulseek_search(&mut self, query: &str) {
-        // connect on first use, using the [soulseek] config
-        if !matches!(self.state.proxy.slsk_state().await, Ok(ConnectionState::Ready)) {
-            self.soulseek_connect().await;
+        // connect on first use, using the [soulseek] config. musad connects in the background;
+        // the search runs from poll_soulseek_results once it's logged in
+        match self.state.proxy.slsk_state().await {
+            Ok(ConnectionState::Ready) => {}
+            state => {
+                let connecting = matches!(
+                    state,
+                    Ok(ConnectionState::Connecting
+                        | ConnectionState::Connected
+                        | ConnectionState::LoggingIn)
+                );
+                if !connecting {
+                    self.soulseek_connect().await;
+                }
+                if self.soulseek_config.is_some() {
+                    self.soulseek_pending_query = Some(query.to_string());
+                    self.soulseek_status = format!("connecting... (then searching: {query})");
+                }
+                return;
+            }
         }
         // ranking settings live in the client config, the server ranks with them
         if let Some(cfg) = &self.soulseek_config {
@@ -3637,6 +3657,31 @@ impl<'a> UI<'a> {
     }
 
     pub async fn poll_soulseek_results(&mut self) {
+        // a :slsk_connect started earlier: show how it went
+        if self.soulseek_pending_query.is_none() && self.soulseek_status == "connecting..." {
+            if let Ok(msg) = self.state.proxy.slsk_status().await {
+                self.soulseek_status = msg;
+            }
+        }
+        if let Some(query) = self.soulseek_pending_query.clone() {
+            match self.state.proxy.slsk_state().await {
+                Ok(ConnectionState::Ready) => {
+                    self.soulseek_pending_query = None;
+                    self.soulseek_search(&query).await;
+                }
+                Ok(ConnectionState::Connecting
+                | ConnectionState::Connected
+                | ConnectionState::LoggingIn) => {}
+                _ => {
+                    // the connect failed: say why
+                    self.soulseek_pending_query = None;
+                    self.soulseek_connected = false;
+                    if let Ok(msg) = self.state.proxy.slsk_status().await {
+                        self.soulseek_status = msg;
+                    }
+                }
+            }
+        }
         // poll search results from server
         if let Ok(results) = self.state.proxy.slsk_get_results().await {
             self.apply_soulseek_results(results);
