@@ -629,6 +629,17 @@ impl DjKeys {
         }
     }
 
+    /// Ends every hold now (leaving the screen, or a key held across a change of keyboard mode
+    /// will never see its release): cue previews stop, nudges return to 0. The next [`tick`]
+    /// sends these together with anything still queued.
+    pub fn release_all(&mut self) {
+        for h in std::mem::take(&mut self.held) {
+            self.released(h.hold);
+        }
+        self.cue_preview = [false; 2];
+        self.last_flush = None;
+    }
+
     /// Advances ramps and timeouts; returns the calls to send now (at most one `Set` per control
     /// per [`SEND_GAP`]).
     pub fn tick(&mut self, now: Instant) -> Vec<DjCall> {
@@ -638,7 +649,8 @@ impl DjKeys {
         self.held.retain(|h| {
             let age = now.saturating_duration_since(h.last_event);
             let dead = if release {
-                age > STALE && !matches!(h.hold, Hold::Cue(_))
+                // a held key keeps sending Repeat events, so silence means a lost release
+                age > STALE
             } else {
                 age > if matches!(h.hold, Hold::Nudge(..)) { NUDGE_TAP } else { Duration::from_millis(300) }
             };
@@ -938,6 +950,35 @@ mod tests {
         assert!(k.tick(t0 + ms(500)).is_empty());
         assert_eq!(k.tick(t0 + ms(600)), vec![DjCall::Nudge { deck: 1, amount: 0.0 }]);
         assert!(k.tick(t0 + ms(700)).is_empty());
+    }
+
+    #[test]
+    fn lost_cue_release_does_not_stick() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        k.on_key(&press('z'), t0);
+        assert_eq!(k.tick(t0), vec![DjCall::Cue { deck: 0, pressed: true }]);
+        assert_eq!(k.tick(t0 + ms(3100)), vec![DjCall::Cue { deck: 0, pressed: false }]);
+    }
+
+    #[test]
+    fn release_all_ends_holds_and_flushes_pending_work() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        k.on_key(&press('w'), t0);
+        k.on_key(&press('/'), t0);
+        k.on_key(&press('x'), t0);
+        k.on_key(&alt('q', KeyEventKind::Press), t0);
+        k.release_all();
+        let calls = k.tick(t0 + ms(5));
+        assert!(calls.contains(&DjCall::Nudge { deck: 0, amount: 0.0 }));
+        assert!(calls.contains(&DjCall::Cue { deck: 1, pressed: false }));
+        assert!(calls.contains(&DjCall::Play(0)));
+        assert!(calls.contains(&DjCall::Set { control: "low", deck: 0, value: 0.05 }));
+        // nothing is left held
+        assert!(k.tick(t0 + ms(100)).is_empty());
+        k.on_key(&rel('w'), t0 + ms(120));
+        assert!(k.tick(t0 + ms(130)).is_empty());
     }
 
     #[test]

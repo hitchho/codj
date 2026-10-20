@@ -84,8 +84,10 @@ pub struct Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        for t in &self.tasks {
-            t.abort();
+        // only the poller is cut off; the executor ends by itself once the channel (dropped with
+        // this struct) is drained, so releases queued just before leaving still go out
+        if let Some(poller) = self.tasks.first() {
+            poller.abort();
         }
     }
 }
@@ -414,8 +416,16 @@ impl DjScreen {
         };
         match nav {
             Nav::Exit => return Outcome::Exit,
-            Nav::Command => self.pane.start_command(),
-            Nav::Search => self.pane.start_search(),
+            // typing switches key-release reporting off: end holds now, their release would
+            // never arrive
+            Nav::Command => {
+                self.settle(now);
+                self.pane.start_command()
+            }
+            Nav::Search => {
+                self.settle(now);
+                self.pane.start_search()
+            }
             Nav::LibUp => self.pane.scroll(-1),
             Nav::LibDown => self.pane.scroll(1),
             Nav::LibPageUp => self.pane.scroll(-5),
@@ -429,6 +439,13 @@ impl DjScreen {
             }
         }
         Outcome::Stay
+    }
+
+    /// Ends all holds and sends whatever is pending, at once
+    pub fn settle(&mut self, now: Instant) {
+        self.keys.release_all();
+        let calls = self.keys.tick(now);
+        self.session.send(calls);
     }
 
     fn run_command(&mut self, cmd: &str) -> Outcome {

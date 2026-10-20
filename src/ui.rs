@@ -1362,9 +1362,10 @@ impl<'a> UI<'a> {
 
     /// Back to the normal view (audio keeps playing; nothing is stopped)
     pub fn leave_dj(&mut self) {
-        if self.dj.take().is_none() {
-            return;
-        }
+        let Some(mut dj) = self.dj.take() else { return };
+        // release held keys and send pending taps before the session goes away
+        dj.settle(Instant::now());
+        drop(dj);
         if self.dj_text_pushed {
             crate::kbd_pop();
             self.dj_text_pushed = false;
