@@ -31,6 +31,7 @@ use utils::RunStatus;
 use zbus::{proxy, Connection, Result};
 
 mod allowed_commands;
+mod bar;
 mod dedup;
 mod search;
 mod settings;
@@ -303,6 +304,10 @@ pub fn init_panic_hook() {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let args: Vec<String> = env::args().collect();
+    if args.len() > 1 && bar::is_subcommand(&args[1]) {
+        std::process::exit(bar::run(&args[1..]).await);
+    }
     let connection = Connection::session().await.unwrap_or_else(|_| {
         panic!("Could not connect to the bus address, aborting...");
     });
@@ -329,7 +334,6 @@ async fn main() -> Result<()> {
     }
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
 
-    let args: Vec<String> = env::args().collect();
     let config_path = if args.len() > 1 {
         args[1].clone()
     } else {
