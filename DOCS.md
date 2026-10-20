@@ -122,6 +122,7 @@ Soulseek uses optimistic registration - if you connect with a username that does
 |Soulseek|`j`|Move down in the focused list|
 |Soulseek|`k`|Move up in the focused list|
 |Soulseek|`Enter` or `Space`|Queue selected result for download (results focused)|
+|Soulseek|`a`|Download the whole folder (album) of the selected result: every file that user has in the same folder among the results, in track order, filtered by your `formats`/bitrate/size settings, saved into a subfolder named after the remote folder (results focused)|
 |Soulseek|`x`, `dd` or `Delete`|Remove the selected download, cancelling it if still running (downloads focused)|
 |Soulseek|`Shift + j` / `Shift + k`|Move the selected download down / up; waiting downloads start top first (`max_concurrent_downloads` run at once)|
 |Soulseek|`:`|Open the command input, returns to the soulseek panel afterwards|

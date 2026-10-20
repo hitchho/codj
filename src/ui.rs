@@ -835,6 +835,7 @@ impl Region {
                     KeyCode::Enter | KeyCode::Char(' ') => {
                         ui.soulseek_download_selected().await;
                     }
+                    KeyCode::Char('a') => ui.soulseek_download_folder_selected().await,
                     KeyCode::Char('x') | KeyCode::Delete => ui.soulseek_remove_key().await,
                     KeyCode::Char('J') => ui.soulseek_move_download(false).await,
                     KeyCode::Char('K') => ui.soulseek_move_download(true).await,
@@ -3697,6 +3698,22 @@ impl<'a> UI<'a> {
                 self.soulseek_status = format!("download error: {}", e);
             }
         }
+    }
+
+    /// `a`: queue every file the selected result's user has in the same folder (the album)
+    async fn soulseek_download_folder_selected(&mut self) {
+        if self.soulseek_focus != SoulseekFocus::Results {
+            self.soulseek_status = "Tab to the results, then a to download the folder".to_string();
+            return;
+        }
+        let Some(rf) = self.soulseek_shown.get(self.soulseek_selected) else {
+            return;
+        };
+        let (username, filename) = (rf.username.clone(), rf.file.filename.clone());
+        self.soulseek_status = match self.state.proxy.slsk_download_folder(username, filename).await {
+            Ok(msg) => msg,
+            Err(e) => format!("download error: {}", e),
+        };
     }
 
     /// Shift+J/K: move the selected download down/up; waiting downloads start in list order.
