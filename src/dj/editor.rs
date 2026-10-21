@@ -414,21 +414,19 @@ impl Editor {
         self.loaded && self.text() != self.saved_text
     }
 
+    #[cfg(test)]
     pub fn mode(&self) -> EditorMode {
         self.state.mode
     }
 
+    #[cfg(test)]
     pub fn is_loaded(&self) -> bool {
         self.loaded
     }
 
+    #[cfg(test)]
     pub fn hash(&self) -> &str {
         &self.base_hash
-    }
-
-    /// 0-based line of the cursor
-    pub fn cursor_line(&self) -> usize {
-        self.state.cursor.row
     }
 
     /// Replaces the text (as after a load or a reload): clean, cursor at the top
@@ -740,7 +738,7 @@ impl Editor {
         if !self.loaded {
             let text = match &self.status {
                 Some((s, _)) => format!("{s}   (Esc closes)"),
-                None => "reading the set source...".into(),
+                None => format!("reading {}...", self.file),
             };
             buf.set_stringn(body.x + 1, body.y, text, body.width.saturating_sub(2) as usize, Style::default().fg(Color::Yellow));
             return;
