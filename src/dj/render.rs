@@ -304,7 +304,9 @@ pub fn draw(buf: &mut Buffer, area: Rect, v: &View) -> Vec<Spot> {
         draw_overlay(buf, decks, " set errors · Esc closes ", lines, false);
     }
     if let Some((title, lines)) = v.learn.popup {
-        draw_overlay(buf, decks, title, lines, true);
+        // the patch pane leaves the decks little room: its popups may cover the pane too
+        let over = if v.panel == Some(Panel::Patch) { Rect::new(area.x, decks.y, area.width, lib.bottom().saturating_sub(decks.y)) } else { decks };
+        draw_overlay(buf, over, title, lines, true);
     }
     draw_hints(buf, &spots, &v.hints);
     if v.learn.help {

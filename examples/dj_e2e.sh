@@ -14,7 +14,11 @@
 # Phase 6 drives the learning features: the ? key map, :help <term>, the hint explanations, :tutor
 # (the first steps advance as the fake's state changes, Tab skips, Esc pauses, :tutor resumes and
 # resets, the progress file lives in the isolated XDG_STATE_HOME) and :mix new through the fake.
-# `ONLY=6 dbus-run-session -- examples/dj_e2e.sh` runs just that phase.
+# Phase 7 drives the patch decks: F12 opens the patch pane, `:patch new d1` (written and loaded by
+# the fake), the sequencer grid (hjkl, x, velocity digits, a capital letter for the pattern, Enter
+# queues it, p goes live, u undoes), a hinted patch knob edited with ] [, `:w`, `:patch list`,
+# `:patch edit`, `:patch live`, `:patch unload`, `?`, and the checks of what the fake received.
+# `ONLY=6 dbus-run-session -- examples/dj_e2e.sh` runs just phase 6, `ONLY=7` just phase 7.
 # Needs busctl and jq (the fake agent and the conflict step talk to the fake codjd with them).
 #
 # tmux does not forward the kitty keyboard protocol, so this exercises the no-release fallback.
@@ -212,10 +216,11 @@ kill $FAKE
 echo "== hints calls received by the fake"; cat "$W/calls-hints.log"
 echo "== codj stderr (hints phase)"; cat "$W/codj-hints.err"
 }
-[ "${ONLY:-}" = 6 ] || phases_1_to_5
+[ -n "${ONLY:-}" ] || phases_1_to_5
 
 
 # --- phase 6: the learning features (fresh fake, empty progress)
+phase_6() {
 export CODJ_FAKE_LOG=$W/calls-learn.log
 rm -f "$W"/calls-learn.log
 rm -rf "$XDG_STATE_HOME/codj"
@@ -266,4 +271,72 @@ $T kill-server
 kill $FAKE
 echo "== learn calls received by the fake"; cat "$W/calls-learn.log"
 echo "== codj stderr (learn phase)"; cat "$W/codj-learn.err"
+}
+[ "${ONLY:-}" = 7 ] || phase_6
+
+# --- phase 7: patch decks (fresh fake: four empty slots, patches "acid" and "pad1" on disk)
+export CODJ_FAKE_LOG=$W/calls-patch.log
+rm -f "$W"/calls-patch.log
+rm -f "$HOME/.config/codj/config.toml"
+"$BIN/examples/fake_codjd" 2>"$W/fake7.err" & FAKE=$!
+sleep 1
+S=djpatch
+$T new-session -d -x 140 -y 44 -s $S "$BIN/codj 2>$W/codj-patch.err; sleep 30"
+sleep 2
+cmd() { keys ':'; $T send-keys -t $S -l -- "$1"; sleep 0.15; $T send-keys -t $S Enter; sleep 0.7; }
+keys M; sleep 0.5
+keys F12; sleep 0.8; cap patch_pane_empty             # four empty slots, the deck keys are off
+cmd patch\ new\ d1; sleep 1; cap patch_new_loaded     # written from the drums template, loaded into P1 (cue-only)
+cmd patch\ list; cap patch_list
+keys 1; sleep 0.8; cap patch_grid                      # the grid of P1: row names, a moving column
+keys l l l j; sleep 0.3                                # cursor to step 4, snare row
+keys x; sleep 0.4                                      # toggle the snare on (cell action)
+keys 5; sleep 0.3                                      # velocity digit on the same cell
+keys l x; sleep 0.3                                    # another cell, with the remembered velocity
+keys C; sleep 0.3; keys j j x; sleep 0.3               # edit pattern C: a hat
+cap patch_grid_edited
+keys Enter; sleep 0.5; cap patch_pattern_queued        # queued: plays at the next bar
+keys u; sleep 0.4                                      # undo the hat (PatchUndo)
+keys C-r; sleep 0.4                                    # redo it
+keys p; sleep 0.8; cap patch_live_badge                # LIVE
+keys '?'; sleep 0.4; cap patch_keys_help               # the pane's keys
+keys '?'; sleep 0.3
+keys Escape; sleep 0.4; cap patch_overview             # back from the grid to the slots
+keys f; sleep 0.3; cap patch_hints                     # labels over the knobs and the slot's controls
+keys t d; sleep 0.3; keys ']' ']' ']'; sleep 0.5       # P1 knob 1 (kick_level) up three steps
+cap patch_knob_edited
+keys f t z; sleep 0.3; keys '[' '['; sleep 0.5         # P1's fader down (DjSet deck 2)
+cmd w\ d1b; sleep 0.8                                  # PatchSave as d1b, author human
+cmd patch\ edit\ d1b; sleep 1; cap patch_editor       # the JSON in the editor pane
+keys Escape; sleep 0.5
+cmd patch\ live\ 1\ off; sleep 0.6
+cmd patch\ unload\ 1; sleep 0.6; cap patch_unloaded
+cmd patch\ load\ 3\ pad1; sleep 0.6; cap patch_load_p3
+cmd patch\ import\ /nonexistent.ncft\ lead; sleep 0.6; cap patch_import_error
+keys Escape; sleep 0.4; cap patch_closed                # the deck keys are back
+keys x; sleep 0.4                                       # deck A play (nothing loaded: still a DjPlay call)
+$T kill-server
+kill $FAKE
+echo "== patch calls received by the fake"; cat "$W/calls-patch.log"
+echo "== codj stderr (patch phase)"; cat "$W/codj-patch.err"
+P7=0
+chk() { if grep -q -- "$2" "$W/calls-patch.log"; then echo "ok   $1"; else echo "FAIL $1 ($2)"; P7=1; fi; }
+chk "patch new wrote the template as human, with an empty base hash" 'PatchWrite d1 base= author=human'
+chk "and loaded it into the first free slot" '^PatchLoad 0 d1'
+chk "a cell was set on the drums" 'PatchAction 0 {"op":"cell","seq":"drums","pattern":0,"step":3,"row":1,"on":true'
+chk "a velocity digit sent a cell with a velocity" '"on":true,"velocity":0.56'
+chk "pattern C was edited" '"pattern":2,"step":4,"row":3'
+chk "Enter queued the pattern for the next bar" '"op":"pattern","seq":"drums","pattern":2,"now":false'
+chk "u and Ctrl-r went to the daemon" '^PatchUndo 0'
+chk "redo too" '^PatchRedo 0'
+chk "p sent the slot live" '^PatchLive 0 true'
+chk "a hinted knob was edited as a knob action" '"op":"knob","name":"kick_level"'
+chk "the slot fader went out as DjSet on deck 2" '^DjSet fader 2'
+chk ":w saved the slot as human" '^PatchSave 0 d1b author=human'
+chk ":patch edit read the source" '^PatchSource d1b'
+chk ":patch live and unload" '^PatchLive 0 false'
+chk "unload" '^PatchUnload 0'
+chk "load into P3" '^PatchLoad 2 pad1'
+chk "import" '^PatchImport /nonexistent.ncft lead author=human'
+[ "$P7" = 0 ] && echo "PHASE 7 OK" || { echo "PHASE 7 FAILED"; exit 1; }
 exit 0

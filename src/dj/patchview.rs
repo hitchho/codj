@@ -46,7 +46,7 @@ pub struct PatchView<'a> {
 }
 
 const LABEL_W: usize = 8;
-const KNOB_NAME_W: usize = 9;
+const KNOB_NAME_W: usize = 12;
 const KNOB_BAR_W: usize = 6;
 /// width of a knob group: name, bar and value
 const KNOB_W: usize = KNOB_NAME_W + 1 + KNOB_BAR_W + 1 + 5;
@@ -118,15 +118,18 @@ fn slot_line(slot: usize, s: &PatchSlot, selected: bool, mix: [f64; 3], w: usize
     let cpu = format!(" cpu {:>2.0}%", s.cpu * 100.0);
     g.push(group(cpu, if s.cpu >= 0.25 { Style::default().fg(Color::Red) } else { dim() }));
     let mixer = |name: &str, spans: Vec<Span<'static>>, target: Target| {
-        let mut all = vec![Span::raw(format!(" {name} "))];
+        let mut all = vec![Span::raw(format!("{name} "))];
         all.extend(spans);
         Group { spans: all, target: Some(target) }
     };
     let deck = hints::slot_deck(slot as u8);
     let t = |c: Ctl| Target::Slot(super::keys::Slot::Ctl(c));
-    // the label sits over the first two letters of the caption, after the leading space
+    // the hint label sits over the first two letters of the caption
+    g.push(plain(" "));
     g.push(mixer("fader", unipolar(mix[0], 6, Color::Green), t(Ctl::Fader(deck))));
+    g.push(plain(" "));
     g.push(mixer("filt", bipolar(mix[1], 7, Color::Yellow), t(Ctl::Filter(deck))));
+    g.push(plain(" "));
     g.push(mixer("low", bipolar(mix[2], 7, Color::Red), t(Ctl::Eq(deck, 0))));
     if !s.muted_reason.is_empty() {
         g.push(group(format!("  ✖ MUTED: {}", s.muted_reason), Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)));

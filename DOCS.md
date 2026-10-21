@@ -217,12 +217,13 @@ Letters are the same in every terminal; `Alt` combinations are the mixer. Digits
 |`F6` / `F7` / `F8`|[Set](#sets-in-dj-mode): arm the next mix / auto mode on-off / disarm|
 |`F9`|[Record](#capture-and-recording) a mix into the active set on / off (same as `:rec`)|
 |`F10` / `F11`|[Editor pane / AI prompt box](#editor-pane-and-ai-prompt-box)|
+|`F12`|[Patch pane](#patch-decks): synths and drum machines in four slots, with a sequencer grid (same as `:patch`)|
 |`Up` / `Down`, `PageUp` / `PageDown`|Move in the library|
 |`<` or `Shift + a`|Load the highlighted track onto deck A (`Shift + ,`)|
 |`>` or `Shift + b`|Load it onto deck B (`Shift + .`)|
 |`Enter`|Load it onto the deck that is not playing (A when both are idle)|
 |`Tab`|Type in the library search (same regex and `artist:`/`title:`/`genre:` filters as the list); `Tab` or `Enter` hands the keys back to the decks, `Esc` clears the search. While the [tutor](#learning) is open `Tab` skips its step and `Shift + Tab` searches|
-|`Shift + ;` (`:`)|DJ command line: `:q` back to the normal view, `:load a`, `:load b`, `:grid a x2` / `/2` / `x1.5` / `/1.5` / `reset` to correct a deck's detected tempo (saved per track). A yellow `?` after the BPM means the tempo detectors disagree, so the grid is likely half, double or 1.5× off. Sync refuses changes over ±16 % and says which tempos clash. Also `:help [term]`, `:tutor [reset]` and `:mix new [recipe] [bars]`, see [Learning](#learning).|
+|`Shift + ;` (`:`)|DJ command line: `:q` back to the normal view, `:load a`, `:load b`, `:grid a x2` / `/2` / `x1.5` / `/1.5` / `reset` to correct a deck's detected tempo (saved per track). A yellow `?` after the BPM means the tempo detectors disagree, so the grid is likely half, double or 1.5× off. Sync refuses changes over ±16 % and says which tempos clash. Also `:help [term]`, `:tutor [reset]` and `:mix new [recipe] [bars]`, see [Learning](#learning), and `:patch ...`, see [Patch decks](#patch-decks).|
 |`Esc`|Closes the set error overlay if open; cancels the hints if they are up; clears the selected control; else back to the normal view|
 
 Tap vs hold: tapping EQ, filter, faders and crossfader steps 0.05, pitch steps 0.1 %. Holding ramps after 0.2 s with an ease-in to a full sweep in about 1.5 s (pitch ramps slowly, 1 to 4 %/s). Values are sent at most about 30 times a second per control and coalesced, so a slow bus never builds a backlog; the screen always shows what codjd reports.
@@ -368,7 +369,7 @@ The output (stdout and stderr) streams into the pane; the UI and the audio-facin
 |`command`|`claude -p`|The agent command line; spaces split, `"double quotes"` group|
 |`live`|`false`|`true` passes `--live` to `codj mcp`, so the agent may arm / preview / load (it changes what the audience hears)|
 |`prompt_via`|`"stdin"`|`"stdin"` or `"arg"` (last argument; for `claude` after `--`)|
-|`mcp_tools`|all set tools (+ live ones when `live`)|Allow-list of MCP tool names, without the `mcp__codj__` prefix|
+|`mcp_tools`|all set and patch tools (+ live ones when `live`)|Allow-list of MCP tool names, without the `mcp__codj__` prefix|
 
 ## Learning
 
@@ -404,6 +405,51 @@ Writes a transition for the two tracks on the decks into the active set: **outgo
 
 **Set warnings.** `SetWarnings(set)` (non-fatal findings of the set) is read when the active set changes and every 3 s: the strip shows a yellow `⚠ 2 warnings (:errors)` next to the red error badge (`⚠2` on a one-line strip) and `:errors` lists them after the errors as `warning: file:line:col: message` in yellow. An older codjd without the method just shows none.
 
+## Patch decks
+
+Besides the two decks there are four **patch slots**, P1 to P4: synths, drum machines and sequencers that play in time with the decks, built from a graph of nodes (modeled on NoiseCraft; the file format, the node catalog and the D-Bus methods are in `docs/patches.md` of the codjd repo). A patch is a JSON file in the sets folder's `patches/` that you, the AI agent or both edit. A slot is a mixer channel like a deck (fader, filter, low) whose sequencers are clocked by the beat grid. It needs a codjd with the patch methods; against an older one the pane says `codjd has no patch decks: update codjd`.
+
+**The pane** (`F12`, or `:patch`) takes the rows of the library and the set strip; the decks and the mixer stay above it. It shows one block per slot: the patch's name (a yellow `●` when it has unsaved edits), a **LIVE** (red: the room hears it) or **CUE** (cyan: headphones only) badge, its cpu share (red from 25 %, the budget codjd mutes a slot at), a red `✖ MUTED: cpu overrun` when codjd muted it, the slot's fader, filter and low, its knobs as a name, a bar and a value, and its sequencers as `drums A→C step 6` (the pattern that plays, the one queued for the next bar, the step that plays now). **The deck keys are off while the pane is open** (the header says so); `f`, `]`, `[`, `\`, `;`, the mouse wheel and a hardware knob keep working, so you can still pick and turn a control.
+
+|Key (pane open)|Does|
+|---|----|
+|`1`-`4`|Open the sequencer grid of that slot (an empty slot says how to load one)|
+|`Tab` / `Shift + Tab`|Next / previous sequencer, across the slots|
+|`Esc`|Leave the grid, then close the pane (`F12` closes it at once)|
+|`p`|Send the selected slot LIVE to the room, or back to headphones only (CUE)|
+|`u` / `Ctrl-r`|Undo / redo the slot's edits (`PatchUndo` / `PatchRedo`)|
+|`:w [name]`|Save the selected slot's patch, with its live edits, under its own name or `name` (`PatchSave`, author `human`)|
+|`?`|The keys of the pane (any key closes)|
+
+**The grid** shows one sequencer: the eight patterns `A B C D E F G H` on top (the edited one inverted, the playing one green, the queued one yellow and underlined), a beat ruler, and a row per drum sound (`kick`, `snare`, `hat` ... from the node's `row_names`) or per scale degree with its note (`8 A3` down to `1 A2`, highest on top, from the node's `scale` and `root`). Cells are `█▇▅▃▁` by velocity on drum rows and `●` on note rows; the playing step is a moving column (and a `▾` over the ruler) while the edited pattern is the one that plays. The grid is read once with `PatchSource` when a slot loads (and again when its unsaved flag clears), because `PatchState` does not carry cells; codj mirrors its own cell edits, so `u` / `Ctrl-r` keep it in step as long as the edits are made from the pane.
+
+|Key (grid open)|Does|
+|---|----|
+|`h` `j` `k` `l` or the arrows|Move the cursor|
+|`w` / `b`, `0`, `$`|Next / previous beat (4 steps), first step, last step|
+|`x`|Toggle the step. A note step holds one note: turning one on clears the rest of its column|
+|`1`-`9`|Velocity of the drum cell under the cursor: `d / 9`, so `9` is full and `1` a ghost note (0.11). On an empty cell it turns it on; `x` then uses the last one. Not on note rows|
+|`A`-`H` (Shift + letter)|Choose the pattern you edit. Edits go to it, whichever pattern plays|
+|`Enter`|Queue the edited pattern: it plays at the next bar (`PatchAction {"op":"pattern",...,"now":false}`)|
+
+Every cell change is one `PatchAction {"op":"cell",...}`: it applies at once, never recompiles and stays an unsaved edit of the slot until `:w`.
+
+|Command|Does|
+|---|----|
+|`:patch`|Open the pane|
+|`:patch new <name> [drums\|acid\|pad]`|Write a starter patch (a 4-row drum machine with a basic beat, an acid bassline with cutoff and reso knobs, or a slow pad) as `<name>` through `PatchWrite` (empty base hash, author `human`) and load it into the first free slot, CUE|
+|`:patch load [slot] <name>` / `:patch unload <slot>`|Load a patch into a slot (the first free one without a number) / empty it. Slots are numbered 1-4|
+|`:patch live <slot> [on\|off]`|LIVE or CUE; without `on` / `off` it toggles|
+|`:patch import <file.ncft> [name]`|Import a NoiseCraft file (`PatchImport`); the note says what was dropped|
+|`:patch list`|The patch files with their titles|
+|`:patch edit <name>`|The patch's JSON in the [editor pane](#editor-pane-and-ai-prompt-box) (`PatchSource` / `PatchCheck` / `PatchWrite`). `PatchCheck` errors are `<node>: message`; a marker goes on the line of that node (its key `"<id>": {` or its `"name"`), errors for the whole file (`patch: no AudioOut node`) show under the text|
+
+**Hints for patch controls.** With the pane open `f` labels every slot's knobs (up to 9 each) and its fader, filter and low, in the left-hand letters like everything else: slot P1 uses labels starting with `t`, P2 `g`, P3 `x`, P4 `c`; the second letter is the knob's position (`d q w e r t v g b`, the order in the slot's knob list) or `z` / `x` / `c` for the slot's fader / filter / low (so P1's cutoff, if it is the first knob, is `td`; P3's fader is `xz`). Then `]` / `[` / the wheel / a hardware knob edit it: a knob moves by 1/20 of its range per step and goes out as `PatchAction {"op":"knob",...}` (coalesced like the mixer values), `\` returns to the value in the patch file; the slot's mixer controls go out as `DjSet` on deck `2 + slot`. codjd reports a slot's fader but not its filter and low, so those show the last value sent from here.
+
+**AI.** The `:ai` preamble lists the four slots (patch, LIVE or CUE, muted reason, knobs with values, sequencers with their patterns) and the rules: patches only through the patch tools, `patch_node_types` then JSON then `patch_check` then `patch_write` with the `base_hash`; a LIVE slot is what the audience hears. The default tool list of the agent command now includes the always-allowed patch tools (and the live ones when `live = true`). See the MCP tools below.
+
+**MCP tools** (`codj mcp`): `patch_list`, `patch_source` (`{json, hash}`), `patch_check` (`{valid, errors}`), `patch_write` (`base_hash` required, `""` only to create; author `agent:<client>` like sets), `patch_import`, `patch_state` (the slots, knob names and values, sequencers with pattern letters, queued pattern or `null`), `patch_node_types` (the node catalog with inputs, defaults, outputs and params, plus the file format rules; it needs no daemon) and `patch_action` (one op as an object; a JSON string holding one is accepted) work without `--live`; `patch_load`, `patch_unload` and `patch_live` need `--live` (refused with the same message as the other live tools, before anything reaches D-Bus). One refinement over "always allowed": `patch_action` on a slot that is **LIVE** at that moment is refused without `--live` too, since a knob turned on the slot the audience hears is audible. Workflow: `patch_node_types` -> write the JSON -> `patch_check` -> `patch_write` -> (live) `patch_load` -> `patch_action` for knobs and cells -> `patch_live`.
+
 ## Hold and release
 
 Hold-to-preview cue, hold-to-nudge and the ramps need to know when a key is released. In terminals with the kitty keyboard protocol (kitty, foot, WezTerm, Ghostty, Alacritty) DJ mode asks for key press/repeat/release events while it is open (`DISAMBIGUATE_ESCAPE_CODES | REPORT_EVENT_TYPES | REPORT_ALL_KEYS_AS_ESCAPE_CODES`; letters only report releases with the last flag) and gives the extra flags back when you leave DJ mode, on exit and in the panic hook. While you type in the search box or command line the extra flags are off, so typed text arrives as text.
@@ -418,7 +464,7 @@ Auto-repeat of a tap key (play, sync, loop, hot cue, beat jump) is ignored.
 
 ## Testing without codjd's engine
 
-`examples/fake_codjd.rs` serves the deck API (and a fake set runtime: sets `demo` and `broken`, 3 tracks, 2 mixes, an armed mix that advances) with plausible changing state and logs every call, `examples/dj_e2e.sh` runs codj against it in tmux (sets, capture and recording included, and phase 5: control hints, label selection, `] [ \ ;` edits, the mouse wheel as SGR mouse reports, the jump keys; it also serves a set's text and hash, with conflict detection on stale writes, for the editing methods), and phase 6: the `?` key map, `:help`, hint explanations, `:tutor` (first steps advancing as the fake's state changes, `Tab`, `Esc`, resume, reset, the progress file in an isolated `XDG_STATE_HOME`) and `:mix new` through the fake's `SetRecipes` / `SetRecipeText` / `SetWarnings` / `GetGrid` / `SimilarTo` (`ONLY=6` runs just that phase); `examples/mcp_e2e.sh` drives `codj mcp` over JSON-RPC against it (set tools, stale/fresh `base_hash`, the `--live` guardrail), all on an isolated bus (`dbus-run-session`); neither touches the real session bus.
+`examples/fake_codjd.rs` serves the deck API (and a fake set runtime: sets `demo` and `broken`, 3 tracks, 2 mixes, an armed mix that advances) with plausible changing state and logs every call, `examples/dj_e2e.sh` runs codj against it in tmux (sets, capture and recording included, and phase 5: control hints, label selection, `] [ \ ;` edits, the mouse wheel as SGR mouse reports, the jump keys; it also serves a set's text and hash, with conflict detection on stale writes, for the editing methods), and phase 6: the `?` key map, `:help`, hint explanations, `:tutor` (first steps advancing as the fake's state changes, `Tab`, `Esc`, resume, reset, the progress file in an isolated `XDG_STATE_HOME`) and `:mix new` through the fake's `SetRecipes` / `SetRecipeText` / `SetWarnings` / `GetGrid` / `SimilarTo` (`ONLY=6` runs just that phase), and phase 7: the patch decks (`F12`, `:patch new d1`, the grid with `hjkl x 1-9 A-H Enter p u Ctrl-r`, a hinted knob edited with `]`, `:w`, `:patch list|edit|live|unload|load|import`) against the fake's in-memory patch files and four slots with a moving step counter (`ONLY=7` runs just that phase); `examples/mcp_e2e.sh` drives `codj mcp` over JSON-RPC against it (set and patch tools, stale/fresh `base_hash`, the `--live` guardrail), all on an isolated bus (`dbus-run-session`); neither touches the real session bus.
 
 # Configuration
 

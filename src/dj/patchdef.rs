@@ -194,10 +194,46 @@ pub fn template(kind: &str, title: &str) -> Option<String> {
     // keys in a stable, readable order: format version and title first
     let nodes = v["nodes"].take();
     let ordered = json!({"codj_patch": 1, "title": title, "nodes": nodes});
-    serde_json::to_string_pretty(&ordered).ok().map(|mut s| {
-        s.push('\n');
-        s
-    })
+    let mut text = pretty(&ordered, 0);
+    text.push('\n');
+    Some(text)
+}
+
+/// Longest line `pretty` fills before it breaks an object or array up
+const PRETTY_WIDTH: usize = 100;
+
+fn flat(v: &Value) -> String {
+    match v {
+        Value::Object(m) if m.is_empty() => "{}".into(),
+        Value::Object(m) => format!("{{ {} }}", m.iter().map(|(k, v)| format!("{}: {}", Value::String(k.clone()), flat(v))).collect::<Vec<_>>().join(", ")),
+        Value::Array(a) => format!("[{}]", a.iter().map(flat).collect::<Vec<_>>().join(", ")),
+        other => other.to_string(),
+    }
+}
+
+/// JSON the way people write patches by hand: a node on one line while it fits, long objects one
+/// entry a line, long lists of cells six to a line. Same value as `serde_json`'s output.
+pub fn pretty(v: &Value, indent: usize) -> String {
+    let one = flat(v);
+    if one.chars().count() + indent <= PRETTY_WIDTH {
+        return one;
+    }
+    let pad = " ".repeat(indent + 2);
+    match v {
+        Value::Object(m) => {
+            let rows: Vec<String> = m.iter().map(|(k, v)| format!("{pad}{}: {}", Value::String(k.clone()), pretty(v, indent + 2))).collect();
+            format!("{{\n{}\n{}}}", rows.join(",\n"), " ".repeat(indent))
+        }
+        Value::Array(a) if a.iter().all(|x| !x.is_object()) => {
+            let rows: Vec<String> = a.chunks(6).map(|c| format!("{pad}{}", c.iter().map(flat).collect::<Vec<_>>().join(", "))).collect();
+            format!("[\n{}\n{}]", rows.join(",\n"), " ".repeat(indent))
+        }
+        Value::Array(a) => {
+            let rows: Vec<String> = a.iter().map(|x| format!("{pad}{}", pretty(x, indent + 2))).collect();
+            format!("[\n{}\n{}]", rows.join(",\n"), " ".repeat(indent))
+        }
+        other => other.to_string(),
+    }
 }
 
 /// `name` as a patch file name: letters, digits, `-`, `_`; no path tricks
@@ -240,6 +276,24 @@ mod tests {
             }
         }
         assert!(template("polka", "t").is_none());
+    }
+
+    #[test]
+    fn templates_are_laid_out_for_people() {
+        for kind in TEMPLATE_KINDS {
+            let text = template(kind, "t").unwrap();
+            // few and short lines
+            assert!(text.lines().count() < 60, "{kind}: {} lines\n{text}", text.lines().count());
+            assert!(text.lines().all(|l| l.chars().count() <= PRETTY_WIDTH + 12), "{kind}: a line is too long\n{text}");
+            assert!(text.ends_with("}\n") && text.starts_with("{\n  \"codj_patch\": 1,\n  \"title\": \"t\""));
+        }
+        // a node is one line while it fits, as in the contract's example
+        let drums = template("drums", "t").unwrap();
+        assert!(drums.contains("\"1\": { \"type\": \"Clock\", \"name\": \"clock\", \"params\": { \"source\": \"master\", \"steps_per_beat\": 4 } }"), "{drums}");
+        // long cell lists break at six cells
+        assert!(drums.contains("[0, 0, 1.0], [4, 0, 1.0]"), "{drums}");
+        let v = json!({"a": [1, 2, 3], "b": {"c": "x"}});
+        assert_eq!(pretty(&v, 0), "{ \"a\": [1, 2, 3], \"b\": { \"c\": \"x\" } }");
     }
 
     #[test]
