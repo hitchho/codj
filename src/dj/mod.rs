@@ -15,6 +15,7 @@ pub mod help;
 pub mod hints;
 pub mod keys;
 pub mod mixnew;
+pub mod patch;
 pub mod patchdef;
 pub mod prompt;
 pub mod tutor;
