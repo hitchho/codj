@@ -50,8 +50,6 @@ pub enum Effect<'a> {
     SetRuntime,
     /// loading, unloading or sending a patch slot live: changes what the audience hears
     Patch,
-    /// editing a loaded patch (knob, cell, pattern, structure): audible only when the slot is live
-    PatchEdit { slot_live: bool },
 }
 
 /// True when the call changes what the audience hears and needs `--live`.
@@ -67,7 +65,6 @@ pub fn needs_live(effect: Effect) -> bool {
             _ => deck == 0,
         },
         Effect::SetRuntime | Effect::Patch => true,
-        Effect::PatchEdit { slot_live } => slot_live,
     }
 }
 
@@ -75,8 +72,8 @@ pub fn refusal(tool: &str) -> String {
     format!(
         "{tool} refused: it changes what the audience hears and this MCP server is not live. \
          Restart it with `codj mcp --live` to allow it. Reads, queue edits, deck 1 (cue deck) \
-         set editing (sources, writes, cues, recording) and patch files (list, source, check, write, import, \
-         state, node types, edits of a slot that is not live) are always allowed."
+         set editing (sources, writes, cues, recording) and patch files and edits (list, source, check, write, \
+         import, state, node types, action) are always allowed."
     )
 }
 
@@ -1113,17 +1110,11 @@ impl Codj {
         to_text(crate::dj::patchdef::catalog_json())
     }
 
-    #[tool(description = "Edit the patch loaded in `slot` live, one op at a time: knob (turn a knob by name), cell (turn a sequencer step on or off, with velocity), pattern (switch the sequencer's pattern, queued to the next bar unless now:true), set_param, set_input, connect, disconnect, add_node, remove_node, rename. Returns {ok} or the reason. The change applies at once and stays an unsaved edit of the slot (undo in codj, patch_write the JSON to keep it). Knob, cell and pattern edits never glitch; a structural edit recompiles the slot and drops it back to cue-only. An edit of a slot that is LIVE (the audience hears it) is refused unless the server runs with --live; edit slots in cue-only freely. Look at patch_state for knob and sequencer names.")]
+    #[tool(description = "Edit the patch loaded in `slot` live, one op at a time: knob (turn a knob by name), cell (turn a sequencer step on or off, with velocity), pattern (switch the sequencer's pattern, queued to the next bar unless now:true), set_param, set_input, connect, disconnect, add_node, remove_node, rename. Returns {ok} or the reason. The change applies at once and stays an unsaved edit of the slot (undo in codj, patch_write the JSON to keep it). Knob, cell and pattern edits never glitch; a structural edit recompiles the slot and drops it back to cue-only. Edits of a slot that is live (patch_state says so) are heard by the audience at once, so prefer cue-only slots while you experiment. Look at patch_state for knob and sequencer names.")]
     async fn patch_action(&self, Parameters(a): Parameters<PatchActionArgs>) -> Result<String, String> {
         let slot = check_slot(a.slot)?;
         let json = check_patch_action(&a.action)?;
-        // an edit is audible when the slot is live: the guardrail looks at what the daemon says
-        let slot_live = if self.live {
-            false
-        } else {
-            ask!(self, p => p.patch_state()).get(slot as usize).is_some_and(|s| s.loaded && s.live)
-        };
-        self.gate("patch_action", Effect::PatchEdit { slot_live }, &format!("slot={slot} action={json}"))?;
+        self.gate("patch_action", Effect::Safe, &format!("slot={slot} action={json}"))?;
         to_text(reply_detail(&ask!(self, p => p.patch_action(slot, &json)))?)
     }
 
@@ -1244,9 +1235,8 @@ mod tests {
     fn patch_tool_guardrail() {
         use Effect::*;
         assert!(needs_live(Patch));
-        // editing a slot that only the headphones hear is fine, a live one needs --live
-        assert!(!needs_live(PatchEdit { slot_live: false }));
-        assert!(needs_live(PatchEdit { slot_live: true }));
+        // reads, files and live edits (knob, cell, pattern) are always allowed
+        assert!(!needs_live(Safe));
         assert!(refusal("patch_live").contains("--live") && refusal("patch_live").contains("patch files"));
     }
 

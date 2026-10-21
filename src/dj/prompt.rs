@@ -285,11 +285,11 @@ pub fn build_prompt(request: &str, set: Option<&SetState>, decks: &[DeckInfo], p
     t.push_str("- Edit sets only through the codj MCP set tools (sets_list, set_source, set_check, set_write). Never write a set file any other way.\n");
     t.push_str("- Always call set_check on the complete new text and fix every error before set_write; pass the base_hash that set_source returned. If set_write says the set changed since you read it, read it again and redo your edit on the new text.\n");
     t.push_str("- Prefer replacing one track or mix block over rewriting the whole file, so the diff stays small. Keep everything the request does not mention exactly as it is.\n");
-    t.push_str("- Patches are JSON files edited only through the patch tools: patch_node_types (the node catalog) -> write the JSON -> patch_check until it is valid -> patch_write with the base_hash of patch_source (\"\" for a new patch). patch_action turns knobs and sequencer cells of a loaded slot (names in patch_state); a slot marked cue-only is safe to tweak, one marked LIVE is what the audience hears right now.\n");
+    t.push_str("- Patches are JSON files edited only through the patch tools: patch_node_types (the node catalog) -> write the JSON -> patch_check until it is valid -> patch_write with the base_hash of patch_source (\"\" for a new patch). patch_action turns knobs and sequencer cells of a loaded slot (names in patch_state); a slot marked cue-only is safe to tweak, one marked LIVE is what the audience hears right now, so only change it if the request asks for that.\n");
     if live {
         t.push_str("- Live mode is on: the arm/preview/load tools and patch_load/patch_unload/patch_live work and change what the audience hears. Use them only if the request asks for it, say what you did, and prefer patch_load into a free slot and a check in cue-only before patch_live.\n");
     } else {
-        t.push_str("- Never touch audio: do not arm, preview, load or change decks or the mixer, and do not load, unload or send patch slots live. The audio-affecting tools (and edits of a LIVE slot) are refused in this session anyway.\n");
+        t.push_str("- Never touch audio: do not arm, preview, load or change decks or the mixer, and do not load, unload or send patch slots live. The audio-affecting tools are refused in this session anyway.\n");
     }
     t.push_str("- Answer in a few short lines: what you changed and why.\n");
     t.push_str("\nRequest:\n");

@@ -365,7 +365,7 @@ pub const TERMS: &[Term] = &[
 /// Keys of the patch pane, for `?` while it is open
 pub const PATCH_KEYS: &[(&str, &str)] = &[
     ("F12 Esc", "open / close the pane (Esc leaves the grid first)"),
-    ("1-4", "open the sequencer grid of that slot"),
+    ("1-4  j k", "open the grid of a slot / select a slot"),
     ("Tab", "next sequencer, across slots (Shift+Tab back)"),
     ("hjkl ←↓↑→", "move the cursor on the grid"),
     ("w b 0 $", "next / previous beat, first / last step"),

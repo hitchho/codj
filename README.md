@@ -104,14 +104,14 @@ Patch tools (patch decks: synths and drum machines as JSON node graphs, see `doc
 |`patch_list`, `patch_state`|Patch files with titles; the four slots (loaded patch, live or cue-only, cpu, muted reason, knobs, sequencers with patterns)|always|
 |`patch_source`, `patch_check`|`{json, hash}` of a patch file; errors (`<node>: message`) of JSON as if saved|always|
 |`patch_write`, `patch_import`|Save after checking, `base_hash` required (author `agent:<client>`); import a NoiseCraft `.ncft`|always|
-|`patch_action`|Edit the loaded patch live: knob, cell, pattern, structure; refused on a slot that is LIVE unless `--live`|always (live slots: `--live`)|
+|`patch_action`|Edit the loaded patch live: knob, cell, pattern, structure (audible at once on a LIVE slot)|always|
 |`patch_load`, `patch_unload`, `patch_live`|Load into a slot (cue-only), unload, send to the master|`--live` only|
 
 Workflow for patches: `patch_node_types` -> write the JSON -> `patch_check` -> `patch_write` -> (live) `patch_load` -> `patch_action` for knobs and cells -> `patch_live`.
 
 Workflow for an agent editing a set: `sets_list` -> `set_source` (keep the `hash`) -> edit the text, preferably one track or mix block, leaving the rest as it is -> `set_check` until `valid` -> `set_write` with `base_hash` = that hash. If it answers "set changed since you read it" (vim, codj or another agent saved meanwhile) call `set_source` again, redo the edit on the new text and write with the new hash. Writing a set never changes what is playing; a running mix keeps its plan and the edit applies to the next arm. Needs a codjd with the set editing methods (`docs/dj-api.md`, "Set editing" and "Set sources").
 
-Live guardrail: by default anything that changes what the audience hears is refused: `play_index`, `toggle`, `next`, `previous`, `seek`, `set_volume`, every `deck_*` call on deck 0 and `deck_set` of `master` or `crossfader`. The set runtime tools (`set_arm`, `set_disarm`, `set_auto`, `set_preview`, `set_load`) are refused the same way. The patch tools `patch_load`, `patch_unload` and `patch_live` are too, and so is `patch_action` on a slot that is live. Reads, queue edits, deck 1 (the cue deck), set editing (sources, writes, captures, recording) and patch files and edits of slots that are not live always work. Use `"args": ["mcp", "--live"]` to allow everything. State-changing calls are logged to stderr with a timestamp.
+Live guardrail: by default anything that changes what the audience hears is refused: `play_index`, `toggle`, `next`, `previous`, `seek`, `set_volume`, every `deck_*` call on deck 0 and `deck_set` of `master` or `crossfader`. The set runtime tools (`set_arm`, `set_disarm`, `set_auto`, `set_preview`, `set_load`) are refused the same way. The patch tools `patch_load`, `patch_unload` and `patch_live` are too. Reads, queue edits, deck 1 (the cue deck), set editing (sources, writes, captures, recording) and the other patch tools (files, state, `patch_action`) always work. Use `"args": ["mcp", "--live"]` to allow everything. State-changing calls are logged to stderr with a timestamp.
 
 # Thanks to:
 - [Ratatui](https://github.com/ratatui-org/ratatui)

@@ -3,7 +3,7 @@
 # and checks the set tools: initialize (clientInfo "tester"), tools/list, set_source, set_check,
 # set_write with a stale and a fresh hash, capture and record, and set_arm refused without --live;
 # the patch tools too: node catalog, check, write with base_hash, import, state, actions, and
-# patch_load / patch_unload / patch_live refused without --live (and an edit of a live slot).
+# patch_load / patch_unload / patch_live refused without --live.
 #
 #   cargo build --examples && cargo build
 #   dbus-run-session -- examples/mcp_e2e.sh
@@ -168,19 +168,13 @@ start --live
 tool set_arm '{"mix":0}'
 # the fake answers like the daemon: the outgoing track is not on a deck. What matters is that it got through
 check "set_arm allowed with --live (reaches the daemon)" '! grep -q -- "--live" <<<"$T"'
-# a slot loaded by hand (this test plays the DJ over D-Bus) and sent live: agent edits of it need --live
+# a slot loaded by hand (this test plays the DJ over D-Bus): edits are always allowed
 busctl --user call net.rotko.Codj /net/rotko/Codj net.rotko.Codj.Player PatchLoad us 1 acid >/dev/null
-busctl --user call net.rotko.Codj /net/rotko/Codj net.rotko.Codj.Player PatchLive ub 1 true >/dev/null
 start
 tool patch_state '{}'
-check "patch_state shows the loaded patch, live, with its knobs" '[ "$(jq -r ".slots[1].name" <<<"$T")" = acid ] && [ "$(jq -r ".slots[1].live" <<<"$T")" = true ] && jq -e ".slots[1].knobs | map(.name) | index(\"cutoff\") != null" <<<"$T" >/dev/null && jq -e ".slots[1].sequencers[0].queued == null" <<<"$T" >/dev/null'
+check "patch_state shows the loaded patch, cue-only, with its knobs" '[ "$(jq -r ".slots[1].name" <<<"$T")" = acid ] && [ "$(jq -r ".slots[1].live" <<<"$T")" = false ] && jq -e ".slots[1].knobs | map(.name) | index(\"cutoff\") != null" <<<"$T" >/dev/null && jq -e ".slots[1].sequencers[0].queued == null" <<<"$T" >/dev/null'
 tool patch_action '{"slot":1,"action":{"op":"knob","name":"cutoff","value":0.9}}'
-check "patch_action on a LIVE slot is refused without --live" '[ "$E" = true ] && grep -q -- "--live" <<<"$T"'
-stop
-busctl --user call net.rotko.Codj /net/rotko/Codj net.rotko.Codj.Player PatchLive ub 1 false >/dev/null
-start
-tool patch_action '{"slot":1,"action":{"op":"knob","name":"cutoff","value":0.9}}'
-check "patch_action on a cue-only slot works in safe mode" '[ "$E" = false ]'
+check "patch_action works in safe mode" '[ "$E" = false ]'
 tool patch_action '{"slot":1,"action":{"op":"cell","seq":"seq","pattern":0,"step":1,"row":4,"on":true,"velocity":0.7}}'
 check "patch_action cell" '[ "$E" = false ]'
 tool patch_action '{"slot":1,"action":{"op":"pattern","seq":"seq","pattern":1,"now":false}}'
@@ -197,8 +191,6 @@ tool patch_load '{"slot":2,"name":"pad1"}'
 check "patch_load allowed with --live" '[ "$E" = false ]'
 tool patch_live '{"slot":2,"live":true}'
 check "patch_live allowed with --live" '[ "$E" = false ]'
-tool patch_action '{"slot":2,"action":{"op":"knob","name":"cutoff","value":0.8}}'
-check "patch_action on a live slot is allowed with --live" '[ "$E" = false ]'
 tool patch_unload '{"slot":2}'
 check "patch_unload allowed with --live" '[ "$E" = false ]'
 stop
@@ -208,6 +200,6 @@ echo "== calls received by the fake"; cat "$W/calls.log"
 check "writes carry author agent:tester" 'grep -q "SetWrite demo base=$H1 author=agent:tester" "$W/calls.log"'
 check "refused tools never reached the daemon" '! grep -q "^SetDisarm\|^SetAuto\|^SetPreview\|^SetLoad" "$W/calls.log" && [ "$(grep -c "^SetArm" "$W/calls.log")" = 1 ]'
 check "patch writes carry author agent:tester" 'grep -q "PatchWrite acid base=$PH1 author=agent:tester" "$W/calls.log"'
-check "refused patch calls never reached the daemon" '! grep -q "^PatchLoad 0\|^PatchUnload 0\|^PatchLive 0" "$W/calls.log" && [ "$(grep -c "PatchAction 1 .*\"value\":0.9" "$W/calls.log")" = 1 ]'
+check "refused patch calls never reached the daemon" '! grep -q "^PatchLoad 0\|^PatchUnload 0\|^PatchLive 0" "$W/calls.log"'
 echo "== codj mcp stderr"; cat "$W/mcp.err"
 [ "$FAILS" = 0 ] && echo "ALL OK" || { echo "$FAILS FAILED"; exit 1; }
