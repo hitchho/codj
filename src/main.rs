@@ -200,6 +200,12 @@ pub trait Server {
     async fn set_list(&self) -> Result<Vec<(String, String, u32)>>;
     /// `file:line:col: message` per error of a set's latest save
     async fn set_errors(&self, name: &str) -> Result<Vec<String>>;
+    /// (text, sha-256 hash) of a set file as on disk
+    async fn set_source(&self, name: &str) -> Result<(String, String)>;
+    /// errors of `text` as if it were saved; empty = valid
+    async fn set_check(&self, text: &str) -> Result<Vec<String>>;
+    /// save after checking: "ok <new hash>" or the reason (refused if `base_hash` is stale)
+    async fn set_write(&self, name: &str, text: &str, base_hash: &str, author: &str) -> Result<String>;
 
     async fn get_waveform(&self, path: &str, columns: u32) -> Result<Vec<u8>>;
     /// (xruns, second output underruns, second output skips, sample rate)

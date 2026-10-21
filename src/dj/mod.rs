@@ -8,6 +8,7 @@
 //! state, an executor task sends the calls the keys produce (coalesced), and waveforms are
 //! fetched once per loaded track. None of this blocks the UI loop.
 
+pub mod editor;
 pub mod keys;
 pub mod render;
 pub mod wave;
@@ -474,6 +475,8 @@ pub enum Command {
     SetLoad(u32),
     SetErrors,
     SetEdit,
+    /// `:e`: the in-TUI editor pane on the active set
+    Editor,
     Nothing,
     Unknown(String),
 }
@@ -560,9 +563,10 @@ pub fn parse_command(cmd: &str) -> Command {
         }
         Some("errors") => Command::SetErrors,
         Some("edit") => Command::SetEdit,
+        Some("e") => Command::Editor,
         None => Command::Nothing,
         Some(other) => Command::Unknown(format!(
-            "unknown DJ command: {other} (q: back, load a|b|<track>, grid a|b x2|/2|.., set [name], arm <n|next>, disarm, auto on|off, preview <n> [bars], errors, edit)"
+            "unknown DJ command: {other} (q: back, load a|b|<track>, grid a|b x2|/2|.., set [name], arm <n|next>, disarm, auto on|off, preview <n> [bars], errors, edit, e)"
         )),
     }
 }
@@ -727,6 +731,10 @@ pub struct DjScreen {
     note: Option<(String, Instant)>,
     /// `:edit` asked for the editor on this file; main suspends the terminal and runs it
     edit_request: Option<std::path::PathBuf>,
+    /// the in-TUI set editor, while open
+    editor: Option<editor::Editor>,
+    /// `[agent]` from the config, for the prompt box
+    agent: crate::parser::AgentSettings,
 }
 
 impl DjScreen {
@@ -744,12 +752,29 @@ impl DjScreen {
             pane: Pane::new(library),
             note,
             edit_request: None,
+            editor: None,
+            agent: Default::default(),
         }
     }
 
     /// the search box or command line has the keyboard (text is typed, not performed)
     pub fn typing(&self) -> bool {
-        self.pane.typing()
+        self.pane.typing() || self.editor.is_some()
+    }
+
+    pub fn set_agent(&mut self, agent: crate::parser::AgentSettings) {
+        self.agent = agent;
+    }
+
+    /// `:e` / F10: the editor pane on the active set
+    fn open_editor(&mut self, now: Instant) {
+        if self.editor.is_some() {
+            return;
+        }
+        let Some((set, _)) = self.active_set() else { return };
+        // the pane takes every key and no release will reach the deck keys: end holds first
+        self.settle(now);
+        self.editor = Some(editor::Editor::new(Some(self.session.conn.clone()), &set.name, &set.file));
     }
 
     fn set_note(&mut self, text: impl Into<String>) {
@@ -844,6 +869,14 @@ impl DjScreen {
 
     /// Handles a key; performance keys are queued for the next [`tick`]
     pub fn handle_key(&mut self, key: &KeyEvent, now: Instant) -> Outcome {
+        if editor::key_focus(self.editor.is_some(), false) == editor::KeyFocus::Editor {
+            if let Some(ed) = self.editor.as_mut() {
+                if ed.on_key(key, now) == editor::EditorOutcome::Close {
+                    self.editor = None;
+                }
+            }
+            return Outcome::Stay;
+        }
         // Esc closes the error overlay first
         if key.code == KeyCode::Esc && key.kind != KeyEventKind::Release {
             if self.session.shared.lock().unwrap().overlay.take().is_some() {
@@ -876,6 +909,8 @@ impl DjScreen {
             Nav::LibPageUp => self.pane.scroll(-5),
             Nav::LibPageDown => self.pane.scroll(5),
             Nav::Load(d) => self.load(d),
+            Nav::Editor => self.open_editor(now),
+            Nav::Prompt => {}
             Nav::SetArmNext => self.set_arm(ArmTarget::Next),
             Nav::SetAuto => self.set_auto(None),
             Nav::SetDisarm => {
@@ -930,6 +965,7 @@ impl DjScreen {
             }
             Command::SetErrors => self.set_errors(),
             Command::SetEdit => self.set_edit(),
+            Command::Editor => self.open_editor(Instant::now()),
             Command::Nothing => {}
             Command::Unknown(msg) => self.set_note(msg),
         }
@@ -942,6 +978,11 @@ impl DjScreen {
             let s = self.session.shared.lock().unwrap();
             (s.decks.clone(), s.mixer.clone())
         };
+        if let Some(ed) = self.editor.as_mut() {
+            if ed.tick(now) == editor::EditorOutcome::Close {
+                self.editor = None;
+            }
+        }
         self.keys.set_snapshot(&decks, &mixer);
         let calls = self.keys.tick(now);
         self.session.send(calls);
@@ -996,8 +1037,12 @@ impl DjScreen {
             release_events: self.keys.release_events(),
             set: s.set.as_ref().filter(|x| x.is_active()),
             overlay: s.overlay.as_deref(),
+            panel: self.editor.as_ref().map(|_| render::Panel::Editor),
         };
         render::draw(frame.buffer_mut(), area, &view);
+        if let (Some(ed), Some(r)) = (self.editor.as_mut(), render::panel_rect(area, &view)) {
+            ed.render(frame.buffer_mut(), r);
+        }
     }
 }
 

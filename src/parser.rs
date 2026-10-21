@@ -48,6 +48,21 @@ pub struct SoulseekSettings {
     pub max_concurrent_downloads: Option<u32>,
 }
 
+/// `[agent]`: the AI agent the DJ screen's prompt box (`:ai`, F11) runs. codj holds no AI keys,
+/// the command brings its own.
+#[derive(Deserialize, Serialize, Debug, Clone, Default)]
+pub struct AgentSettings {
+    /// the agent command line, split on spaces (quotes group), default `claude -p`
+    pub command: Option<String>,
+    /// let the agent's MCP server change what is playing (`codj mcp --live`), default false
+    pub live: Option<bool>,
+    /// how the prompt reaches the command: "stdin" (default) or "arg" (last argument)
+    pub prompt_via: Option<String>,
+    /// MCP tool names the agent may use (without the `mcp__codj__` prefix); unset = all set tools
+    /// (plus the live ones when `live`)
+    pub mcp_tools: Option<Vec<String>>,
+}
+
 #[derive(Deserialize, Serialize, Debug, Clone)]
 #[serde(tag = "config")]
 pub struct Config {
@@ -57,6 +72,7 @@ pub struct Config {
     pub scripts: Option<Scripts>,
     pub step_size: Option<usize>,
     pub soulseek: Option<SoulseekSettings>,
+    pub agent: Option<AgentSettings>,
 }
 
 impl Default for Config {
@@ -68,6 +84,7 @@ impl Default for Config {
             scripts: None,
             step_size: Some(7),
             soulseek: None,
+            agent: None,
         }
     }
 }
@@ -104,5 +121,20 @@ mod test {
         assert_eq!(s.server_port, Some(1));
         assert_eq!(s.listen_port, Some(2));
         assert_eq!(s.max_results, Some(3));
+    }
+
+    #[test]
+    fn parse_agent_settings() {
+        let conf: Config = basic_toml::from_str(
+            "[agent]\ncommand = \"my-agent --x\"\nlive = true\nprompt_via = \"arg\"\nmcp_tools = [\"set_check\"]\n",
+        )
+        .unwrap();
+        let a = conf.agent.unwrap();
+        assert_eq!(a.command.as_deref(), Some("my-agent --x"));
+        assert_eq!(a.live, Some(true));
+        assert_eq!(a.prompt_via.as_deref(), Some("arg"));
+        assert_eq!(a.mcp_tools, Some(vec!["set_check".to_string()]));
+        let none: Config = basic_toml::from_str("fps = 20\n").unwrap();
+        assert!(none.agent.is_none());
     }
 }

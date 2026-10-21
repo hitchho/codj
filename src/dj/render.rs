@@ -69,7 +69,20 @@ pub struct View<'a> {
     pub set: Option<&'a SetState>,
     /// the set's errors, drawn over the decks
     pub overlay: Option<&'a [String]>,
+    /// an editor or prompt pane replaces the set strip and the library; it is drawn by the
+    /// caller into [`panel_rect`]
+    pub panel: Option<Panel>,
 }
+
+/// Which pane has the keyboard (the performance keys are off while one is open)
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Panel {
+    Editor,
+    Prompt,
+}
+
+/// Rows the decks keep when a pane is open
+const DECKS_MIN_WITH_PANEL: u16 = 9;
 
 pub fn fmt_time(secs: f64) -> String {
     let t = secs.max(0.0);
@@ -118,6 +131,11 @@ pub fn draw(buf: &mut Buffer, area: Rect, v: &View) {
         (Some(_), 20..) => 4,
         (Some(_), _) => 1,
     };
+    // a pane takes the strip's and the library's rows, and more while the decks keep their minimum
+    let (set_h, lib_h) = match v.panel {
+        Some(_) => (0, panel_height(body_h, mixer_h, set_h + lib_h)),
+        None => (set_h, lib_h),
+    };
     let decks_h = body_h.saturating_sub(mixer_h + lib_h + set_h);
     let header = Rect::new(area.x, area.y, area.width, 1);
     let decks = Rect::new(area.x, area.y + 1, area.width, decks_h);
@@ -141,11 +159,40 @@ pub fn draw(buf: &mut Buffer, area: Rect, v: &View) {
         draw_set(buf, set_area, set, v.decks);
     }
     draw_mixer(buf, mixer, v);
-    draw_library(buf, lib, v);
+    if v.panel.is_none() {
+        draw_library(buf, lib, v);
+    }
     draw_status(buf, status, v);
     if let Some(lines) = v.overlay {
         draw_overlay(buf, decks, lines);
     }
+}
+
+/// Height of a pane: what the strip and library had, grown to half the body while the decks keep
+/// [`DECKS_MIN_WITH_PANEL`] rows
+fn panel_height(body_h: u16, mixer_h: u16, had: u16) -> u16 {
+    let room = body_h.saturating_sub(mixer_h + DECKS_MIN_WITH_PANEL);
+    (body_h / 2).min(room).max(had.min(room)).max(4)
+}
+
+/// Where the pane goes (below the mixer, above the status line); None when no pane is open or
+/// the screen is too small
+pub fn panel_rect(area: Rect, v: &View) -> Option<Rect> {
+    v.panel?;
+    if area.width < MIN_SIZE.0 || area.height < MIN_SIZE.1 {
+        return None;
+    }
+    let body_h = area.height - 2;
+    let mixer_h = 4;
+    let lib_h = if body_h >= 20 { (body_h / 4).clamp(5, 9) } else { 3 };
+    let set_h = match (v.set, body_h) {
+        (None, _) => 0,
+        (Some(_), 26..) => SET_FULL_H,
+        (Some(_), 20..) => 4,
+        (Some(_), _) => 1,
+    };
+    let h = panel_height(body_h, mixer_h, set_h + lib_h);
+    Some(Rect::new(area.x, area.bottom() - 1 - h, area.width, h))
 }
 
 /// beats to bars, as shown: whole bars plain, else one decimal
@@ -441,13 +488,27 @@ fn draw_overlay(buf: &mut Buffer, over: Rect, lines: &[String]) {
 
 fn draw_header(buf: &mut Buffer, area: Rect, v: &View) {
     let live = v.link_ok;
-    let left = Line::from(vec![
-        Span::styled(" DJ ", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::styled(
-            "  Esc back · Tab search · < > load A/B · Enter load · Shift+; command",
-            dim(),
-        ),
-    ]);
+    let left = match v.panel {
+        // the performance keys are off: say so, loudly
+        Some(p) => Line::from(vec![
+            Span::styled(
+                if p == Panel::Editor { " EDIT " } else { " AI " },
+                Style::default().fg(Color::Black).bg(Color::Magenta).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  DJ keys are OFF while typing here", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                if p == Panel::Editor { " · Esc (normal mode) / :q back to the deck keys" } else { " · Esc hides · Ctrl-C cancels the agent" },
+                dim(),
+            ),
+        ]),
+        None => Line::from(vec![
+            Span::styled(" DJ ", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "  Esc back · Tab search · < > load A/B · Enter load · Shift+; command",
+                dim(),
+            ),
+        ]),
+    };
     Paragraph::new(left).render(area, buf);
     let (text, color) = if live { ("● live ", Color::Green) } else { ("○ no data ", Color::Red) };
     let w = text.chars().count() as u16;
@@ -1028,6 +1089,7 @@ mod tests {
             release_events: true,
             set: None,
             overlay: None,
+            panel: None,
         };
         f(&mut v);
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();

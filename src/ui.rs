@@ -372,6 +372,8 @@ pub struct UI<'a> {
     pub soulseek_connected: bool,
     /// Soulseek config from config file (for connect params)
     pub soulseek_config: Option<crate::parser::SoulseekSettings>,
+    /// `[agent]` from the config file, for the DJ screen's prompt box
+    pub agent_config: crate::parser::AgentSettings,
     /// the terminal speaks the kitty keyboard protocol (set by main)
     pub keyboard_enhanced: bool,
     /// live DJ mode, when on; it replaces the whole normal view
@@ -1330,6 +1332,7 @@ impl<'a> UI<'a> {
             soulseek_visible: false,
             soulseek_connected: false,
             soulseek_config: None,
+            agent_config: Default::default(),
             keyboard_enhanced: false,
             dj: None,
             dj_kbd_pushed: false,
@@ -1357,7 +1360,9 @@ impl<'a> UI<'a> {
             self.dj_kbd_pushed = true;
         }
         let conn = self.state.proxy.inner().connection().clone();
-        self.dj = Some(Box::new(crate::dj::DjScreen::new(conn, library, self.dj_kbd_pushed)));
+        let mut dj = crate::dj::DjScreen::new(conn, library, self.dj_kbd_pushed);
+        dj.set_agent(self.agent_config.clone());
+        self.dj = Some(Box::new(dj));
     }
 
     /// Back to the normal view (audio keeps playing; nothing is stopped)
@@ -1705,6 +1710,7 @@ impl<'a> UI<'a> {
         self.music_list.display_genre = config.genre.unwrap_or(false);
         self.music_list.setp_szie = config.step_size.unwrap_or(7);
         self.geometry.configuration.lyrics = self.displayed_lyrics.displayable;
+        self.agent_config = config.agent.clone().unwrap_or_default();
 
         // store soulseek config for later connection via dbus
         if let Some(slsk) = &config.soulseek {
