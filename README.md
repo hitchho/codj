@@ -19,6 +19,7 @@ ___
 - regex search over title, artist and file name (`f` or `/`); no match? `Enter` searches Soulseek
 - play queue (`q` to queue, `Shift+Q` to open it)
 - live DJ mode (`:dj`, `Shift + m`): two decks with waveforms, beat phase meter, sync, loops, hot cues, EQ, filter, faders and crossfader, all from the keyboard (hold/release with the kitty keyboard protocol); needs a codjd with the deck API, see [DOCS.md](./DOCS.md#dj-mode)
+- learn it as you go: `?` draws the key map on the screen with a one-line musical explanation for every key, `:help bass swap` explains the words, `:tutor` walks you through a first mix with your own library (it notices each step as you do it), `:mix new blend` writes the transition as set code; see [Learning](./DOCS.md#learning)
 - "more like this" (`m`): codjd analyzes your library locally and queues similar-sounding tracks
 - Soulseek search, filtering, downloads with a concurrency limit and reorderable queue; finished downloads show up in the library
 - `:settings` panel, saved straight to your config file

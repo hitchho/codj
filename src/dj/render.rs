@@ -315,7 +315,7 @@ const DECKS_MIN_WITH_TUTOR: u16 = 10;
 /// screen and the bottom grows to what the tutor wants while the decks keep their minimum
 fn tutor_layout(body_h: u16, mixer_h: u16, set_h: u16, lib_h: u16) -> (u16, u16) {
     let set_h = if body_h < 30 { set_h.min(1) } else { set_h };
-    let want = if body_h >= 30 { 10 } else if body_h >= 22 { 8 } else { 6 };
+    let want = if body_h >= 32 { 11 } else if body_h >= 22 { 8 } else { 6 };
     let room = body_h.saturating_sub(mixer_h + set_h + DECKS_MIN_WITH_TUTOR);
     (set_h, lib_h.max(want.min(room)))
 }

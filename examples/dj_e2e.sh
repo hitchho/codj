@@ -11,6 +11,10 @@
 # prompt box (:ai with examples/fake_agent.sh as the agent: streamed output, diff, undo).
 # Phase 5 drives the control hints: f, a label, ] [ \ ; edits, the mouse wheel (SGR mouse
 # sequences sent as literal keys), the beat-jump keys e r u i, Esc.
+# Phase 6 drives the learning features: the ? key map, :help <term>, the hint explanations, :tutor
+# (the first steps advance as the fake's state changes, Tab skips, Esc pauses, :tutor resumes and
+# resets, the progress file lives in the isolated XDG_STATE_HOME) and :mix new through the fake.
+# `ONLY=6 dbus-run-session -- examples/dj_e2e.sh` runs just that phase.
 # Needs busctl and jq (the fake agent and the conflict step talk to the fake codjd with them).
 #
 # tmux does not forward the kitty keyboard protocol, so this exercises the no-release fallback.
@@ -19,10 +23,14 @@ set -u
 case "$DBUS_SESSION_BUS_ADDRESS" in *"/run/user/"*) echo "that looks like the real session bus"; exit 2;; esac
 W=${W:-/tmp/codj-dj-e2e}
 BIN=${BIN:-$(dirname "$0")/../target/debug}
-export HOME=$W/home XDG_CACHE_HOME=$W/cache XDG_CONFIG_HOME=$W/config
-mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME"
+export HOME=$W/home XDG_CACHE_HOME=$W/cache XDG_CONFIG_HOME=$W/config XDG_STATE_HOME=$W/state XDG_DATA_HOME=$W/data
+mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" "$XDG_DATA_HOME"
 rm -f "$W"/calls.log "$W"/cap-*
 export CODJ_FAKE_ISOLATED=1 CODJ_FAKE_LOG=$W/calls.log
+T="tmux -L codjdje2e"
+cap() { $T capture-pane -p -t $S > "$W/cap-$1.txt"; }
+keys() { for k in "$@"; do $T send-keys -t $S -- "$k"; sleep 0.12; done; }
+phases_1_to_5() {
 "$BIN/examples/fake_codjd" 2>"$W/fake.err" & FAKE=$!
 sleep 1
 T="tmux -L codjdje2e"
@@ -203,4 +211,59 @@ $T kill-server
 kill $FAKE
 echo "== hints calls received by the fake"; cat "$W/calls-hints.log"
 echo "== codj stderr (hints phase)"; cat "$W/codj-hints.err"
+}
+[ "${ONLY:-}" = 6 ] || phases_1_to_5
+
+
+# --- phase 6: the learning features (fresh fake, empty progress)
+export CODJ_FAKE_LOG=$W/calls-learn.log
+rm -f "$W"/calls-learn.log
+rm -rf "$XDG_STATE_HOME/codj"
+rm -f "$HOME/.config/codj/config.toml"
+"$BIN/examples/fake_codjd" 2>"$W/fake6.err" & FAKE=$!
+sleep 1
+S=djlearn
+$T new-session -d -x 140 -y 40 -s $S "$BIN/codj 2>$W/codj-learn.err; sleep 30"
+sleep 2
+cmd() { keys ':'; $T send-keys -t $S -l -- "$1"; sleep 0.15; $T send-keys -t $S Enter; sleep 0.6; }
+rep() { n=$1; shift; for i in $(seq "$n"); do keys "$@"; done; }
+keys M; sleep 0.5
+keys '?'; sleep 0.5; cap help_keys                  # the key map on the screen
+keys '?'; sleep 0.3; cap help_closed                # any key closes it, and does nothing else
+cmd help\ bass\ swap; cap help_bass_swap            # glossary popup
+keys a; sleep 0.3
+keys f; sleep 0.3; keys t; sleep 0.3; cap hints_hover   # typed letter: what it leads to
+keys a; sleep 0.3; keys f q; sleep 8; cap hint_explained   # selected: its one-liner beside the chip
+keys Escape; sleep 0.3                              # clears the selection
+cmd help\ flux; cap help_unknown                     # a note, not a popup
+# the tutor
+cmd tutor; sleep 1.5; cap tutor_1_pick                # a pair proposed from the library, marked
+keys '<'; sleep 0.6; cap tutor_1_loaded_a             # the highlight moved on to the second track
+keys '>'; sleep 2; cap tutor_2_play_a                 # both loaded: step 2 after the dwell
+keys x; sleep 2; cap tutor_3_headphones               # A playing: step 3
+keys F2; sleep 2; cap tutor_4_sync                    # B headphones: step 4
+keys ','; sleep 2; cap tutor_5_phrase                 # B synced: step 5 with A's bar counter
+keys Escape; sleep 0.5; cap tutor_paused              # pause: the pane is gone, decks untouched
+cmd tutor; sleep 0.5; cap tutor_resumed               # resumes at step 5
+keys Tab; sleep 0.5; cap tutor_6_skipped              # Tab skips step 5
+keys f q; sleep 0.3; rep 20 '['; sleep 2; cap tutor_7_swap  # B low killed: step 7
+keys f d; sleep 0.3; rep 20 '['; keys f q; sleep 0.3; keys '\\'; sleep 2; cap tutor_8_fade   # swap done
+rep 12 y; keys x; sleep 2; cap tutor_9_done          # faded and stopped: the goodbye
+cat "$XDG_STATE_HOME/codj/tutor.json"; echo
+keys Escape; sleep 0.3
+cmd tutor\ reset; sleep 1; cap tutor_reset           # starts over (both decks are loaded, so step 1 passes by itself)
+keys Escape; sleep 0.3
+# :mix new through the fake, on the demo set
+cmd set\ demo; sleep 0.5
+keys '.'; sleep 0.5                                      # B plays, A is stopped: B is on air
+cmd mix\ new; cap mix_recipes                         # the recipes with their explanations
+keys a; sleep 0.3
+cmd mix\ new\ blend\ 8; sleep 1; cap mix_new         # inserted: the note says which mix
+cmd errors; cap mix_errors                            # the set's warnings next to its errors
+keys Escape; sleep 0.3
+keys Escape; sleep 0.5
+$T kill-server
+kill $FAKE
+echo "== learn calls received by the fake"; cat "$W/calls-learn.log"
+echo "== codj stderr (learn phase)"; cat "$W/codj-learn.err"
 exit 0
