@@ -215,8 +215,6 @@ pub enum PEffect {
     Undo(u32),
     Redo(u32),
     Live(u32, bool),
-    /// `PatchSave` (name None = the slot's own)
-    Save { slot: u32, name: Option<String> },
     Note(String),
     /// the `?` popup of the pane's keys
     Help,

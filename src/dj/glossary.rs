@@ -32,6 +32,7 @@ pub fn explain(t: Target) -> &'static str {
         Target::Slot(Slot::SyncRange) => "sync range: the biggest tempo change sync may do",
         Target::LoopLen(_) => "loop length: beats the next loop repeats",
         Target::Jump(_) => "jump size: beats that the jump keys skip",
+        Target::Knob(..) => "patch knob: ] [ turn it, \\ back to the saved value",
     }
 }
 
@@ -82,6 +83,7 @@ pub const GLOBAL_KEYS: &[Entry] = &[
     g("f", "hints: pick a control by its label"),
     g("] [ \\", "edit the picked control (wheel too)"),
     g("F9", "record: your playing becomes code"),
+    g("F12", "patch decks: synths, drums, a grid"),
     g("F10", "editor: edit the set, vim style"),
     g("F11", "AI: ask an agent to write the set"),
     g("F6 F7 F8", "arm next mix / auto / disarm"),
@@ -280,7 +282,109 @@ pub const TERMS: &[Term] = &[
         "skip forward or back by whole beats",
         "Beat jump skips along the track by the jump size (4 beats by default; f then va / vs changes it), keeping the beat phase. Jump back to repeat a bar, forward to skip ahead.",
     ),
+    t(
+        "patch",
+        &["patches", "patch deck", "patch decks", "synth", "slot"],
+        "a synth or drum machine that plays with the decks",
+        "A patch is a little instrument built from connected nodes: a synth, a drum machine, a bassline. It sits in one of four slots (P1 to P4) that work like decks with their own fader, filter and low, and its sequencer follows the decks' beat grid, so it is always in time. F12 or :patch opens the pane; :patch new d1 makes a drum machine to start from.",
+    ),
+    t(
+        "node",
+        &["nodes", "module"],
+        "one building block of a patch, wired to others",
+        "A node is one building block of a patch: an oscillator, an envelope, a filter, a sequencer, a drum sound. Nodes have inputs and outputs and you wire an output into an input, like patch cables on a modular synth. Everything is one kind of signal: a pitch in Hz, a gate that is 0 or 1, or a level.",
+    ),
+    t(
+        "oscillator",
+        &["osc", "vco", "saw", "sine", "pulse", "triangle"],
+        "makes a steady tone: sine, saw, pulse, triangle",
+        "An oscillator makes a repeating wave, which you hear as a tone: its frequency is the pitch. A sine is pure, a saw is bright and buzzy (the acid bassline sound), a pulse is hollow, a triangle is soft. Feed an oscillator's freq input from a sequencer to play notes.",
+    ),
+    t(
+        "envelope",
+        &["adsr", "env", "envelope (adsr)"],
+        "ADSR: how a note's loudness rises and fades",
+        "An ADSR envelope shapes a note over time: attack (how fast it rises), decay (how fast it falls to the sustain level), sustain (the level it holds while the gate is on) and release (how long it fades after). Multiply it with a tone to make a plucky or a pad sound.",
+    ),
+    t(
+        "patch filter",
+        &["lp", "cutoff", "resonance", "reso", "vcf"],
+        "cuts highs or lows of a sound; cutoff moves it",
+        "A filter inside a patch removes part of the sound: a low-pass keeps the lows and darkens it, a high-pass keeps the highs, a band-pass keeps a band. The cutoff knob moves the edge, resonance (reso) makes it squelch around the edge. Turning cutoff up and down is the acid sound.",
+    ),
+    t(
+        "sequencer",
+        &["seq", "step sequencer", "gateseq", "monoseq"],
+        "plays a pattern of steps in time with the beat",
+        "A sequencer plays a row of steps in time with the beat, usually 16 per bar. A drum sequencer has one row per sound (kick, snare, hat); a note sequencer plays one note per step, the row giving its pitch in the scale. Edit it with the grid: hjkl move, x toggles a step.",
+    ),
+    t(
+        "step",
+        &["steps", "cell"],
+        "one slot in a sequencer, a sixteenth note",
+        "A step is one slot of a sequencer. With 4 steps per beat each step is a sixteenth note and 16 steps make a bar. A step is on (it plays) or off; on a drum row it also has a velocity. The moving column in the grid is the step playing right now.",
+    ),
+    t(
+        "pattern",
+        &["patterns"],
+        "one of 8 step layouts (A-H) a sequencer can play",
+        "A sequencer holds 8 patterns, A to H: eight different layouts of its steps, such as a verse beat, a fill and a breakdown. Capital letters pick the pattern you edit; Enter queues it, and it takes over at the next bar so the change is always in time.",
+    ),
+    t(
+        "gate",
+        &["gates", "trigger", "trig"],
+        "an on/off signal: a note or a drum hit starts",
+        "A gate is a signal that is 1 while a step plays and 0 otherwise. An envelope uses it to know when a note starts and ends, and a drum sound hits every time its gate goes up. Sequencers make gates; a drum sequencer has one gate output per row.",
+    ),
+    t(
+        "velocity",
+        &["vel", "accent"],
+        "how hard a step hits; 1-9 sets it on a drum row",
+        "Velocity is how hard a step is played, from soft to full. In the drum grid 1 to 9 set it on the cell under the cursor (9 is full, 1 is a ghost note), and x then uses the last one. Softer hats between hard kicks make a beat groove.",
+    ),
+    t(
+        "knob",
+        &["knobs", "control"],
+        "a patch control you can turn: cutoff, level ...",
+        "A knob is a control a patch exposes: a filter cutoff, a level, a decay. Press f, type its label (two letters), then ] and [ turn it, \\ puts it back to the saved value. The mouse wheel and a hardware knob turn it too, and sets can automate it.",
+    ),
+    t(
+        "live/cue",
+        &["live", "slot live", "cue only"],
+        "LIVE: the room hears the slot; CUE: only you",
+        "A slot starts as CUE after loading or after a structural edit: only your headphones hear it, so you can tweak it unheard. p sends it LIVE to the room, and p again takes it back. A slot that eats too much processing is muted by itself (a red note) so the decks never glitch.",
+    ),
+    t(
+        "swing",
+        &["shuffle", "groove"],
+        "pushes every second step late for a shuffled feel",
+        "Swing delays every second step a little, so a straight robotic beat starts to bounce. It is the swing setting of the patch's Clock node, from 0 (straight) to 0.75 (heavy). Edit it in the patch's JSON with :patch edit <name>.",
+    ),
 ];
+
+/// Keys of the patch pane, for `?` while it is open
+pub const PATCH_KEYS: &[(&str, &str)] = &[
+    ("F12 Esc", "open / close the pane (Esc leaves the grid first)"),
+    ("1-4", "open the sequencer grid of that slot"),
+    ("Tab", "next sequencer, across slots (Shift+Tab back)"),
+    ("hjkl ←↓↑→", "move the cursor on the grid"),
+    ("w b 0 $", "next / previous beat, first / last step"),
+    ("x", "toggle the step (a note step holds one note)"),
+    ("1-9", "velocity of a drum cell: 9 is full (not on notes)"),
+    ("A-H", "choose the pattern you edit (Shift + letter)"),
+    ("Enter", "queue the edited pattern: it plays at the next bar"),
+    ("p", "send the slot LIVE to the room / back to headphones"),
+    ("u  Ctrl-r", "undo / redo the slot's edits"),
+    (":w [name]", "save the slot's patch (to its own name or a new one)"),
+    ("f ] [ \\", "hints: pick a knob or slot fader / filter / low, edit it"),
+    (":patch ...", "new load unload live edit import list"),
+];
+
+/// The `?` popup while the patch pane is open
+pub fn patch_keys_popup() -> (String, Vec<String>) {
+    let lines = PATCH_KEYS.iter().map(|(k, t)| format!("{k}  {t}")).collect();
+    (" patch pane keys · any key closes ".to_string(), lines)
+}
 
 /// A term typed by the user: case, spaces, `-`, `_` and `/` are all alike
 fn norm(s: &str) -> String {
@@ -441,6 +545,8 @@ mod tests {
         let wanted = [
             "bpm", "beat", "bar", "phrase", "downbeat", "sync", "phase", "cue", "hot cue", "loop", "eq", "low", "mid", "high", "kill",
             "bass swap", "filter", "fader", "crossfader", "headphones", "cue send", "gain", "key", "set", "mix", "recipe", "quantize",
+            "patch", "node", "oscillator", "envelope", "adsr", "patch filter", "sequencer", "step", "pattern", "gate", "velocity", "knob", "live/cue",
+            "live", "swing",
         ];
         for w in wanted {
             assert!(lookup(w).is_some(), "no term {w}");
@@ -450,6 +556,28 @@ mod tests {
             assert!(!term.long.is_empty() && term.long.len() < 420, "{}", term.name);
             assert!(lookup(term.name).is_some_and(|f| f.name == term.name), "{}", term.name);
         }
+    }
+
+    #[test]
+    fn patch_terms_are_reachable_and_the_patch_keys_fit_a_popup() {
+        // no alias of the patch terms steals a word from the DJ terms
+        assert_eq!(lookup("filter").unwrap().name, "filter");
+        assert_eq!(lookup("cue").unwrap().name, "cue");
+        assert_eq!(lookup("cutoff").unwrap().name, "patch filter");
+        assert_eq!(lookup("ADSR").unwrap().name, "envelope");
+        assert_eq!(lookup("Live").unwrap().name, "live/cue");
+        let mut seen = std::collections::HashSet::new();
+        for term in TERMS {
+            for w in std::iter::once(&term.name).chain(term.aliases) {
+                assert!(seen.insert(norm(w)), "{w:?} names two terms");
+            }
+        }
+        let (title, lines) = patch_keys_popup();
+        assert!(title.contains("patch"));
+        for k in ["hjkl", "x", "1-9", "A-H", "Enter", "p", "Ctrl-r", ":w", "Tab", "f ] ["] {
+            assert!(lines.iter().any(|l| l.contains(k)), "{k}");
+        }
+        assert!(lines.iter().all(|l| l.chars().count() <= 70), "a line is too long for the popup");
     }
 
     #[test]
@@ -472,17 +600,19 @@ mod tests {
     #[test]
     fn hover_names_the_matching_controls() {
         let labels = hints::table();
+        // the deck and mixer controls: the patch labels share first letters with them
+        let decks: Vec<Target> = labels.iter().filter(|(t, _)| !matches!(t, Target::Knob(..) | Target::Slot(Slot::Ctl(Ctl::Fader(2..) | Ctl::Filter(2..) | Ctl::Eq(2.., _))))).map(|(t, _)| *t).collect();
         assert_eq!(hover("", &labels, None), None);
         assert!(hover("zz", &labels, None).is_none());
         // two letters wait for the deck: the same control on both decks
-        let h = hover("t", &labels, None).unwrap();
+        let h = hover("t", &labels, Some(&decks)).unwrap();
         assert!(h.starts_with("mid:") && h.contains("TA A mid") && h.contains("TS B mid"), "{h}");
         // one visible match gives its own line
         let only = [labels.iter().find(|(_, l)| *l == "ta").unwrap().0];
         let h = hover("t", &labels, Some(&only)).unwrap();
         assert!(h.starts_with("TA (A mid) — mid:"), "{h}");
         // different controls behind one letter: just the names
-        let h = hover("b", &labels, None).unwrap();
+        let h = hover("b", &labels, Some(&decks)).unwrap();
         assert!(h.contains("BA master") && h.contains("BS cue mix") && h.contains("BD sync range"), "{h}");
     }
 

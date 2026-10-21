@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use super::hints::{self, Accel, Hints, Target, Typed};
-use crate::dj_types::{DeckInfo, MixerInfo};
+use crate::dj_types::{DeckInfo, MixerInfo, PatchSlot};
 
 /// Deck index: 0 = A, 1 = B
 pub type Deck = u8;
@@ -38,6 +38,8 @@ const SETTLE: Duration = Duration::from_millis(500);
 const RATE_STEP: f64 = 0.001;
 const RATE_MIN: f64 = 0.5;
 const RATE_MAX: f64 = 1.5;
+/// A tap of `]` / `[` moves a patch knob by 1/20 of its range
+const KNOB_STEPS: f64 = 20.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Ctl {
@@ -166,6 +168,8 @@ pub enum Nav {
     Editor,
     /// the AI prompt box (F11)
     Prompt,
+    /// the patch pane (F12)
+    Patch,
     /// `f`: show the control hints
     Hints,
     /// `;`: back to the previously selected control
@@ -258,6 +262,7 @@ pub fn bind(k: &NKey) -> Option<Binding> {
             (KeyCode::F(9), false) => Some(Nav(self::Nav::RecordToggle)),
             (KeyCode::F(10), false) => Some(Nav(self::Nav::Editor)),
             (KeyCode::F(11), false) => Some(Nav(self::Nav::Prompt)),
+            (KeyCode::F(12), false) => Some(Nav(self::Nav::Patch)),
             (KeyCode::Esc, false) => Some(Nav(self::Nav::Exit)),
             (KeyCode::Tab, false) => Some(Nav(self::Nav::Search)),
             (KeyCode::Up, false) => Some(Nav(self::Nav::LibUp)),
@@ -371,6 +376,8 @@ pub enum DjCall {
     Loop { deck: u32, beats: f64 },
     Hotcue { deck: u32, slot: u32, action: &'static str },
     Set { control: &'static str, deck: u32, value: f64 },
+    /// a patch knob: `PatchAction {"op":"knob",...}` on the slot
+    PatchKnob { slot: u32, name: String, value: f64 },
 }
 
 impl DjCall {
@@ -386,6 +393,7 @@ impl DjCall {
             DjCall::Loop { .. } => "DjLoop",
             DjCall::Hotcue { .. } => "DjHotcue",
             DjCall::Set { .. } => "DjSet",
+            DjCall::PatchKnob { .. } => "PatchAction",
         }
     }
 }
@@ -400,6 +408,7 @@ pub fn coalesce(calls: Vec<DjCall>) -> Vec<DjCall> {
             DjCall::Set { control: c2, deck: d2, .. },
         ) => c1 == c2 && d1 == d2,
         (DjCall::Nudge { deck: d1, .. }, DjCall::Nudge { deck: d2, .. }) => d1 == d2,
+        (DjCall::PatchKnob { slot: s1, name: n1, .. }, DjCall::PatchKnob { slot: s2, name: n2, .. }) => s1 == s2 && n1 == n2,
         _ => false,
     };
     let mut keep = vec![true; calls.len()];
@@ -422,6 +431,15 @@ struct Held {
 
 struct SlotState {
     slot: Slot,
+    value: f64,
+    touched: Instant,
+    dirty: bool,
+}
+
+/// A patch knob being moved from here
+struct KnobState {
+    slot: u8,
+    name: String,
     value: f64,
     touched: Instant,
     dirty: bool,
@@ -452,6 +470,12 @@ pub struct DjKeys {
     gain_set: [Option<(String, f64)>; 2],
     /// the auto-gain a track came with, per deck and path: what `\` goes back to
     auto_gain: [Option<(String, f64)>; 2],
+    /// the patch slots as last polled, and the knob values their files have (what `\` returns to)
+    patches: Vec<PatchSlot>,
+    knob_defaults: [Vec<(String, f64)>; 4],
+    knob_moves: Vec<KnobState>,
+    /// filter / low of a patch slot are not reported: the last value sent from here
+    patch_mix_sent: Vec<(Slot, f64)>,
 }
 
 impl DjKeys {
@@ -475,6 +499,58 @@ impl DjKeys {
             sync_range: hints::DEFAULT_SYNC_RANGE,
             gain_set: [None, None],
             auto_gain: [None, None],
+            patches: Vec::new(),
+            knob_defaults: Default::default(),
+            knob_moves: Vec::new(),
+            patch_mix_sent: Vec::new(),
+        }
+    }
+
+    /// The patch slots as last polled, and the knob values of their files
+    pub fn set_patches(&mut self, slots: &[PatchSlot], defaults: [Vec<(String, f64)>; 4]) {
+        self.patches = slots.to_vec();
+        self.knob_defaults = defaults;
+    }
+
+    /// The knob a `Target::Knob` points at: (name, value, min, max)
+    fn knob_info(&self, slot: u8, idx: u8) -> Option<(&str, f64, f64, f64)> {
+        let k = self.patches.get(slot as usize)?.knobs.get(idx as usize)?;
+        Some((k.0.as_str(), k.1, k.2, k.3))
+    }
+
+    /// Where a knob is going: our own latest value while it is being moved, else the daemon's
+    fn knob_target(&self, slot: u8, idx: u8, now: Instant) -> f64 {
+        let Some((name, value, ..)) = self.knob_info(slot, idx) else { return 0.0 };
+        match self.knob_moves.iter().find(|k| k.slot == slot && k.name == name) {
+            Some(k) if k.dirty || now.saturating_duration_since(k.touched) < SETTLE => k.value,
+            _ => value,
+        }
+    }
+
+    fn bump_knob(&mut self, slot: u8, idx: u8, delta: f64, now: Instant) {
+        let Some((name, _, lo, hi)) = self.knob_info(slot, idx).map(|(n, v, a, b)| (n.to_string(), v, a, b)) else { return };
+        let before = self.knob_target(slot, idx, now);
+        let value = ((before + delta).clamp(lo, hi) * 1e4).round() / 1e4;
+        let changed = (value - before).abs() > 1e-9;
+        match self.knob_moves.iter_mut().find(|k| k.slot == slot && k.name == name) {
+            Some(k) => {
+                k.value = value;
+                k.touched = now;
+                k.dirty |= changed;
+            }
+            None if changed => self.knob_moves.push(KnobState { slot, name, value, touched: now, dirty: true }),
+            None => {}
+        }
+    }
+
+    /// "P1 cutoff" for a knob, else the target's own name
+    pub fn target_name(&self, t: Target) -> String {
+        match t {
+            Target::Knob(s, i) => match self.knob_info(s, i) {
+                Some((name, ..)) => format!("P{} {name}", s + 1),
+                None => t.name(),
+            },
+            _ => t.name(),
         }
     }
 
@@ -496,6 +572,15 @@ impl DjKeys {
     }
 
     fn current(&self, slot: Slot) -> f64 {
+        // the mixer controls of a patch slot (deck 2 + slot): the fader is reported, the rest not
+        if let Slot::Ctl(Ctl::Fader(d) | Ctl::Filter(d) | Ctl::Eq(d, _)) = slot {
+            if d >= 2 {
+                return match slot {
+                    Slot::Ctl(Ctl::Fader(_)) => self.patches.get(d as usize - 2).map_or(0.0, |p| p.fader),
+                    _ => self.patch_mix_sent.iter().find(|(s, _)| *s == slot).map_or(0.0, |(_, v)| *v),
+                };
+            }
+        }
         let deck = |d: Deck| self.decks.get(d as usize);
         match slot {
             Slot::Rate(d) => deck(d).map_or(1.0, |i| if i.rate > 0.0 { i.rate } else { 1.0 }),
@@ -542,6 +627,7 @@ impl DjKeys {
             Target::Slot(s) => self.target(s, now),
             Target::LoopLen(d) => self.loop_len[d as usize],
             Target::Jump(d) => self.jump_len[d as usize],
+            Target::Knob(s, i) => self.knob_target(s, i, now),
         }
     }
 
@@ -590,6 +676,10 @@ impl DjKeys {
             Target::Slot(slot) => self.bump(slot, n as f64 * slot.tap_step(), now),
             Target::LoopLen(d) => self.loop_len[d as usize] = hints::ladder_step(self.loop_len[d as usize], n),
             Target::Jump(d) => self.jump_len[d as usize] = hints::ladder_step(self.jump_len[d as usize], n),
+            Target::Knob(s, i) => {
+                let (lo, hi) = self.knob_info(s, i).map_or((0.0, 1.0), |k| (k.2, k.3));
+                self.bump_knob(s, i, n as f64 * (hi - lo) / KNOB_STEPS, now);
+            }
         }
         true
     }
@@ -604,6 +694,16 @@ impl DjKeys {
             }
             Target::LoopLen(d) => self.loop_len[d as usize] = hints::DEFAULT_BEATS,
             Target::Jump(d) => self.jump_len[d as usize] = hints::DEFAULT_BEATS,
+            Target::Knob(s, i) => {
+                // the value the patch file has; a knob the file does not list goes to its minimum
+                let home = self.knob_info(s, i).map(|(name, _, lo, _)| {
+                    self.knob_defaults[s as usize].iter().find(|(n, _)| n == name).map_or(lo, |(_, v)| *v)
+                });
+                if let Some(home) = home {
+                    let delta = home - self.knob_target(s, i, now);
+                    self.bump_knob(s, i, delta, now);
+                }
+            }
         }
         true
     }
@@ -668,6 +768,10 @@ impl DjKeys {
                 if let Some(deck) = self.decks.get(d as usize) {
                     self.gain_set[d as usize] = Some((deck.path.clone(), value));
                 }
+            }
+            Slot::Ctl(Ctl::Filter(d) | Ctl::Eq(d, _)) if d >= 2 => {
+                self.patch_mix_sent.retain(|(s, _)| *s != slot);
+                self.patch_mix_sent.push((slot, value));
             }
             _ => {}
         }
@@ -961,6 +1065,13 @@ impl DjKeys {
                     s.dirty = false;
                     let (control, deck) = s.slot.control();
                     calls.push(DjCall::Set { control, deck, value: s.value });
+                    sent = true;
+                }
+            }
+            for k in &mut self.knob_moves {
+                if k.dirty {
+                    k.dirty = false;
+                    calls.push(DjCall::PatchKnob { slot: k.slot as u32, name: k.name.clone(), value: k.value });
                     sent = true;
                 }
             }

@@ -36,6 +36,26 @@ pub enum Target {
     LoopLen(Deck),
     /// beats of a beat jump (`e r u i`)
     Jump(Deck),
+    /// a knob of a patch slot: (slot 0..3, index in the slot's knob list), sent as a `knob` action
+    Knob(u8, u8),
+}
+
+/// Knobs per slot that get a hint label
+pub const KNOBS_LABELLED: usize = 9;
+
+/// Patch labels per slot: 9 knobs, then the slot's fader, filter and low. The slot picks the first
+/// letter (`t g x c`), so none is a prefix of a deck or mixer label (those use second letters
+/// `a s d`, these never do).
+const PATCH_LABELS: [[&str; 12]; 4] = [
+    ["td", "tq", "tw", "te", "tr", "tt", "tv", "tg", "tb", "tz", "tx", "tc"],
+    ["gd", "gq", "gw", "ge", "gr", "gt", "gv", "gg", "gb", "gz", "gx", "gc"],
+    ["xd", "xq", "xw", "xe", "xr", "xt", "xv", "xg", "xb", "xz", "xx", "xc"],
+    ["cd", "cq", "cw", "ce", "cr", "ct", "cv", "cg", "cb", "cz", "cx", "cc"],
+];
+
+/// Deck index of a patch slot in `DjSet` (decks 0 and 1 are A and B)
+pub const fn slot_deck(slot: u8) -> Deck {
+    2 + slot
 }
 
 impl Target {
@@ -46,8 +66,13 @@ impl Target {
 
     /// Shown in the status chip: "A filter"
     pub fn name(self) -> String {
-        let deck = |d: Deck| if d == 0 { "A" } else { "B" };
+        let deck = |d: Deck| match d {
+            0 => "A".to_string(),
+            1 => "B".to_string(),
+            d => format!("P{}", d - 1),
+        };
         match self {
+            Target::Knob(s, i) => format!("P{} knob {}", s + 1, i + 1),
             Target::Slot(Slot::Ctl(Ctl::Eq(d, 0))) => format!("{} low", deck(d)),
             Target::Slot(Slot::Ctl(Ctl::Eq(d, 1))) => format!("{} mid", deck(d)),
             Target::Slot(Slot::Ctl(Ctl::Eq(d, _))) => format!("{} high", deck(d)),
@@ -75,6 +100,7 @@ impl Target {
             Target::Slot(Slot::Rate(_)) => format!("{:+.2}%", (v - 1.0) * 100.0),
             Target::Slot(Slot::SyncRange) => format!("±{:.0}%", v * 100.0),
             Target::LoopLen(_) | Target::Jump(_) => format!("{} beats", fmt_beats(v)),
+            Target::Knob(..) => format!("{v:.2}"),
         }
     }
 }
@@ -107,7 +133,7 @@ pub fn table() -> Vec<(Target, &'static str)> {
     use Ctl::{Crossfader, Eq, Fader, Filter};
     let c = Target::ctl;
     let s = Target::Slot;
-    vec![
+    let mut t = vec![
         (c(Filter(0)), "a"),
         (c(Filter(1)), "s"),
         (c(Eq(0, 0)), "d"),
@@ -132,7 +158,21 @@ pub fn table() -> Vec<(Target, &'static str)> {
         (s(Slot::Master), "ba"),
         (s(Slot::CueMix), "bs"),
         (s(Slot::SyncRange), "bd"),
-    ]
+    ];
+    // patch slots: knobs, then fader / filter / low (DjSet deck = 2 + slot)
+    for (slot, labels) in PATCH_LABELS.iter().enumerate() {
+        let slot = slot as u8;
+        for (i, label) in labels.iter().enumerate() {
+            let target = match i {
+                0..=8 => Target::Knob(slot, i as u8),
+                9 => c(Fader(slot_deck(slot))),
+                10 => c(Filter(slot_deck(slot))),
+                _ => c(Eq(slot_deck(slot), 0)),
+            };
+            t.push((target, *label));
+        }
+    }
+    t
 }
 
 /// The label of a control
@@ -260,7 +300,7 @@ mod tests {
     #[test]
     fn labels_are_left_hand_prefix_free_and_complete() {
         let tab = table();
-        assert_eq!(tab.len(), 22);
+        assert_eq!(tab.len(), 22 + 48);
         for (_, l) in &tab {
             assert!(matches!(l.len(), 1 | 2), "{l}");
             assert!(l.chars().all(|c| LETTERS.contains(c)), "{l}");
@@ -294,6 +334,15 @@ mod tests {
             Target::Slot(Slot::SyncRange),
         ]) {
             assert!(label_of(x).is_some(), "{x:?}");
+        }
+        // and every knob and mixer control of the four patch slots
+        for slot in 0..4u8 {
+            for i in 0..KNOBS_LABELLED as u8 {
+                assert!(label_of(Target::Knob(slot, i)).is_some(), "P{} knob {i}", slot + 1);
+            }
+            for x in [Ctl::Fader(slot_deck(slot)), Ctl::Filter(slot_deck(slot)), Ctl::Eq(slot_deck(slot), 0)] {
+                assert!(label_of(Target::ctl(x)).is_some(), "{x:?}");
+            }
         }
     }
 

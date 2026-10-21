@@ -78,6 +78,8 @@ pub struct View<'a> {
     pub panel: Option<Panel>,
     pub hints: HintView<'a>,
     pub learn: LearnView<'a>,
+    /// the patch pane's content, when `panel` is [`Panel::Patch`]
+    pub patch: Option<&'a super::patchview::PatchView<'a>>,
 }
 
 /// What the learning features put on the screen
@@ -146,7 +148,7 @@ fn text_width(spans: &[Span]) -> u16 {
 }
 
 /// Records a control at (`x`, `y`) when all of it fits in `clip`
-fn add_spot(spots: &mut Vec<Spot>, clip: Rect, target: Target, x: u16, y: u16, label_w: u16, hl_w: u16) {
+pub(super) fn add_spot(spots: &mut Vec<Spot>, clip: Rect, target: Target, x: u16, y: u16, label_w: u16, hl_w: u16) {
     if hl_w == 0 || y < clip.top() || y >= clip.bottom() || x < clip.left() || x + hl_w > clip.right() {
         return;
     }
@@ -189,10 +191,16 @@ fn draw_hints(buf: &mut Buffer, spots: &[Spot], h: &HintView) {
 pub enum Panel {
     Editor,
     Prompt,
+    /// the patch slots and the sequencer grid: drawn by `draw` itself (its controls get hints)
+    Patch,
 }
 
 /// Rows the decks keep when a pane is open
 const DECKS_MIN_WITH_PANEL: u16 = 9;
+/// ... and when the patch pane is open (it wants a lot of rows)
+const DECKS_MIN_WITH_PATCH: u16 = 6;
+/// Rows the patch pane would like: four slots of four lines and the border
+const PATCH_WANTS: u16 = 18;
 
 pub fn fmt_time(secs: f64) -> String {
     let t = secs.max(0.0);
@@ -205,7 +213,7 @@ fn fmt_short(secs: f64) -> String {
     format!("{}:{:02}", s / 60, s % 60)
 }
 
-fn trunc(s: &str, w: usize) -> String {
+pub(super) fn trunc(s: &str, w: usize) -> String {
     if s.chars().count() <= w {
         s.to_string()
     } else if w == 0 {
@@ -215,7 +223,7 @@ fn trunc(s: &str, w: usize) -> String {
     }
 }
 
-fn dim() -> Style {
+pub(super) fn dim() -> Style {
     Style::default().fg(DIM)
 }
 
@@ -244,7 +252,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, v: &View) -> Vec<Spot> {
     };
     // a pane takes the strip's and the library's rows, and more while the decks keep their minimum
     let (set_h, lib_h) = match v.panel {
-        Some(_) => (0, panel_height(body_h, mixer_h, set_h + lib_h)),
+        Some(p) => (0, panel_height(p, body_h, mixer_h, set_h + lib_h)),
         None => (set_h, lib_h),
     };
     // the tutor pane never takes the decks' rows below a minimum: it shrinks the set strip first
@@ -273,6 +281,9 @@ pub fn draw(buf: &mut Buffer, area: Rect, v: &View) -> Vec<Spot> {
         draw_set(buf, set_area, set, v.decks, v.rec, v.learn.warnings);
     }
     draw_mixer(buf, mixer, v, &mut spots);
+    if let (Some(Panel::Patch), Some(pv)) = (v.panel, v.patch) {
+        super::patchview::draw_patch(buf, Rect::new(area.x, mixer.bottom(), area.width, lib_h), pv, &mut spots);
+    }
     if v.panel.is_none() {
         match tutor {
             Some(t) => {
@@ -369,7 +380,11 @@ fn draw_tutor(buf: &mut Buffer, area: Rect, t: &super::tutor::TutorView) {
 
 /// Height of a pane: what the strip and library had, grown to half the body while the decks keep
 /// [`DECKS_MIN_WITH_PANEL`] rows
-fn panel_height(body_h: u16, mixer_h: u16, had: u16) -> u16 {
+fn panel_height(panel: Panel, body_h: u16, mixer_h: u16, had: u16) -> u16 {
+    if panel == Panel::Patch {
+        let room = body_h.saturating_sub(mixer_h + DECKS_MIN_WITH_PATCH);
+        return PATCH_WANTS.min(room).max(had.min(room)).max(4);
+    }
     let room = body_h.saturating_sub(mixer_h + DECKS_MIN_WITH_PANEL);
     (body_h / 2).min(room).max(had.min(room)).max(4)
 }
@@ -377,7 +392,7 @@ fn panel_height(body_h: u16, mixer_h: u16, had: u16) -> u16 {
 /// Where the pane goes (below the mixer, above the status line); None when no pane is open or
 /// the screen is too small
 pub fn panel_rect(area: Rect, v: &View) -> Option<Rect> {
-    v.panel?;
+    let panel = v.panel?;
     if area.width < MIN_SIZE.0 || area.height < MIN_SIZE.1 {
         return None;
     }
@@ -390,7 +405,7 @@ pub fn panel_rect(area: Rect, v: &View) -> Option<Rect> {
         (Some(_), 20..) => 4,
         (Some(_), _) => 1,
     };
-    let h = panel_height(body_h, mixer_h, set_h + lib_h);
+    let h = panel_height(panel, body_h, mixer_h, set_h + lib_h);
     Some(Rect::new(area.x, area.bottom() - 1 - h, area.width, h))
 }
 
@@ -728,12 +743,23 @@ fn draw_header(buf: &mut Buffer, area: Rect, v: &View) {
         // the performance keys are off: say so, loudly
         Some(p) => Line::from(vec![
             Span::styled(
-                if p == Panel::Editor { " EDIT " } else { " AI " },
-                Style::default().fg(Color::Black).bg(Color::Magenta).add_modifier(Modifier::BOLD),
+                match p {
+                    Panel::Editor => " EDIT ",
+                    Panel::Prompt => " AI ",
+                    Panel::Patch => " PATCH ",
+                },
+                Style::default().fg(Color::Black).bg(if p == Panel::Patch { Color::Cyan } else { Color::Magenta }).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  DJ keys are OFF while typing here", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
             Span::styled(
-                if p == Panel::Editor { " · Esc (normal mode) / :q back to the deck keys" } else { " · Esc hides · Ctrl-C cancels the agent" },
+                if p == Panel::Patch { "  deck keys are OFF while the patch pane is open" } else { "  DJ keys are OFF while typing here" },
+                Style::default().fg(if p == Panel::Patch { Color::Cyan } else { Color::Magenta }).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                match p {
+                    Panel::Editor => " · Esc (normal mode) / :q back to the deck keys",
+                    Panel::Prompt => " · Esc hides · Ctrl-C cancels the agent",
+                    Panel::Patch => " · f hints and ] [ still work · F12 / Esc back to the deck keys",
+                },
                 dim(),
             ),
         ]),
@@ -1122,7 +1148,7 @@ fn beat_ticks(buf: &mut Buffer, area: Rect, d: &DeckInfo, t0: f64, t1: f64) {
     }
 }
 
-fn bipolar(v: f64, width: usize, color: Color) -> Vec<Span<'static>> {
+pub(super) fn bipolar(v: f64, width: usize, color: Color) -> Vec<Span<'static>> {
     let width = if width % 2 == 0 { width - 1 } else { width }.max(3);
     let c = width / 2;
     let reach = (v.abs().clamp(0.0, 1.0) * c as f64).round() as usize;
@@ -1139,7 +1165,7 @@ fn bipolar(v: f64, width: usize, color: Color) -> Vec<Span<'static>> {
         .collect()
 }
 
-fn unipolar(v: f64, width: usize, color: Color) -> Vec<Span<'static>> {
+pub(super) fn unipolar(v: f64, width: usize, color: Color) -> Vec<Span<'static>> {
     let filled = ((v.clamp(0.0, 1.0) * width as f64).round() as usize).min(width);
     vec![
         Span::styled("█".repeat(filled), Style::default().fg(color)),
@@ -1434,6 +1460,7 @@ mod tests {
             panel: None,
             hints: HintView::default(),
             learn: LearnView::default(),
+            patch: None,
         };
         f(&mut v);
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -1969,6 +1996,7 @@ mod tests {
             panel: None,
             hints: HintView::default(),
             learn: LearnView::default(),
+            patch: None,
         }
     }
 
@@ -1979,7 +2007,9 @@ mod tests {
     #[test]
     fn every_control_has_a_spot_at_120x35_and_labels_do_not_move_anything() {
         let (plain, spots) = render_full(120, 35, |_| {});
-        for (t, _) in hints::table() {
+        // the patch controls are drawn by the patch pane, which this view does not have open
+        let patchy = |t: &Target| matches!(t, Target::Knob(..) | Target::Slot(Slot::Ctl(Ctl::Fader(2..) | Ctl::Filter(2..) | Ctl::Eq(2.., _))));
+        for (t, _) in hints::table().into_iter().filter(|(t, _)| !patchy(t)) {
             assert!(spots.iter().any(|s| s.target == t), "no spot for {t:?}");
         }
         assert_eq!(spots.len(), 22);

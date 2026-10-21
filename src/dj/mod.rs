@@ -17,6 +17,7 @@ pub mod keys;
 pub mod mixnew;
 pub mod patch;
 pub mod patchdef;
+pub mod patchview;
 pub mod prompt;
 pub mod tutor;
 pub mod render;
@@ -32,7 +33,7 @@ use tokio::task::JoinHandle;
 use tui_input::{Input, InputRequest};
 use zbus::Connection;
 
-use crate::dj_types::{DeckInfo, MixerInfo, SetState};
+use crate::dj_types::{DeckInfo, MixerInfo, PatchSlot, SetState};
 use crate::types::Music;
 use crate::ServerProxy;
 use keys::{coalesce, DjCall, DjKeys, Nav};
@@ -111,6 +112,14 @@ struct Shared {
     grids: [Option<(String, tutor::Grid)>; 2],
     /// the tutor's search for a track pair
     finding: tutor::Finding,
+    /// the four patch slots, None until the first good poll
+    patches: Option<Vec<PatchSlot>>,
+    /// codjd has no `PatchState`: polling stops
+    patch_missing: bool,
+    /// a patch call finished: poll again now
+    patch_poll_now: bool,
+    /// the patch pane is open: poll fast, for the moving step column
+    patch_fast: bool,
 }
 
 /// Short text for a D-Bus failure; an old codjd without the deck API gets a clear hint
@@ -156,6 +165,123 @@ pub enum SetCall {
     Recipes,
     /// `:mix new <recipe> [bars]`
     MixNew(MixNewReq),
+}
+
+/// A call to the patch decks. Like the set calls they run one after another in their own task.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PatchCall {
+    Load(u32, String),
+    Unload(u32),
+    Live(u32, bool),
+    Undo(u32),
+    Redo(u32),
+    /// `PatchSave` (author `human`)
+    Save(u32, String),
+    /// `PatchAction` with one op as JSON (a cell, a pattern switch)
+    Action(u32, String),
+    List,
+    /// `:patch new`: write the template, then load it into `slot` when there is a free one
+    New { name: String, kind: String, slot: Option<u32> },
+    Import { path: String, name: String },
+}
+
+impl PatchCall {
+    fn name(&self) -> &'static str {
+        match self {
+            PatchCall::Load(..) => "PatchLoad",
+            PatchCall::Unload(_) => "PatchUnload",
+            PatchCall::Live(..) => "PatchLive",
+            PatchCall::Undo(_) => "PatchUndo",
+            PatchCall::Redo(_) => "PatchRedo",
+            PatchCall::Save(..) => "PatchSave",
+            PatchCall::Action(..) => "PatchAction",
+            PatchCall::List => "PatchList",
+            PatchCall::New { .. } => "PatchWrite",
+            PatchCall::Import { .. } => "PatchImport",
+        }
+    }
+
+    /// what to say when codjd answered "ok" or `ok <detail>` (slots are P1..P4 on screen)
+    fn done(&self, detail: &str) -> String {
+        let detail = detail.trim();
+        match self {
+            PatchCall::Load(s, n) => format!("{n} loaded into P{}: headphones only, :patch live {} on sends it to the room", s + 1, s + 1),
+            PatchCall::Unload(s) => format!("P{} unloaded", s + 1),
+            PatchCall::Live(s, true) => format!("P{} is LIVE: the room hears it", s + 1),
+            PatchCall::Live(s, false) => format!("P{} back to headphones only", s + 1),
+            PatchCall::Undo(s) => format!("P{} undone", s + 1),
+            PatchCall::Redo(s) => format!("P{} redone", s + 1),
+            PatchCall::Save(s, n) => format!("P{} saved as {n}", s + 1),
+            PatchCall::Import { name, .. } => match detail.split_once('(') {
+                Some((_, notes)) => format!("imported {name}: {}", notes.trim_end_matches(')')),
+                None => format!("imported {name}"),
+            },
+            PatchCall::Action(..) | PatchCall::List | PatchCall::New { .. } => String::new(),
+        }
+    }
+}
+
+/// Short text for a D-Bus failure of the patch decks, which are newer than the deck API
+pub fn describe_patch_error(what: &str, e: &zbus::Error) -> String {
+    let text = e.to_string();
+    if text.contains("UnknownMethod") || text.contains("Unknown method") || text.contains("No such method") {
+        "codjd has no patch decks: update codjd".to_string()
+    } else {
+        describe_error(what, e)
+    }
+}
+
+/// `:patch list` output
+pub fn format_patch_list(files: &[(String, String)]) -> String {
+    if files.is_empty() {
+        return "no patches yet: :patch new <name> [drums|acid|pad]".into();
+    }
+    let items: Vec<String> = files.iter().map(|(n, t)| if t.is_empty() || t == n { n.clone() } else { format!("{n} “{t}”") }).collect();
+    format!("patches: {}  (:patch load <slot> <name>)", items.join(" · "))
+}
+
+fn is_ok(reply: &str) -> bool {
+    reply == "ok" || reply.starts_with("ok ") || reply.is_empty()
+}
+
+async fn run_patch_call(proxy: &ServerProxy<'_>, call: &PatchCall) -> Result<String, String> {
+    let name = call.name();
+    let err = |e: zbus::Error| describe_patch_error(name, &e);
+    let reply = match call {
+        PatchCall::Load(s, n) => proxy.patch_load(*s, n).await.map_err(err)?,
+        PatchCall::Unload(s) => proxy.patch_unload(*s).await.map_err(err)?,
+        PatchCall::Live(s, on) => proxy.patch_live(*s, *on).await.map_err(err)?,
+        PatchCall::Undo(s) => proxy.patch_undo(*s).await.map_err(err)?,
+        PatchCall::Redo(s) => proxy.patch_redo(*s).await.map_err(err)?,
+        PatchCall::Save(s, n) => proxy.patch_save(*s, n, editor::AUTHOR).await.map_err(err)?,
+        PatchCall::Action(s, json) => proxy.patch_action(*s, json).await.map_err(err)?,
+        PatchCall::List => return proxy.patch_list().await.map(|l| format_patch_list(&l)).map_err(err),
+        PatchCall::Import { path, name } => proxy.patch_import(path, name, editor::AUTHOR).await.map_err(err)?,
+        PatchCall::New { name, kind, slot } => {
+            let text = patchdef::template(kind, name).ok_or_else(|| format!("no template {kind:?}: drums, acid or pad"))?;
+            // an empty base hash creates the file; an existing patch of that name is refused
+            let r = proxy.patch_write(name, &text, "", editor::AUTHOR).await.map_err(err)?;
+            if !is_ok(&r) {
+                return Err(format!("PatchWrite: {r}"));
+            }
+            return match slot {
+                Some(s) => {
+                    let r = proxy.patch_load(*s, name).await.map_err(|e| describe_patch_error("PatchLoad", &e))?;
+                    if is_ok(&r) {
+                        Ok(format!("created {name} ({kind}) in P{}: headphones only, p sends it to the room", s + 1))
+                    } else {
+                        Err(format!("created {name}, but PatchLoad: {r}"))
+                    }
+                }
+                None => Ok(format!("created {name} ({kind}); all four slots are in use: :patch load <slot> {name}")),
+            };
+        }
+    };
+    if is_ok(&reply) {
+        Ok(call.done(reply.strip_prefix("ok").unwrap_or("")))
+    } else {
+        Err(format!("{name}: {reply}"))
+    }
 }
 
 /// Everything `:mix new` needs, taken from the screen when the command ran
@@ -314,6 +440,7 @@ pub struct Session {
     shared: Arc<Mutex<Shared>>,
     tx: mpsc::UnboundedSender<DjCall>,
     set_tx: mpsc::UnboundedSender<SetCall>,
+    patch_tx: mpsc::UnboundedSender<PatchCall>,
     conn: Connection,
     tasks: Vec<JoinHandle<()>>,
 }
@@ -340,6 +467,9 @@ async fn run_call(proxy: &ServerProxy<'_>, call: &DjCall) -> zbus::Result<String
         DjCall::Loop { deck, beats } => proxy.dj_loop(*deck, *beats).await,
         DjCall::Hotcue { deck, slot, action } => proxy.dj_hotcue(*deck, *slot, action).await,
         DjCall::Set { control, deck, value } => proxy.dj_set(control, *deck, *value).await,
+        DjCall::PatchKnob { slot, name, value } => {
+            proxy.patch_action(*slot, &serde_json::json!({"op": "knob", "name": name, "value": value}).to_string()).await
+        }
     }
 }
 
@@ -409,6 +539,36 @@ async fn poll_warnings(proxy: &ServerProxy<'_>, shared: &Arc<Mutex<Shared>>, tic
     }
 }
 
+/// the patch slots are polled every other tick (~15 Hz) while the pane is open, else once a second
+const PATCH_POLL_FAST: u32 = 2;
+const PATCH_POLL_IDLE: u32 = 30;
+
+/// Reads `PatchState` when it is due; an old codjd without the method ends the polling
+async fn poll_patches(proxy: &ServerProxy<'_>, shared: &Arc<Mutex<Shared>>, tick: u32) {
+    let due = {
+        let mut s = shared.lock().unwrap();
+        let every = if s.patch_fast { PATCH_POLL_FAST } else { PATCH_POLL_IDLE };
+        let forced = std::mem::take(&mut s.patch_poll_now);
+        !s.patch_missing && (forced || tick % every == 0)
+    };
+    if !due {
+        return;
+    }
+    let reply = tokio::time::timeout(CALL_TIMEOUT, proxy.patch_state()).await;
+    let mut s = shared.lock().unwrap();
+    match reply {
+        Ok(Ok(slots)) => s.patches = Some(slots),
+        Ok(Err(e)) => {
+            let text = e.to_string();
+            if text.contains("UnknownMethod") || text.contains("Unknown method") || text.contains("No such method") {
+                s.patch_missing = true;
+                s.patches = None;
+            }
+        }
+        Err(_) => {}
+    }
+}
+
 /// Reads `SetRecording` when it is due: ~4 Hz while recording, once a second otherwise
 async fn poll_recording(proxy: &ServerProxy<'_>, shared: &Arc<Mutex<Shared>>, tick: u32) {
     let due = {
@@ -459,9 +619,15 @@ impl Session {
             warn_missing: false,
             grids: [None, None],
             finding: tutor::Finding::Searching,
+            patches: None,
+            patch_missing: false,
+            patch_poll_now: false,
+            patch_fast: false,
         }));
         let (tx, mut rx) = mpsc::unbounded_channel::<DjCall>();
         let (set_tx, mut set_rx) = mpsc::unbounded_channel::<SetCall>();
+        let (patch_tx, mut patch_rx) = mpsc::unbounded_channel::<PatchCall>();
+        let conn_for_patch = conn.clone();
 
         let conn_for_set = conn.clone();
         let poller = {
@@ -476,6 +642,7 @@ impl Session {
                     poll_set(&proxy, &shared, tick).await;
                     poll_warnings(&proxy, &shared, tick).await;
                     poll_recording(&proxy, &shared, tick).await;
+                    poll_patches(&proxy, &shared, tick).await;
                     tick = tick.wrapping_add(1);
                     let both = tokio::time::timeout(CALL_TIMEOUT, async {
                         let decks = proxy.dj_decks().await.map_err(|e| describe_error("DjDecks", &e))?;
@@ -587,7 +754,35 @@ impl Session {
             })
         };
 
-        Session { shared, tx, set_tx, conn, tasks: vec![poller, executor, set_executor] }
+        let patch_executor = {
+            let shared = shared.clone();
+            tokio::spawn(async move {
+                let Ok(proxy) = ServerProxy::new(&conn_for_patch).await else { return };
+                while let Some(call) = patch_rx.recv().await {
+                    let limit = if matches!(call, PatchCall::New { .. } | PatchCall::Import { .. }) { MIX_TIMEOUT } else { CALL_TIMEOUT };
+                    let reply = tokio::time::timeout(limit, run_patch_call(&proxy, &call)).await;
+                    let mut s = shared.lock().unwrap();
+                    let now = Instant::now();
+                    match reply {
+                        Ok(Ok(text)) => {
+                            s.call_error = None;
+                            if !text.is_empty() {
+                                s.info = Some((text, now + NOTE_FOR * 2));
+                            }
+                        }
+                        Ok(Err(e)) => s.call_error = Some((e, now)),
+                        Err(_) => s.call_error = Some((format!("{}: codjd does not answer", call.name()), now)),
+                    }
+                    s.patch_poll_now = true;
+                }
+            })
+        };
+
+        Session { shared, tx, set_tx, patch_tx, conn, tasks: vec![poller, executor, set_executor, patch_executor] }
+    }
+
+    pub fn patch_call(&self, call: PatchCall) {
+        let _ = self.patch_tx.send(call);
     }
 
     pub fn set_call(&self, call: SetCall) {
@@ -763,8 +958,80 @@ pub enum Command {
     MixNew { recipe: Option<String>, bars: Option<u32> },
     /// `:tutor [reset]`
     Tutor { reset: bool },
+    /// `:patch ...`
+    Patch(PatchCmd),
+    /// `:w [name]` with the patch pane open: save the selected slot's patch
+    PatchSave(Option<String>),
     Nothing,
     Unknown(String),
+}
+
+/// What `:patch` asks for; slots are 0-based here (P1 = 0)
+#[derive(Debug, PartialEq)]
+pub enum PatchCmd {
+    /// the pane
+    Open,
+    List,
+    /// slot (None = the first free one), patch name
+    Load(Option<u32>, String),
+    Unload(u32),
+    /// slot, on / off (None toggles)
+    Live(u32, Option<bool>),
+    New { name: String, kind: String },
+    Import { path: String, name: String },
+    /// the patch's JSON in the editor pane
+    Edit(String),
+}
+
+const PATCH_USAGE: &str = "usage: patch [list | load [slot] <name> | unload <slot> | live <slot> [on|off] | new <name> [drums|acid|pad] | import <file.ncft> [name] | edit <name>]";
+
+/// `:patch` words (after `patch`) as a command
+pub fn parse_patch(words: &[&str]) -> Command {
+    let usage = |m: &str| Command::Unknown(m.to_string());
+    let slot_of = |w: Option<&&str>| w.and_then(|w| one_based(Some(w))).filter(|s| (*s as usize) < patchdef::SLOTS);
+    let name_of = |w: Option<&&str>| w.map(|w| w.to_string()).filter(|w| patchdef::valid_name(w));
+    let bad_name = "patch names use letters, digits, - and _";
+    match words.first().copied() {
+        None => Command::Patch(PatchCmd::Open),
+        Some("list" | "ls") => Command::Patch(PatchCmd::List),
+        Some("load") => match (slot_of(words.get(1)), words.len()) {
+            (Some(s), 3) => name_of(words.get(2)).map(|n| Command::Patch(PatchCmd::Load(Some(s), n))).unwrap_or_else(|| usage(bad_name)),
+            (None, 2) => name_of(words.get(1)).map(|n| Command::Patch(PatchCmd::Load(None, n))).unwrap_or_else(|| usage(bad_name)),
+            _ => usage("usage: patch load <slot 1-4> <name> (or just a name for the first free slot)"),
+        },
+        Some("unload" | "eject") => slot_of(words.get(1)).filter(|_| words.len() == 2).map(|s| Command::Patch(PatchCmd::Unload(s))).unwrap_or_else(|| usage("usage: patch unload <slot 1-4>")),
+        Some("live") => {
+            let on = match words.get(2).copied() {
+                None => Some(None),
+                Some("on" | "1" | "true") => Some(Some(true)),
+                Some("off" | "0" | "false" | "cue") => Some(Some(false)),
+                Some(_) => None,
+            };
+            match (slot_of(words.get(1)), on) {
+                (Some(s), Some(on)) if words.len() <= 3 => Command::Patch(PatchCmd::Live(s, on)),
+                _ => usage("usage: patch live <slot 1-4> [on|off]"),
+            }
+        }
+        Some("new") => {
+            let kind = words.get(2).copied().unwrap_or("drums");
+            match (name_of(words.get(1)), patchdef::TEMPLATE_KINDS.contains(&kind), words.len() <= 3) {
+                (Some(name), true, true) => Command::Patch(PatchCmd::New { name, kind: kind.to_string() }),
+                (None, ..) => usage(if words.len() < 2 { "usage: patch new <name> [drums|acid|pad]" } else { bad_name }),
+                _ => usage("usage: patch new <name> [drums|acid|pad]"),
+            }
+        }
+        Some("import") => {
+            let Some(path) = words.get(1) else { return usage("usage: patch import <file.ncft> [name]") };
+            let stem = std::path::Path::new(path).file_stem().map(|s| s.to_string_lossy().replace(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'), "_")).unwrap_or_default();
+            let name = words.get(2).map(|w| w.to_string()).unwrap_or(stem);
+            if !patchdef::valid_name(&name) || words.len() > 3 {
+                return usage("usage: patch import <file.ncft> [name] (names use letters, digits, - and _)");
+            }
+            Command::Patch(PatchCmd::Import { path: path.to_string(), name })
+        }
+        Some("edit") => name_of(words.get(1)).filter(|_| words.len() == 2).map(|n| Command::Patch(PatchCmd::Edit(n))).unwrap_or_else(|| usage("usage: patch edit <name>")),
+        Some(_) => usage(PATCH_USAGE),
+    }
 }
 
 /// Which mix `:arm` means
@@ -859,6 +1126,15 @@ pub fn parse_command(cmd: &str) -> Command {
             capture::parse(w, &words.collect::<Vec<_>>()).unwrap_or(Command::Nothing)
         }
         Some("mix") => mixnew::parse(&words.collect::<Vec<_>>()),
+        Some("patch" | "patches") => parse_patch(&words.collect::<Vec<_>>()),
+        Some("w" | "write") => {
+            let rest: Vec<&str> = words.collect();
+            match rest.as_slice() {
+                [] => Command::PatchSave(None),
+                [n] if patchdef::valid_name(n) => Command::PatchSave(Some(n.to_string())),
+                _ => Command::Unknown("usage: w [name] (letters, digits, - and _); saves the patch of the selected slot".into()),
+            }
+        }
         Some("tutor") => match words.next() {
             None => Command::Tutor { reset: false },
             Some("reset") if words.next().is_none() => Command::Tutor { reset: true },
@@ -867,7 +1143,7 @@ pub fn parse_command(cmd: &str) -> Command {
         Some("e") => Command::Editor,
         None => Command::Nothing,
         Some(other) => Command::Unknown(format!(
-            "unknown DJ command: {other} (q: back, load a|b|<track>, grid a|b x2|/2|.., set [name], arm <n|next>, disarm, auto on|off, preview <n> [bars], errors, edit, e, ai <request>, help [term], tutor, mix new [recipe], cue <name> [a|b], loopsave <name> [a|b], gridsave [a|b], rec [on|off])"
+            "unknown DJ command: {other} (q: back, patch [new|load|live|edit|list], load a|b|<track>, grid a|b x2|/2|.., set [name], arm <n|next>, disarm, auto on|off, preview <n> [bars], errors, edit, e, ai <request>, help [term], tutor, mix new [recipe], cue <name> [a|b], loopsave <name> [a|b], gridsave [a|b], rec [on|off])"
         )),
     }
 }
@@ -1064,6 +1340,8 @@ pub struct DjScreen {
     tutor_sel: (bool, bool),
     /// where the tutor saves its progress (None: not at all)
     tutor_path: Option<std::path::PathBuf>,
+    /// the patch pane (F12, `:patch`)
+    patch: patch::PatchPane,
 }
 
 impl DjScreen {
@@ -1089,6 +1367,7 @@ impl DjScreen {
             tutor: None,
             tutor_sel: (false, false),
             tutor_path: tutor::state_path(),
+            patch: patch::PatchPane::default(),
         }
     }
 
@@ -1231,6 +1510,37 @@ impl DjScreen {
         }
     }
 
+    /// The patch slots feed the hint machinery; with the pane open their sources are read
+    fn tick_patch(&mut self) {
+        let (slots, _) = self.patch_slots();
+        self.session.shared.lock().unwrap().patch_fast = self.patch.open;
+        if self.patch.open {
+            let conn = self.session.conn.clone();
+            self.patch.sync(&slots, |slot, name, tx| {
+                let conn = conn.clone();
+                tokio::spawn(async move {
+                    let text = async {
+                        let proxy = ServerProxy::new(&conn).await.map_err(|e| describe_patch_error("PatchSource", &e))?;
+                        match tokio::time::timeout(CALL_TIMEOUT, proxy.patch_source(&name)).await {
+                            Ok(Ok((text, _))) => Ok(text),
+                            Ok(Err(e)) => Err(describe_patch_error("PatchSource", &e)),
+                            Err(_) => Err("PatchSource: codjd does not answer".to_string()),
+                        }
+                    }
+                    .await;
+                    let _ = tx.send(patch::Fetched::Source { slot, name, text });
+                });
+            });
+        }
+        let mut defaults: [Vec<(String, f64)>; 4] = Default::default();
+        for (i, d) in defaults.iter_mut().enumerate() {
+            if let Some(m) = self.patch.model(i) {
+                *d = m.knob_defaults.clone();
+            }
+        }
+        self.keys.set_patches(&slots, defaults);
+    }
+
     /// The tutor looks at the decks; at step 1 it moves the library highlight to the proposal
     fn tick_tutor(&mut self, decks: &[DeckInfo], mixer: &MixerInfo, now: Instant) {
         let finding = self.session.shared.lock().unwrap().finding.clone();
@@ -1268,6 +1578,116 @@ impl DjScreen {
         match mixnew::pick_pair(&decks, &mixer, &set) {
             Ok(pair) => self.session.set_call(SetCall::MixNew(MixNewReq { recipe, bars, set: set.name, pair })),
             Err(e) => self.set_note(e),
+        }
+    }
+
+    /// the patch slots as last polled (four empty ones before the first answer)
+    fn patch_slots(&self) -> (Vec<PatchSlot>, bool) {
+        let s = self.session.shared.lock().unwrap();
+        let mut slots = s.patches.clone().unwrap_or_default();
+        slots.resize_with(patchdef::SLOTS, PatchSlot::default);
+        (slots, s.patch_missing)
+    }
+
+    /// F12 / `:patch`: the patch pane takes the keyboard (the deck keys are off meanwhile)
+    fn open_patch(&mut self, now: Instant) {
+        if self.patch.open {
+            return;
+        }
+        self.settle(now);
+        let (slots, _) = self.patch_slots();
+        if !slots.get(self.patch.sel).is_some_and(|s| s.loaded) {
+            self.patch.sel = slots.iter().position(|s| s.loaded).unwrap_or(0);
+        }
+        self.patch.open();
+    }
+
+    /// What a key in the patch pane asked for
+    fn patch_effects(&mut self, effects: Vec<patch::PEffect>) {
+        use patch::PEffect;
+        for e in effects {
+            match e {
+                PEffect::Action { slot, json } => self.session.patch_call(PatchCall::Action(slot, json)),
+                PEffect::Undo(s) => self.session.patch_call(PatchCall::Undo(s)),
+                PEffect::Redo(s) => self.session.patch_call(PatchCall::Redo(s)),
+                PEffect::Live(s, on) => self.session.patch_call(PatchCall::Live(s, on)),
+                PEffect::Note(n) => self.set_note(n),
+                PEffect::Help => self.session.shared.lock().unwrap().popup = Some(glossary::patch_keys_popup()),
+                PEffect::Close => self.patch.close(),
+            }
+        }
+    }
+
+    /// `:w [name]`: PatchSave of the selected slot, under its own name unless one is given
+    fn patch_save(&mut self, slot: u32, name: Option<String>) {
+        let (slots, _) = self.patch_slots();
+        match slots.get(slot as usize).filter(|s| s.loaded) {
+            Some(s) => {
+                let name = name.unwrap_or_else(|| s.name.clone());
+                self.session.patch_call(PatchCall::Save(slot, name));
+            }
+            None => self.set_note(format!("P{} is empty: nothing to save", slot + 1)),
+        }
+    }
+
+    /// A key while the patch pane is open. None: the key belongs to the deck-key machinery (the
+    /// hints `f ] [ \ ;`, the `:` line, Esc over a selection), which the pane keeps working.
+    fn patch_key(&mut self, key: &KeyEvent, now: Instant) -> Option<Outcome> {
+        if self.keys.hints().active {
+            return None;
+        }
+        if key.kind == KeyEventKind::Release {
+            return Some(Outcome::Stay);
+        }
+        let nk = keys::normalize(key);
+        let plain = !nk.alt && !nk.ctrl;
+        if nk.code == KeyCode::F(12) && !nk.alt {
+            self.patch.close();
+            return Some(Outcome::Stay);
+        }
+        let hint_key = plain
+            && match nk.code {
+                KeyCode::Char('f' | ']' | '[' | '\\') => !nk.shift,
+                KeyCode::Char(';') => true,
+                KeyCode::Esc => self.keys.hints().selected.is_some(),
+                _ => false,
+            };
+        if hint_key {
+            return None;
+        }
+        let (slots, _) = self.patch_slots();
+        let effects = self.patch.on_key(&nk, &slots);
+        self.patch_effects(effects);
+        let _ = now;
+        Some(Outcome::Stay)
+    }
+
+    /// `:patch ...`
+    fn patch_command(&mut self, cmd: PatchCmd) {
+        let (slots, missing) = self.patch_slots();
+        if missing && !matches!(cmd, PatchCmd::Open | PatchCmd::Edit(_)) {
+            self.set_note("codjd has no patch decks: update codjd");
+            return;
+        }
+        let free = || slots.iter().position(|s| !s.loaded).map(|i| i as u32);
+        match cmd {
+            PatchCmd::Open => self.open_patch(Instant::now()),
+            PatchCmd::List => self.session.patch_call(PatchCall::List),
+            PatchCmd::Load(slot, name) => match slot.or_else(free) {
+                Some(s) => self.session.patch_call(PatchCall::Load(s, name)),
+                None => self.set_note("all four slots are in use: :patch load <slot> <name> replaces one"),
+            },
+            PatchCmd::Unload(s) => self.session.patch_call(PatchCall::Unload(s)),
+            PatchCmd::Live(s, on) => {
+                let now_live = slots.get(s as usize).is_some_and(|x| x.live);
+                self.session.patch_call(PatchCall::Live(s, on.unwrap_or(!now_live)));
+            }
+            PatchCmd::New { name, kind } => self.session.patch_call(PatchCall::New { name, kind, slot: free() }),
+            PatchCmd::Import { path, name } => self.session.patch_call(PatchCall::Import { path, name }),
+            PatchCmd::Edit(name) => {
+                self.settle(Instant::now());
+                self.editor = Some(editor::Editor::new_patch(Some(self.session.conn.clone()), &name));
+            }
         }
     }
 
@@ -1452,6 +1872,11 @@ impl DjScreen {
                 }
             }
         }
+        if self.patch.open && !self.pane.typing() {
+            if let Some(outcome) = self.patch_key(key, now) {
+                return outcome;
+            }
+        }
         if self.pane.typing() {
             return match self.pane.handle_typing(key) {
                 Some(cmd) => self.run_command(&cmd),
@@ -1479,6 +1904,7 @@ impl DjScreen {
             Nav::LibPageDown => self.pane.scroll(5),
             Nav::Load(d) => self.load(d),
             Nav::Editor => self.open_editor(now),
+            Nav::Patch => self.open_patch(now),
             Nav::Prompt => self.open_prompt(None, now),
             Nav::SetArmNext => self.set_arm(ArmTarget::Next),
             Nav::SetAuto => self.set_auto(None),
@@ -1559,6 +1985,14 @@ impl DjScreen {
             Command::Help(query) => self.help_command(&query),
             Command::MixNew { recipe, bars } => self.mix_new(recipe, bars),
             Command::Tutor { reset } => self.tutor_command(reset),
+            Command::Patch(cmd) => self.patch_command(cmd),
+            Command::PatchSave(name) => {
+                if self.patch.open {
+                    self.patch_save(self.patch.sel as u32, name);
+                } else {
+                    self.set_note("no patch pane: F12 or :patch opens it (:w saves the selected slot's patch)");
+                }
+            }
             Command::Nothing => {}
             Command::Unknown(msg) => self.set_note(msg),
         }
@@ -1582,7 +2016,13 @@ impl DjScreen {
         self.poll_knob();
         self.tick_tutor(&decks, &mixer, now);
         self.keys.set_snapshot(&decks, &mixer);
+        self.tick_patch();
         let calls = self.keys.tick(now);
+        for c in &calls {
+            if let DjCall::PatchKnob { slot, .. } = c {
+                self.patch.note_other_edit(*slot as usize);
+            }
+        }
         self.session.send(calls);
         self.session.ensure_waves();
     }
@@ -1624,7 +2064,7 @@ impl DjScreen {
             .keys
             .hints()
             .selected
-            .map(|t| format!("◆ {} {}", t.name(), t.format(self.keys.value_of(t, now))));
+            .map(|t| format!("◆ {} {}", self.keys.target_name(t), t.format(self.keys.value_of(t, now))));
         // one line about the picked control, or about what the typed hint letters lead to
         let explain: Option<String> = if self.keys.hints().active {
             glossary::hover(&typed, &labels, self.keys.visible()).or_else(|| self.keys.hints().selected.map(|t| glossary::explain(t).to_string()))
@@ -1648,8 +2088,47 @@ impl DjScreen {
             Some(render::Panel::Editor)
         } else if prompt_visible {
             Some(render::Panel::Prompt)
+        } else if self.patch.open {
+            Some(render::Panel::Patch)
         } else {
             None
+        };
+        let mut patch_slots = s.patches.clone().unwrap_or_default();
+        patch_slots.resize_with(patchdef::SLOTS, PatchSlot::default);
+        let knob_vals: Vec<Vec<f64>> = patch_slots
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (0..p.knobs.len()).map(|k| self.keys.value_of(hints::Target::Knob(i as u8, k as u8), now)).collect())
+            .collect();
+        let mut mix_vals = [[0.0; 3]; patchdef::SLOTS];
+        for (i, m) in mix_vals.iter_mut().enumerate() {
+            let d = hints::slot_deck(i as u8);
+            let get = |c: keys::Ctl| self.keys.value_of(hints::Target::Slot(keys::Slot::Ctl(c)), now);
+            *m = [get(keys::Ctl::Fader(d)), get(keys::Ctl::Filter(d)), get(keys::Ctl::Eq(d, 0))];
+        }
+        let grid_view = self.patch.grid.as_ref().and_then(|g| {
+            let seq = self.patch.seq()?;
+            let slot = patch_slots.get(self.patch.sel)?;
+            let live = slot.sequencers.iter().find(|q| q.0 == seq.name);
+            Some(patchview::GridView {
+                seq,
+                seq_index: g.seq,
+                seq_count: self.patch.model(self.patch.sel).map_or(1, |m| m.seqs.len()),
+                pattern: g.pattern,
+                cx: g.cx,
+                cy: g.cy,
+                playing: live.map(|q| q.1),
+                queued: live.map(|q| q.2).filter(|q| *q != patch::NONE_QUEUED),
+                step: live.map(|q| q.3),
+            })
+        });
+        let patch_view = patchview::PatchView {
+            slots: &patch_slots,
+            missing: s.patch_missing,
+            sel: self.patch.sel,
+            knob_vals: &knob_vals,
+            mix_vals,
+            grid: grid_view,
         };
         let view = View {
             decks: &s.decks,
@@ -1681,6 +2160,7 @@ impl DjScreen {
                 gain: [self.keys.gain_shown(0, now), self.keys.gain_shown(1, now)],
                 sync_range: self.keys.sync_range(),
             },
+            patch: Some(&patch_view),
             learn: render::LearnView {
                 help: self.help,
                 popup: s.popup.as_ref().map(|(t, l)| (t.as_str(), l.as_slice())),

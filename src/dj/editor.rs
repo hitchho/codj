@@ -29,6 +29,63 @@ pub const CHECK_DEBOUNCE: Duration = Duration::from_millis(400);
 pub const CONFLICT_REASON: &str = "set changed since you read it";
 /// author of everything written from this pane
 pub const AUTHOR: &str = "human";
+/// A refused write because the file moved on: sets say "set changed since you read it"; a patch
+/// write is assumed to say the same thing with its own noun
+pub fn is_conflict(reply: &str) -> bool {
+    reply.contains("changed since you read it")
+}
+
+/// What the pane edits: a set (`Set*` methods) or a patch's JSON (`Patch*` methods)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Doc {
+    Set,
+    Patch,
+}
+
+impl Doc {
+    fn source(self) -> &'static str {
+        if self == Doc::Set { "SetSource" } else { "PatchSource" }
+    }
+    fn write(self) -> &'static str {
+        if self == Doc::Set { "SetWrite" } else { "PatchWrite" }
+    }
+    fn check(self) -> &'static str {
+        if self == Doc::Set { "SetCheck" } else { "PatchCheck" }
+    }
+    fn noun(self) -> &'static str {
+        if self == Doc::Set { "set" } else { "patch" }
+    }
+}
+
+/// Patch errors are `<node id or name>: message` (or `patch: message`), without a line. Each is
+/// put on the line that declares the node: the key `"<id>": {` or `"name": "<id>"`; the rest come
+/// back as loose errors.
+pub fn patch_markers(errors: &[String], text: &str) -> (Vec<Marker>, Vec<String>) {
+    let (mut marks, mut loose) = (Vec::new(), Vec::new());
+    for e in errors {
+        let Some((node, msg)) = e.split_once(':') else {
+            loose.push(e.clone());
+            continue;
+        };
+        let (node, msg) = (node.trim(), msg.trim());
+        let key = format!("\"{node}\":");
+        let name = format!("\"name\": \"{node}\"");
+        let name_tight = format!("\"name\":\"{node}\"");
+        let hit = text.lines().enumerate().find(|(_, l)| {
+            let t = l.trim_start();
+            // a node's key opens an object; a plain `"id": 1` would be a parameter
+            (t.starts_with(&key) && t.contains('{')) || l.contains(&name) || l.contains(&name_tight)
+        });
+        match hit {
+            Some((line, l)) if !node.is_empty() && node != "patch" => {
+                marks.push(Marker { line, col: l.find('"').map_or(1, |c| c + 1), msg: format!("{node}: {msg}") })
+            }
+            _ => loose.push(e.clone()),
+        }
+    }
+    (marks, loose)
+}
+
 /// how long a status message hides the cursor line's error
 const STATUS_FOR: Duration = Duration::from_secs(5);
 
@@ -301,12 +358,42 @@ fn problem(what: &str, e: &zbus::Error) -> String {
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 
-async fn source_of(conn: &Connection, name: &str) -> Result<(String, String), String> {
-    let proxy = ServerProxy::new(conn).await.map_err(|e| problem("SetSource", &e))?;
-    match tokio::time::timeout(CALL_TIMEOUT, proxy.set_source(name)).await {
+async fn source_of(conn: &Connection, doc: Doc, name: &str) -> Result<(String, String), String> {
+    let what = doc.source();
+    let proxy = ServerProxy::new(conn).await.map_err(|e| problem(what, &e))?;
+    let call = async {
+        if doc == Doc::Set { proxy.set_source(name).await } else { proxy.patch_source(name).await }
+    };
+    match tokio::time::timeout(CALL_TIMEOUT, call).await {
         Ok(Ok(r)) => Ok(r),
-        Ok(Err(e)) => Err(problem("SetSource", &e)),
-        Err(_) => Err("SetSource: codjd does not answer".into()),
+        Ok(Err(e)) => Err(problem(what, &e)),
+        Err(_) => Err(format!("{what}: codjd does not answer")),
+    }
+}
+
+async fn write_of(conn: &Connection, doc: Doc, name: &str, text: &str, base: &str) -> Result<String, String> {
+    let what = doc.write();
+    let proxy = ServerProxy::new(conn).await.map_err(|e| problem(what, &e))?;
+    let call = async {
+        if doc == Doc::Set { proxy.set_write(name, text, base, AUTHOR).await } else { proxy.patch_write(name, text, base, AUTHOR).await }
+    };
+    match tokio::time::timeout(CALL_TIMEOUT, call).await {
+        Ok(Ok(r)) => Ok(r),
+        Ok(Err(e)) => Err(problem(what, &e)),
+        Err(_) => Err(format!("{what}: codjd does not answer")),
+    }
+}
+
+async fn check_of(conn: &Connection, doc: Doc, text: &str) -> Result<Vec<String>, String> {
+    let what = doc.check();
+    let proxy = ServerProxy::new(conn).await.map_err(|e| problem(what, &e))?;
+    let call = async {
+        if doc == Doc::Set { proxy.set_check(text).await } else { proxy.patch_check(text).await }
+    };
+    match tokio::time::timeout(CALL_TIMEOUT, call).await {
+        Ok(Ok(r)) => Ok(r),
+        Ok(Err(e)) => Err(problem(what, &e)),
+        Err(_) => Err(format!("{what}: codjd does not answer")),
     }
 }
 
@@ -327,6 +414,7 @@ enum Modal {
 
 pub struct Editor {
     conn: Option<Connection>,
+    pub doc: Doc,
     pub name: String,
     pub file: String,
     state: EditorState,
@@ -363,9 +451,19 @@ fn lines_to_text(lines: &Lines) -> String {
 impl Editor {
     /// Opens the pane on set `name` and starts reading its source (no daemon when `conn` is None)
     pub fn new(conn: Option<Connection>, name: &str, file: &str) -> Self {
+        Self::with_doc(conn, Doc::Set, name, file)
+    }
+
+    /// Opens the pane on the JSON of patch `name` (`PatchSource` / `PatchCheck` / `PatchWrite`)
+    pub fn new_patch(conn: Option<Connection>, name: &str) -> Self {
+        Self::with_doc(conn, Doc::Patch, name, &format!("patches/{name}.json"))
+    }
+
+    fn with_doc(conn: Option<Connection>, doc: Doc, name: &str, file: &str) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let ed = Editor {
             conn,
+            doc,
             name: name.to_string(),
             file: file.to_string(),
             state: EditorState::default(),
@@ -394,9 +492,9 @@ impl Editor {
 
     fn load(&self) {
         let Some(conn) = self.conn.clone() else { return };
-        let (tx, name) = (self.tx.clone(), self.name.clone());
+        let (tx, name, doc) = (self.tx.clone(), self.name.clone(), self.doc);
         tokio::spawn(async move {
-            let _ = tx.send(match source_of(&conn, &name).await {
+            let _ = tx.send(match source_of(&conn, doc, &name).await {
                 Ok((text, hash)) => EditorEvent::Loaded { text, hash },
                 Err(e) => EditorEvent::LoadFailed(e),
             });
@@ -552,18 +650,9 @@ impl Editor {
 
     fn send_write(&self, text: String, base: String) {
         let Some(conn) = self.conn.clone() else { return };
-        let (tx, name) = (self.tx.clone(), self.name.clone());
+        let (tx, name, doc) = (self.tx.clone(), self.name.clone(), self.doc);
         tokio::spawn(async move {
-            let reply = async {
-                let proxy = ServerProxy::new(&conn).await.map_err(|e| problem("SetWrite", &e))?;
-                match tokio::time::timeout(CALL_TIMEOUT, proxy.set_write(&name, &text, &base, AUTHOR)).await {
-                    Ok(Ok(r)) => Ok(r),
-                    Ok(Err(e)) => Err(problem("SetWrite", &e)),
-                    Err(_) => Err("SetWrite: codjd does not answer".to_string()),
-                }
-            }
-            .await
-            .unwrap_or_else(|e| e);
+            let reply = write_of(&conn, doc, &name, &text, &base).await.unwrap_or_else(|e| e);
             let _ = tx.send(EditorEvent::Written { reply, text });
         });
     }
@@ -571,16 +660,11 @@ impl Editor {
     /// overwrite: read the current hash, then write on top of it
     fn send_overwrite(&self, text: String) {
         let Some(conn) = self.conn.clone() else { return };
-        let (tx, name) = (self.tx.clone(), self.name.clone());
+        let (tx, name, doc) = (self.tx.clone(), self.name.clone(), self.doc);
         tokio::spawn(async move {
             let reply = async {
-                let (_, hash) = source_of(&conn, &name).await?;
-                let proxy = ServerProxy::new(&conn).await.map_err(|e| problem("SetWrite", &e))?;
-                match tokio::time::timeout(CALL_TIMEOUT, proxy.set_write(&name, &text, &hash, AUTHOR)).await {
-                    Ok(Ok(r)) => Ok(r),
-                    Ok(Err(e)) => Err(problem("SetWrite", &e)),
-                    Err(_) => Err("SetWrite: codjd does not answer".to_string()),
-                }
+                let (_, hash) = source_of(&conn, doc, &name).await?;
+                write_of(&conn, doc, &name, &text, &hash).await
             }
             .await
             .unwrap_or_else(|e| e);
@@ -591,17 +675,9 @@ impl Editor {
     fn send_check(&mut self) {
         let Some(conn) = self.conn.clone() else { return };
         self.check_seq += 1;
-        let (tx, seq, text) = (self.tx.clone(), self.check_seq, self.text());
+        let (tx, seq, text, doc) = (self.tx.clone(), self.check_seq, self.text(), self.doc);
         tokio::spawn(async move {
-            let ev = async {
-                let proxy = ServerProxy::new(&conn).await.map_err(|e| problem("SetCheck", &e))?;
-                match tokio::time::timeout(CALL_TIMEOUT, proxy.set_check(&text)).await {
-                    Ok(Ok(errors)) => Ok(errors),
-                    Ok(Err(e)) => Err(problem("SetCheck", &e)),
-                    Err(_) => Err("SetCheck: codjd does not answer".to_string()),
-                }
-            }
-            .await;
+            let ev = check_of(&conn, doc, &text).await;
             let _ = tx.send(match ev {
                 Ok(errors) => EditorEvent::Checked { seq, errors },
                 Err(e) => EditorEvent::CheckFailed(e),
@@ -611,9 +687,9 @@ impl Editor {
 
     fn fetch_theirs(&self) {
         let Some(conn) = self.conn.clone() else { return };
-        let (tx, name) = (self.tx.clone(), self.name.clone());
+        let (tx, name, doc) = (self.tx.clone(), self.name.clone(), self.doc);
         tokio::spawn(async move {
-            let _ = tx.send(match source_of(&conn, &name).await {
+            let _ = tx.send(match source_of(&conn, doc, &name).await {
                 Ok((text, hash)) => EditorEvent::Theirs { text, hash },
                 Err(e) => EditorEvent::LoadFailed(e),
             });
@@ -665,7 +741,7 @@ impl Editor {
                 EditorEvent::Checked { seq, errors } => {
                     if seq >= self.checked_seq {
                         self.checked_seq = seq;
-                        let (m, l) = parse_markers(&errors);
+                        let (m, l) = if self.doc == Doc::Patch { patch_markers(&errors, &self.text()) } else { parse_markers(&errors) };
                         self.markers = m;
                         self.loose_errors = l;
                     }
@@ -678,9 +754,9 @@ impl Editor {
                         self.warned_discard = false;
                         self.set_status(format!("written {} (author {AUTHOR})", self.name));
                         close |= std::mem::take(&mut self.close_after_write);
-                    } else if reply.contains(CONFLICT_REASON) {
+                    } else if is_conflict(&reply) {
                         self.close_after_write = false;
-                        self.set_status("the set changed under you...");
+                        self.set_status(format!("the {} changed under you...", self.doc.noun()));
                         self.fetch_theirs();
                     } else {
                         self.close_after_write = false;
@@ -804,7 +880,7 @@ impl Editor {
 
     fn draw_conflict(&self, buf: &mut Buffer, body: Rect, msg_row: Rect, diff: &[String], show_diff: bool, scroll: usize) {
         let w = body.width.saturating_sub(2) as usize;
-        buf.set_stringn(body.x + 1, body.y, format!("{CONFLICT_REASON}: someone saved {} meanwhile.", self.name), w, Style::default().fg(Color::Red).add_modifier(Modifier::BOLD));
+        buf.set_stringn(body.x + 1, body.y, format!("{}: someone saved {} meanwhile.", if self.doc == Doc::Set { CONFLICT_REASON } else { "patch changed since you read it" }, self.name), w, Style::default().fg(Color::Red).add_modifier(Modifier::BOLD));
         buf.set_stringn(body.x + 1, body.y + 1, "r reload theirs (discard my edits) · d view diff · o overwrite theirs with mine · Esc keep editing", w, Style::default().fg(Color::Yellow));
         if show_diff && body.height > 3 {
             buf.set_stringn(body.x + 1, body.y + 2, "diff, theirs -> mine (what overwrite does); j/k scroll:", w, Style::default().fg(Color::DarkGray));
