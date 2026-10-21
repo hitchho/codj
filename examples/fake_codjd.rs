@@ -56,11 +56,34 @@ const SET_ITEMS: [&[(f64, &str)]; 2] = [
     &[(0.0, "B low kill"), (16.0, "swap low"), (24.0, "A loop 2 beats"), (32.0, "A stop")],
 ];
 
+/// The text of the set "demo" as the fake serves it through SetSource / SetWrite
+const DEMO_TEXT: &str = "# demo\nset \"demo: 3 tracks\"\n\ntrack warm \"Aftertekno\"\n  cue drop bar 33\n\ntrack mid \"Smokin\"\n\nmix warm -> mid at bar 3 over 16 bars\n  bar 0 mid play\n";
+
+/// opaque stand-in for the sha-256 of the text
+fn fake_hash(text: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
+/// `file:line:col: message` for every line with the word BAD in it
+fn fake_check(text: &str) -> Vec<String> {
+    text.lines()
+        .enumerate()
+        .filter_map(|(i, l)| l.find("BAD").map(|c| format!("demo.codj:{}:{}: syntax error near BAD", i + 1, c + 1)))
+        .collect()
+}
+
 struct State {
     decks: [Deck; 2],
     mixer: MixerInfo,
     at: Instant,
     set: SetRt,
+    /// the demo set's file text
+    text: String,
+    /// recording a mix since this instant
+    recording: Option<Instant>,
 }
 
 impl State {
@@ -230,6 +253,16 @@ struct Fake {
 }
 
 impl Fake {
+    /// the active set, or the error to reply with
+    fn need_set(&self) -> Result<std::sync::MutexGuard<'_, State>, String> {
+        let st = self.st.lock().unwrap();
+        if st.set.active.is_empty() {
+            Err("no active set".into())
+        } else {
+            Ok(st)
+        }
+    }
+
     fn use_set(&self, st: &mut State, name: &str) -> String {
         st.set = SetRt { active: name.to_string(), armed: -1, out_deck: -1, ..Default::default() };
         "ok".into()
@@ -575,6 +608,95 @@ impl Fake {
         "ok".into()
     }
 
+    async fn set_cue(&self, deck: u32, name: String) -> String {
+        self.log(format!("SetCue {deck} {name}"));
+        let mut st = match self.need_set() { Ok(s) => s, Err(e) => return e };
+        st.advance();
+        let Some(d) = st.decks.get(deck as usize).map(|d| d.info.clone()).filter(|d| d.loaded) else { return "nothing loaded".into() };
+        let bar = (d.position * 2.0 / 4.0) as u32 + 1;
+        st.text.push_str(&format!("  cue {name} bar {bar}\n"));
+        format!("ok cue {name} -> {} bar {bar}", d.title)
+    }
+
+    async fn set_loop_capture(&self, deck: u32, name: String) -> String {
+        self.log(format!("SetLoopCapture {deck} {name}"));
+        let mut st = match self.need_set() { Ok(s) => s, Err(e) => return e };
+        st.advance();
+        let Some(d) = st.decks.get(deck as usize).map(|d| d.info.clone()).filter(|d| d.loaded) else { return "nothing loaded".into() };
+        if d.loop_beats <= 0.0 {
+            return "no active loop on that deck".into();
+        }
+        st.text.push_str(&format!("  loop {name} bar 1 len {} beats\n", d.loop_beats));
+        format!("ok loop {name} -> {} len {} beats", d.title, d.loop_beats)
+    }
+
+    async fn set_grid_capture(&self, deck: u32) -> String {
+        self.log(format!("SetGridCapture {deck}"));
+        let mut st = match self.need_set() { Ok(s) => s, Err(e) => return e };
+        st.advance();
+        let Some(d) = st.decks.get(deck as usize).map(|d| d.info.clone()).filter(|d| d.loaded) else { return "nothing loaded".into() };
+        st.text.push_str(&format!("  grid {:.1}\n", d.bpm));
+        format!("ok grid {:.1} -> {}", d.bpm, d.title)
+    }
+
+    async fn set_record(&self, on: bool) -> String {
+        self.log(format!("SetRecord {on}"));
+        let mut st = match self.need_set() { Ok(s) => s, Err(e) => return e };
+        match (on, st.recording) {
+            (true, Some(_)) => "already recording".into(),
+            (true, None) => {
+                st.recording = Some(Instant::now());
+                "ok".into()
+            }
+            (false, None) => "not recording".into(),
+            (false, Some(_)) => {
+                st.recording = None;
+                "ok mix 2: aft -> smk, 16 bars, 9 items".into()
+            }
+        }
+    }
+
+    /// 2 beats and 3 events per second since the start
+    async fn set_recording(&self) -> (bool, f64, u32) {
+        let st = self.st.lock().unwrap();
+        match st.recording {
+            Some(t) => (true, t.elapsed().as_secs_f64() * 2.0, (t.elapsed().as_secs_f64() * 3.0) as u32),
+            None => (false, 0.0, 0),
+        }
+    }
+
+    async fn set_source(&self, name: String) -> zbus::fdo::Result<(String, String)> {
+        self.log(format!("SetSource {name}"));
+        match name.as_str() {
+            "demo" | "demo.codj" => {
+                let st = self.st.lock().unwrap();
+                Ok((st.text.clone(), fake_hash(&st.text)))
+            }
+            other => Err(zbus::fdo::Error::Failed(format!("no set named {other}"))),
+        }
+    }
+
+    async fn set_check(&self, text: String) -> Vec<String> {
+        self.log(format!("SetCheck {} bytes", text.len()));
+        fake_check(&text)
+    }
+
+    async fn set_write(&self, name: String, text: String, base_hash: String, author: String) -> String {
+        self.log(format!("SetWrite {name} base={base_hash} author={author} bytes={}", text.len()));
+        let mut st = self.st.lock().unwrap();
+        if !matches!(name.as_str(), "demo" | "demo.codj") {
+            return format!("no set named {name}");
+        }
+        if base_hash != fake_hash(&st.text) {
+            return "set changed since you read it".into();
+        }
+        if let Some(first) = fake_check(&text).into_iter().next() {
+            return first;
+        }
+        st.text = text;
+        format!("ok {}", fake_hash(&st.text))
+    }
+
     async fn set_state(&self) -> SetState {
         let mut st = self.st.lock().unwrap();
         st.advance();
@@ -654,6 +776,8 @@ async fn main() -> zbus::Result<()> {
             mixer: MixerInfo { mode: "internal".into(), master: 1.0, quantize: true, ..Default::default() },
             at: Instant::now(),
             set: SetRt { armed: -1, out_deck: -1, ..Default::default() },
+            text: DEMO_TEXT.to_string(),
+            recording: None,
         })),
         log: std::env::var("CODJ_FAKE_LOG").ok(),
     };

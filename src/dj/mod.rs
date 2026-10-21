@@ -400,6 +400,10 @@ impl Session {
                     let reply = tokio::time::timeout(CALL_TIMEOUT, run_set_call(&proxy, &call)).await;
                     let mut s = shared.lock().unwrap();
                     let now = Instant::now();
+                    // a success must not hide behind the error of an earlier call
+                    if matches!(&reply, Ok(Ok(SetReply::Status(r))) if r.is_empty() || r == "ok" || r.starts_with("ok ")) {
+                        s.call_error = None;
+                    }
                     match reply {
                         Ok(Ok(SetReply::Status(r))) if r == "ok" || r.is_empty() => {
                             s.info = Some((call.done(), now + NOTE_FOR));

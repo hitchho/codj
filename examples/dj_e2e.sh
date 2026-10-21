@@ -6,6 +6,7 @@
 #   dbus-run-session -- examples/dj_e2e.sh
 #
 # Phase 2 drives the set runtime (:set, F6/F7/F8, :preview, :edit with a fake $EDITOR).
+# Phase 3 drives capture and recording (:cue, :loopsave, :gridsave, :rec, F9).
 #
 # tmux does not forward the kitty keyboard protocol, so this exercises the no-release fallback.
 set -u
@@ -82,4 +83,34 @@ kill $FAKE
 echo "== set calls received by the fake"; cat "$W/calls-set.log"
 echo "== editor"; cat "$W/edit.log"
 echo "== codj stderr (set phase)"; cat "$W/codj-set.err"
+
+# --- phase 3: capture and recording (fresh fake again)
+export CODJ_FAKE_LOG=$W/calls-cap.log
+rm -f "$W"/calls-cap.log
+"$BIN/examples/fake_codjd" 2>"$W/fake3.err" & FAKE=$!
+sleep 1
+S=djcap
+$T new-session -d -x 140 -y 40 -s $S "$BIN/codj 2>$W/codj-cap.err; sleep 30"
+sleep 2
+keys M; sleep 0.5
+cmd cue\ drop; cap cap_no_set             # no active set: a note, no call
+cmd set\ demo
+cmd cue\ drop; cap cap_no_track           # nothing loaded: the deck rule says so
+keys Enter x; sleep 0.8                    # Aftertekno onto A, play
+cmd cue\ drop; cap cap_cue_a              # A is the only deck playing: SetCue 0
+keys Down '>'; sleep 0.8                   # Smokin onto B (not playing)
+cmd cue\ hit\ b; cap cap_cue_b           # explicit deck: SetCue 1
+cmd cue\ mid\ c; cap cap_cue_bad_deck    # usage note, no call
+cmd loopsave\ brk; cap cap_loop_none      # no active loop: daemon's reply as an error
+cmd gridsave\ b; cap cap_grid
+keys F9; sleep 1.6; cap cap_recording      # strip shows the red REC badge, counting
+keys F9; sleep 0.8; cap cap_recorded       # "recorded mix 2: aft → smk, 16 bars, 9 items"
+cmd rec\ on; sleep 1; cap cap_rec_on
+cmd rec\ off; sleep 0.5
+cmd rec; sleep 0.5; cmd rec; sleep 0.5     # toggle on, toggle off
+keys Escape; sleep 0.5
+$T kill-server
+kill $FAKE
+echo "== capture calls received by the fake"; cat "$W/calls-cap.log"
+echo "== codj stderr (capture phase)"; cat "$W/codj-cap.err"
 exit 0
