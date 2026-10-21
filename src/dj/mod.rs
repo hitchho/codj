@@ -2327,6 +2327,68 @@ mod tests {
     }
 
     #[test]
+    fn patch_commands() {
+        use PatchCmd::*;
+        let p = |c: &str| parse_command(c);
+        assert_eq!(p("patch"), Command::Patch(Open));
+        assert_eq!(p("patch list"), Command::Patch(List));
+        // slots are numbered from 1 on screen, 0-based on the bus
+        assert_eq!(p("patch load 2 d1"), Command::Patch(Load(Some(1), "d1".into())));
+        assert_eq!(p("patch load d1"), Command::Patch(Load(None, "d1".into())));
+        assert_eq!(p("patch unload 4"), Command::Patch(Unload(3)));
+        assert_eq!(p("patch live 1 on"), Command::Patch(Live(0, Some(true))));
+        assert_eq!(p("patch live 3 off"), Command::Patch(Live(2, Some(false))));
+        assert_eq!(p("patch live 3"), Command::Patch(Live(2, None)));
+        assert_eq!(p("patch new d1"), Command::Patch(New { name: "d1".into(), kind: "drums".into() }));
+        assert_eq!(p("patch new bass acid"), Command::Patch(New { name: "bass".into(), kind: "acid".into() }));
+        assert_eq!(p("patch new pad1 pad"), Command::Patch(New { name: "pad1".into(), kind: "pad".into() }));
+        assert_eq!(p("patch import /m/x.ncft lead"), Command::Patch(Import { path: "/m/x.ncft".into(), name: "lead".into() }));
+        assert_eq!(p("patch import /m/My Song.ncft"), Command::Unknown("usage: patch import <file.ncft> [name] (names use letters, digits, - and _)".into()), "extra words are not a name");
+        assert_eq!(p("patch import /m/my-song.ncft"), Command::Patch(Import { path: "/m/my-song.ncft".into(), name: "my-song".into() }));
+        assert_eq!(p("patch edit d1"), Command::Patch(Edit("d1".into())));
+        assert_eq!(p("patches"), Command::Patch(Open));
+        for bad in [
+            "patch load", "patch load 5 d1", "patch load 0 d1", "patch load 1 ../x", "patch load 1 a b", "patch unload", "patch unload 9",
+            "patch live", "patch live 1 maybe", "patch new", "patch new ../x", "patch new d1 polka", "patch new d1 acid extra",
+            "patch import", "patch edit", "patch edit a/b", "patch frob",
+        ] {
+            assert!(matches!(p(bad), Command::Unknown(_)), "{bad}: {:?}", p(bad));
+        }
+        // :w saves the selected slot's patch
+        assert_eq!(p("w"), Command::PatchSave(None));
+        assert_eq!(p("write acid2"), Command::PatchSave(Some("acid2".into())));
+        assert!(matches!(p("w ../x"), Command::Unknown(_)));
+        // the unknown-command help names it
+        let Command::Unknown(msg) = p("frobnicate") else { panic!() };
+        assert!(msg.contains("patch"));
+        // `:q` and friends are untouched
+        assert_eq!(p("q"), Command::Exit);
+        assert_eq!(p("wq"), Command::Exit);
+    }
+
+    #[test]
+    fn patch_calls_say_what_happened() {
+        assert_eq!(PatchCall::Load(0, "d1".into()).done(""), "d1 loaded into P1: headphones only, :patch live 1 on sends it to the room");
+        assert_eq!(PatchCall::Live(1, true).done(""), "P2 is LIVE: the room hears it");
+        assert_eq!(PatchCall::Live(1, false).done(""), "P2 back to headphones only");
+        assert_eq!(PatchCall::Unload(3).done(""), "P4 unloaded");
+        assert_eq!(PatchCall::Save(0, "x".into()).done(" abc"), "P1 saved as x");
+        assert_eq!(PatchCall::Import { path: "p".into(), name: "n".into() }.done(" abc123 (dropped MidiIn, Scope)"), "imported n: dropped MidiIn, Scope");
+        assert_eq!(PatchCall::Import { path: "p".into(), name: "n".into() }.done(" abc123"), "imported n");
+        assert!(PatchCall::Action(0, "{}".into()).done("").is_empty(), "cell edits are silent");
+        assert_eq!(PatchCall::New { name: "n".into(), kind: "drums".into(), slot: None }.name(), "PatchWrite");
+        assert!(format_patch_list(&[]).contains(":patch new"));
+        let text = format_patch_list(&[("acid".into(), "acid line".into()), ("pad".into(), "pad".into())]);
+        assert!(text.contains("acid “acid line”") && text.contains(" pad ") || text.contains("· pad"), "{text}");
+        let e = zbus::Error::MethodError(
+            zbus::names::OwnedErrorName::try_from("org.freedesktop.DBus.Error.UnknownMethod").unwrap(),
+            Some("Unknown method 'PatchState'".into()),
+            zbus::message::Message::method_call("/", "x").unwrap().build(&()).unwrap(),
+        );
+        assert_eq!(describe_patch_error("PatchLoad", &e), "codjd has no patch decks: update codjd");
+    }
+
+    #[test]
     fn tutor_command_and_highlighting_a_track() {
         assert_eq!(parse_command("tutor"), Command::Tutor { reset: false });
         assert_eq!(parse_command("tutor reset"), Command::Tutor { reset: true });

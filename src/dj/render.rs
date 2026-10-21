@@ -1967,6 +1967,101 @@ mod tests {
         assert!(!text.contains("TUTOR 3/8"), "{text}");
     }
 
+    fn patch_slots_for_the_screen() -> &'static [crate::dj_types::PatchSlot] {
+        let slot = crate::dj_types::PatchSlot {
+            loaded: true,
+            name: "d1".into(),
+            cpu: 0.05,
+            knobs: vec![("kick_lvl".into(), 0.9, 0.0, 1.0), ("hat_lvl".into(), 0.5, 0.0, 1.0)],
+            sequencers: vec![("drums".into(), 0, u32::MAX, 3)],
+            fader: 1.0,
+            headphones: true,
+            ..Default::default()
+        };
+        Box::leak(vec![slot, Default::default(), Default::default(), Default::default()].into_boxed_slice())
+    }
+
+    fn patch_view(grid: bool) -> &'static super::super::patchview::PatchView<'static> {
+        use super::super::patch::parse_model;
+        let slots = patch_slots_for_the_screen();
+        let vals: &'static [Vec<f64>] = Box::leak(slots.iter().map(|s| s.knobs.iter().map(|k| k.1).collect()).collect::<Vec<_>>().into_boxed_slice());
+        let model = Box::leak(Box::new(parse_model(r#"{"nodes":{"2":{"type":"GateSeq","name":"drums","params":{"steps":16,"rows":4,"row_names":["kick","snare","hat","clap"],"patterns":[{"cells":[[0,0,1.0],[4,1,0.8]]}]}}}}"#).unwrap()));
+        let grid = grid.then(|| super::super::patchview::GridView {
+            seq: &model.seqs[0],
+            seq_index: 0,
+            seq_count: 1,
+            pattern: 0,
+            cx: 0,
+            cy: 0,
+            playing: Some(0),
+            queued: None,
+            step: Some(3),
+        });
+        Box::leak(Box::new(super::super::patchview::PatchView { slots, missing: false, sel: 0, knob_vals: vals, mix_vals: [[1.0, 0.0, 0.0]; 4], grid }))
+    }
+
+    #[test]
+    fn the_patch_pane_shares_the_screen_with_the_decks_and_the_mixer() {
+        for (w, h) in [(140, 40), (120, 35), (100, 30)] {
+            let (text, spots) = render_full(w, h, |v| {
+                v.panel = Some(Panel::Patch);
+                v.patch = Some(patch_view(true));
+            });
+            if (w, h) == (140, 40) {
+                println!("{text}");
+            }
+            assert_eq!(text.lines().count(), h as usize);
+            for l in ["PATCH", "deck keys are OFF", "DECK A", "DECK B", "Mixer", "PATCH · P1 d1 · drums", "kick", "clap", "CUE"] {
+                assert!(text.contains(l), "{w}x{h}: {l}\n{text}");
+            }
+            // the library gave its rows to the pane
+            assert!(!text.lines().any(|l| l.starts_with("│▸ Smokin")), "{w}x{h}\n{text}");
+            // the deck and mixer controls are still hintable, and so are the slot's knobs
+            for t in [Target::Knob(0, 0), Target::Knob(0, 1)] {
+                assert!(spots.iter().any(|s| s.target == t), "{w}x{h}: {t:?}");
+            }
+            assert!(spots.iter().any(|s| s.target == Target::Slot(Slot::Ctl(Ctl::Fader(2)))));
+            assert!(spots.iter().any(|s| s.target == Target::Slot(Slot::Ctl(Ctl::Filter(0)))), "deck A's filter");
+        }
+    }
+
+    #[test]
+    fn hint_labels_of_patch_knobs_are_drawn_over_the_knobs() {
+        let (text, spots) = render_full(140, 40, |v| {
+            v.panel = Some(Panel::Patch);
+            v.patch = Some(patch_view(false));
+            v.hints = HintView { active: true, labels: leak_labels(), ..HintView::default() };
+        });
+        println!("{text}");
+        // knob 1 and 2 of P1 are TD and TQ; the slot's fader, filter and low are TZ, TX, TC
+        for l in ["TD", "TQ", "TZ", "TX", "TC"] {
+            assert!(text.contains(l), "{l}\n{text}");
+        }
+        let knob = spots.iter().find(|s| s.target == Target::Knob(0, 0)).unwrap();
+        assert_eq!(knob.label.width, 2);
+        // a typed T keeps only the labels starting with it: the deck B mid / A mid ones and P1's
+        let (text, _) = render_full(140, 40, |v| {
+            v.panel = Some(Panel::Patch);
+            v.patch = Some(patch_view(false));
+            v.hints = HintView { active: true, typed: "t", labels: leak_labels(), ..HintView::default() };
+        });
+        assert!(text.contains("TD") && !text.contains("GD"), "{text}");
+    }
+
+    #[test]
+    fn the_patch_pane_degrades_on_a_short_screen() {
+        for (w, h) in [(80, 24), (70, 20), (60, 14)] {
+            for grid in [false, true] {
+                let text = render(w, h, |v| {
+                    v.panel = Some(Panel::Patch);
+                    v.patch = Some(patch_view(grid));
+                });
+                assert_eq!(text.lines().count(), h as usize);
+                assert!(text.contains("PATCH") && text.contains("DECK A") && text.contains("DECK B"), "{w}x{h}\n{text}");
+            }
+        }
+    }
+
     #[test]
     fn time_formats() {
         assert_eq!(fmt_time(83.44), "01:23.4");

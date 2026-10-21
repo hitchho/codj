@@ -915,6 +915,49 @@ mod tests {
         }
     }
 
+    const PATCH_TEXT: &str = "{\n  \"codj_patch\": 1,\n  \"nodes\": {\n    \"1\": { \"type\": \"Clock\", \"name\": \"clock\" },\n    \"2\": {\n      \"type\": \"Zonk\",\n      \"name\": \"seq\",\n      \"ins\": { \"7\": 1 }\n    },\n    \"7\": { \"type\": \"Saw\" }\n  }\n}\n";
+
+    #[test]
+    fn patch_errors_land_on_the_line_of_their_node() {
+        let errs = vec![
+            "2: unknown type Zonk".to_string(),
+            "seq: input freq is not connected".to_string(),
+            "7: no such output out2".to_string(),
+            "patch: no AudioOut node".to_string(),
+            "99: node not found".to_string(),
+            "no colon at all".to_string(),
+        ];
+        let (m, loose) = patch_markers(&errs, PATCH_TEXT);
+        // the node's key opens its object on line 5 (0-based 4); a name is found on its own line
+        assert_eq!((m[0].line, m[0].msg.as_str()), (4, "2: unknown type Zonk"));
+        assert_eq!(m[1].line, 6, "by name: {m:?}");
+        // `"7": 1` is a constant input, not the node: the key with an object is
+        assert_eq!(m[2].line, 9);
+        assert_eq!(loose, vec!["patch: no AudioOut node".to_string(), "99: node not found".to_string(), "no colon at all".to_string()]);
+        assert_eq!(marker_on(&m, 4).unwrap().col, 5);
+    }
+
+    #[test]
+    fn a_patch_editor_uses_the_patch_methods_and_marks_by_node() {
+        let mut e = Editor::new_patch(None, "acid");
+        assert_eq!((e.doc, e.name.as_str(), e.file.as_str()), (Doc::Patch, "acid", "patches/acid.json"));
+        e.tx.send(EditorEvent::Loaded { text: PATCH_TEXT.into(), hash: "h1".into() }).unwrap();
+        e.tick(Instant::now());
+        assert!(e.is_loaded());
+        e.tx.send(EditorEvent::Checked { seq: 1, errors: vec!["2: unknown type Zonk".into(), "patch: no AudioOut node".into()] }).unwrap();
+        e.tick(Instant::now());
+        assert_eq!(e.markers.len(), 1);
+        assert_eq!(e.markers[0].line, 4);
+        assert_eq!(e.loose_errors, vec!["patch: no AudioOut node".to_string()]);
+        // a refusal because the file moved on is told by both documents the same way
+        assert!(is_conflict("set changed since you read it") && is_conflict("patch changed since you read it"));
+        assert!(!is_conflict("refused: 1 error(s): x"));
+        e.tx.send(EditorEvent::Written { reply: "patch changed since you read it".into(), text: e.text() }).unwrap();
+        e.tick(Instant::now());
+        // (no daemon in the test: the newer version is not fetched, the status says what happened)
+        assert!(e.status.as_ref().is_some_and(|(s, _)| s.contains("patch changed under you")));
+    }
+
     #[test]
     fn markers_from_error_lines() {
         let errs = vec![

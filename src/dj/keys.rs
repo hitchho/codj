@@ -1666,6 +1666,127 @@ mod tests {
         assert_eq!(sets(&k.tick(t + ms(200))), vec![("filter", 0, 0.0)]);
     }
 
+    fn slot_with_knobs() -> PatchSlot {
+        PatchSlot {
+            loaded: true,
+            name: "acid".into(),
+            knobs: vec![("cutoff".into(), 0.3, 0.0, 1.0), ("reso".into(), 0.5, 0.0, 0.8)],
+            fader: 0.6,
+            ..Default::default()
+        }
+    }
+
+    fn patch_keys() -> DjKeys {
+        let mut k = keys(true);
+        let slots = vec![slot_with_knobs(), PatchSlot::default(), PatchSlot::default(), PatchSlot::default()];
+        k.set_patches(&slots, [vec![("cutoff".into(), 0.25), ("reso".into(), 0.4)], vec![], vec![], vec![]]);
+        k
+    }
+
+    fn knob_calls(calls: &[DjCall]) -> Vec<(u32, String, f64)> {
+        calls
+            .iter()
+            .filter_map(|c| match c {
+                DjCall::PatchKnob { slot, name, value } => Some((*slot, name.clone(), *value)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_hinted_patch_knob_is_edited_by_its_range_and_sent_as_a_knob_action() {
+        let t0 = Instant::now();
+        let mut k = patch_keys();
+        // P1 knob 1 is `td`: a step is 1/20 of the range
+        let mut t = select(&mut k, "td", t0);
+        assert_eq!(k.hints().selected, Some(Target::Knob(0, 0)));
+        assert_eq!(k.target_name(Target::Knob(0, 0)), "P1 cutoff");
+        let mut got = Vec::new();
+        for _ in 0..2 {
+            tap_key(&mut k, ']', t);
+            got.extend(knob_calls(&k.tick(t)));
+            t += ms(200);
+        }
+        assert_eq!(got, vec![(0, "cutoff".to_string(), 0.35), (0, "cutoff".to_string(), 0.4)]);
+        tap_key(&mut k, '[', t);
+        assert_eq!(knob_calls(&k.tick(t)), vec![(0, "cutoff".to_string(), 0.35)]);
+        // the value shown follows what we sent, not the stale poll
+        assert!((k.value_of(Target::Knob(0, 0), t) - 0.35).abs() < 1e-9);
+        // `\` goes back to the value the patch file has
+        tap_key(&mut k, '\\', t + ms(200));
+        assert_eq!(knob_calls(&k.tick(t + ms(200))), vec![(0, "cutoff".to_string(), 0.25)]);
+        // the second knob (`tq`) has its own range: 0..0.8, steps of 0.04
+        let t = select(&mut k, "tq", t + ms(400));
+        tap_key(&mut k, ']', t);
+        assert_eq!(knob_calls(&k.tick(t)), vec![(0, "reso".to_string(), 0.54)]);
+        // a knob that stops at its maximum does not send past it
+        let mut t = t + ms(400);
+        for _ in 0..20 {
+            tap_key(&mut k, ']', t);
+            k.tick(t);
+            t += ms(200);
+        }
+        assert!((k.value_of(Target::Knob(0, 1), t) - 0.8).abs() < 1e-9);
+    }
+
+    #[test]
+    fn slot_mixer_controls_go_out_as_djset_on_deck_two_plus_slot() {
+        let t0 = Instant::now();
+        let mut k = patch_keys();
+        // P1's fader is `tz` and starts from what PatchState says
+        let t = select(&mut k, "tz", t0);
+        assert_eq!(k.hints().selected, Some(Target::Slot(Slot::Ctl(Ctl::Fader(2)))));
+        assert_eq!(k.target_name(k.hints().selected.unwrap()), "P1 fader");
+        assert!((k.value_of(k.hints().selected.unwrap(), t) - 0.6).abs() < 1e-9);
+        tap_key(&mut k, '[', t);
+        assert_eq!(sets(&k.tick(t)), vec![("fader", 2, 0.55)]);
+        // the filter (`tx`) is not reported: it starts at 0 and then remembers what was sent
+        let t = select(&mut k, "tx", t + ms(500));
+        tap_key(&mut k, ']', t);
+        assert_eq!(sets(&k.tick(t)), vec![("filter", 2, 0.05)]);
+        let later = t + ms(2000);
+        assert!((k.value_of(Target::Slot(Slot::Ctl(Ctl::Filter(2))), later) - 0.05).abs() < 1e-9);
+        // P4's low (`cc`): deck 5
+        let t = select(&mut k, "cc", later);
+        tap_key(&mut k, '[', t);
+        assert_eq!(sets(&k.tick(t)), vec![("low", 5, -0.05)]);
+    }
+
+    #[test]
+    fn patch_hint_labels_are_two_letters_prefix_free_and_never_a_deck_label() {
+        let tab = hints::table();
+        let deck_labels: Vec<&str> = tab.iter().filter(|(t, _)| !matches!(t, Target::Knob(..) | Target::Slot(Slot::Ctl(Ctl::Fader(2..) | Ctl::Filter(2..) | Ctl::Eq(2.., _))))).map(|(_, l)| *l).collect();
+        assert_eq!(deck_labels.len(), 22);
+        let patch: Vec<&str> = tab.iter().skip(22).map(|(_, l)| *l).collect();
+        assert_eq!(patch.len(), 48);
+        for l in &patch {
+            assert_eq!(l.len(), 2, "{l}");
+            assert!(!deck_labels.contains(l), "{l} is a deck label");
+        }
+        // the first letter of a patch label is never a one-letter label of the deck set
+        for l in &patch {
+            assert!(!deck_labels.iter().any(|d| d.len() == 1 && l.starts_with(d)), "{l}");
+        }
+        let mut all: Vec<&str> = tab.iter().map(|(_, l)| *l).collect();
+        all.sort();
+        all.dedup();
+        assert_eq!(all.len(), tab.len(), "labels are unique");
+    }
+
+    #[test]
+    fn knob_actions_coalesce_per_slot_and_name() {
+        let knob = |slot, name: &str, value| DjCall::PatchKnob { slot, name: name.into(), value };
+        let out = coalesce(vec![knob(0, "cutoff", 0.1), knob(0, "reso", 0.2), knob(0, "cutoff", 0.3), knob(1, "cutoff", 0.9)]);
+        assert_eq!(out, vec![knob(0, "reso", 0.2), knob(0, "cutoff", 0.3), knob(1, "cutoff", 0.9)]);
+        assert_eq!(knob(0, "x", 0.0).name(), "PatchAction");
+    }
+
+    #[test]
+    fn the_patch_pane_key_is_f12() {
+        let f12 = ev(KeyCode::F(12), KeyModifiers::NONE, KeyEventKind::Press);
+        assert_eq!(bind(&normalize(&f12)), Some(Binding::Nav(Nav::Patch)));
+    }
+
     #[test]
     fn nothing_selected_says_so_instead_of_editing() {
         let t0 = Instant::now();
