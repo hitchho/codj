@@ -3,6 +3,8 @@
 //!
 //! Without `--live`, tools that change what the audience hears (player deck, master, crossfader)
 //! are refused. Queue edits, reads and deck 1 (the cue/preview deck) are always allowed.
+//! Set tools: reading, checking and writing set files, capturing cues and recording never change
+//! what is playing and are always allowed; arming, previewing, loading and auto mode need `--live`.
 
 use std::{
     sync::Arc,
@@ -44,6 +46,8 @@ pub enum Effect<'a> {
     Deck(u32),
     /// `deck_set` with this control and deck
     DeckSet(&'a str, u32),
+    /// the set runtime starts or stops audio: arm, disarm, auto, preview, load
+    SetRuntime,
 }
 
 /// True when the call changes what the audience hears and needs `--live`.
@@ -58,14 +62,15 @@ pub fn needs_live(effect: Effect) -> bool {
             "cue_mix" => false,
             _ => deck == 0,
         },
+        Effect::SetRuntime => true,
     }
 }
 
 pub fn refusal(tool: &str) -> String {
     format!(
         "{tool} refused: it changes what the audience hears and this MCP server is not live. \
-         Restart it with `codj mcp --live` to allow it. Reads, queue edits and deck 1 (cue deck) \
-         are always allowed."
+         Restart it with `codj mcp --live` to allow it. Reads, queue edits, deck 1 (cue deck) \
+         and set editing (sources, writes, cues, recording) are always allowed."
     )
 }
 
@@ -226,6 +231,87 @@ pub fn timestamp(secs: u64) -> String {
     )
 }
 
+/// `agent:<name>` for the set history, from the MCP client's name. Only `[A-Za-z0-9._-]` survive
+/// (anything else, spaces and colons included, becomes `-`), at most 40 characters; the name ends
+/// up in a git commit message, so no control characters or line breaks can pass.
+pub fn agent_author(client: Option<&str>) -> String {
+    let mut name = String::new();
+    for c in client.unwrap_or("").chars() {
+        let c = if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' { c } else { '-' };
+        if c == '-' && (name.is_empty() || name.ends_with('-')) {
+            continue;
+        }
+        name.push(c);
+    }
+    let name: String = name.trim_end_matches('-').chars().take(40).collect();
+    if name.is_empty() {
+        "agent:unknown".to_string()
+    } else {
+        format!("agent:{name}")
+    }
+}
+
+/// Reply of a set call: `ok` or `ok <detail>` is success, anything else the reason
+pub fn reply_detail(reply: &str) -> Result<Value, String> {
+    if reply == "ok" {
+        Ok(json!({ "ok": true }))
+    } else if let Some(detail) = reply.strip_prefix("ok ") {
+        Ok(json!({ "ok": true, "detail": detail.trim() }))
+    } else {
+        Err(reply.to_string())
+    }
+}
+
+/// Result of `set_write`: `ok <new hash>` becomes `{ok, hash}`; a refusal because the file changed
+/// tells the agent what to do next
+pub fn write_result(reply: &str) -> Result<Value, String> {
+    match reply.strip_prefix("ok") {
+        Some(rest) if rest.is_empty() || rest.starts_with(' ') => {
+            let hash = rest.trim();
+            Ok(if hash.is_empty() { json!({ "ok": true }) } else { json!({ "ok": true, "hash": hash }) })
+        }
+        _ if reply.contains("changed") => Err(format!(
+            "{reply}. The set was edited since you read it (vim, codj or another agent). Call set_source again, \
+             apply your change to that text and call set_write with the new hash."
+        )),
+        _ => Err(reply.to_string()),
+    }
+}
+
+/// Validates a cue or loop name (a set-language identifier)
+pub fn check_name(name: &str) -> Result<(), String> {
+    if crate::dj::capture::valid_name(name) {
+        Ok(())
+    } else {
+        Err(format!("bad name {name:?}: letters, digits, _ and - only, starting with a letter or _"))
+    }
+}
+
+/// The set language in one screen, for `set_language_help`
+pub const SET_LANGUAGE_HELP: &str = r#"codj set language (.codj files). One statement per line, '#' starts a comment, indentation is only for reading. Everything is counted in bars and beats, never seconds.
+Identifiers: [A-Za-z_][A-Za-z0-9_-]*. Strings: "..." with " and \.
+
+  set "kaiku friday"                      optional display name
+  track aft "Pneumatix - Aftertekno.flac" id, then a path relative to the library, an absolute path, or a search ("artist - title")
+    grid 112 @ 0.012s beat1 1             optional: bpm, first beat time, which beat of the bar it is; or x2 /2 x1.5 /1.5 to scale the detected tempo
+    gain -1.5dB                           optional trim
+    cue drop  bar 33                      named position; "bar 1 beat 1" is the first downbeat; beat may be fractional
+    loop break bar 97 len 8 bars          named loop (len k beats|bars)
+  mix aft -> smk at aft.outro over 32 bars    outgoing -> incoming, starts at a cue or "bar N [beat M]" of the outgoing track, runs N bars
+    smk play from intro                   incoming starts at mix bar 0 from a cue or bar (add "unsynced" to opt out of tempo sync)
+    bars 0..16   smk.low kill; smk.fader 0 -> 1     ramp over mix bars 0..16; items separated by ';'
+    bar 16       swap low                 at mix bar 16: outgoing low killed, incoming low back to 0 in the same frame
+    bars 16..32  aft.filter 0 -> -0.6 smooth; aft.fader 1 -> 0
+    bar 32       aft stop
+
+Inside a mix, bar numbers count from the mix start on the OUTGOING track's grid (it is the master); they may be fractional (bar 15.5).
+Items: <t>.<control> <from> -> <to> [linear|smooth|exp] (ramp, only in a "bars" line; <from> may be _ = from wherever it is) | <t>.<control> = <v> |
+<t>.<band> kill | swap <band> | <t> stop | <t> loop <name>|<k> beats|off | <t> jump <cue>|<+-k> beats | xfade <from> -> <to> | xfade = <v>.
+Controls: fader 0..1, low/mid/high -1 (kill)..0 (unity)..+1, filter -1 (low-pass)..0 (off)..+1 (high-pass), gain in dB. <t> is a track id.
+Tracks without a beat grid can be in a set but a mix touching them is an error ("analyze it or add a grid line").
+Errors read file:line:col: message. A file with errors is not loaded; the last good version stays active. Reserved words (set track mix bar bars swap) can't be track ids.
+Prefer replacing one track or mix block over rewriting the file, so diffs stay small."#;
+
 fn log_change(what: &str) {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     eprintln!("[{}] codj mcp: {what}", timestamp(now));
@@ -323,11 +409,81 @@ pub struct DeckSetArgs {
     pub value: f64,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetNameArgs {
+    /// Set name, file name or stem, as listed by `sets_list`
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetCheckArgs {
+    /// The complete text of the set file to validate (nothing is saved)
+    pub text: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetWriteArgs {
+    /// Set to write: its name, file name or stem from `sets_list`; a new name creates a new file
+    pub name: String,
+    /// The complete new text of the file
+    pub text: String,
+    /// The `hash` that `set_source` returned for the version this text is based on ("" only when creating a new file)
+    pub base_hash: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetCaptureArgs {
+    /// 0 (A) or 1 (B)
+    pub deck: u32,
+    /// Cue or loop name: letters, digits, _ and -, starting with a letter or _. An existing name is replaced
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetGridArgs {
+    /// 0 (A) or 1 (B)
+    pub deck: u32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetRecordArgs {
+    /// true starts recording a mix, false stops it and writes the `mix` block into the active set
+    pub on: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetMixArgs {
+    /// Mix number, 0-based in file order (the first `mix` block is 0)
+    pub mix: u32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetPreviewArgs {
+    /// Mix number, 0-based in file order
+    pub mix: u32,
+    /// Bars before the mix start to roll in (default 8)
+    pub bars_before: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetTrackArgs {
+    /// Track number, 0-based in file order (the first `track` line is 0)
+    pub track: u32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SetAutoArgs {
+    /// true: after a mix ends, arm the next one whose outgoing track is on air
+    pub on: bool,
+}
+
 // ---- server ----
 
 #[derive(Clone)]
 pub struct Codj {
     live: bool,
+    /// `clientInfo.name` of the MCP client, from `initialize`
+    client: Arc<std::sync::Mutex<Option<String>>>,
     proxy: Arc<Mutex<Option<ServerProxy<'static>>>>,
     tool_router: ToolRouter<Self>,
 }
@@ -365,6 +521,7 @@ impl Codj {
     pub fn new(live: bool) -> Self {
         Codj {
             live,
+            client: Arc::new(std::sync::Mutex::new(None)),
             proxy: Arc::new(Mutex::new(None)),
             tool_router: Self::tool_router(),
         }
@@ -402,6 +559,11 @@ impl Codj {
         Ok(())
     }
 
+    /// who the set history names for this client's writes
+    fn author(&self) -> String {
+        agent_author(self.client.lock().unwrap().as_deref())
+    }
+
     async fn playlist(&self) -> Result<Vec<OuterMusic>, String> {
         Ok(ask!(self, p => p.playlist()).musics)
     }
@@ -413,6 +575,23 @@ impl Codj {
         }
         Ok(())
     }
+}
+
+/// `SetState` as JSON for agents
+pub fn set_state_json(s: &crate::dj_types::SetState) -> Value {
+    json!({
+        "name": s.name,
+        "file": s.file,
+        "errors": s.errors,
+        "tracks": s.tracks.iter().enumerate().map(|(i, t)| json!({ "index": i, "id": t.0, "title": t.1, "path": t.2 })).collect::<Vec<_>>(),
+        "mixes": s.mixes.iter().enumerate().map(|(i, m)| json!({ "index": i, "from": m.0, "to": m.1, "start_beat": m.2, "length_beats": m.3 })).collect::<Vec<_>>(),
+        "armed": s.armed_mix(),
+        "running": s.running,
+        "out_deck": s.out_deck,
+        "mix_beat": s.mix_beat,
+        "auto": s.auto,
+        "next_items": s.next_items.iter().map(|(b, t)| json!({ "mix_beat": b, "text": t })).collect::<Vec<_>>(),
+    })
 }
 
 fn reply_ok(reply: String) -> Result<String, String> {
@@ -607,6 +786,113 @@ impl Codj {
         reply_ok(ask!(self, p => p.dj_set(&a.control, deck, a.value)))
     }
 
+    #[tool(description = "List the set files (.codj) in the set folder: name, file and error count. Start here, then read one with set_source. Sets are text files describing tracks, cues, loops and the mixes between them in bars and beats; set_language_help has the syntax.")]
+    async fn sets_list(&self) -> Result<String, String> {
+        let sets = ask!(self, p => p.set_list());
+        let rows: Vec<Value> = sets.iter().map(|(name, file, errors)| json!({ "name": name, "file": file, "errors": errors })).collect();
+        to_text(json!({ "sets": rows }))
+    }
+
+    #[tool(description = "State of the set runtime: the active set, its tracks (id, title, path) and mixes (from, to, start beat, length in beats) in file order (indexes are 0-based and are what set_arm, set_preview and set_load take), the armed mix, whether it runs, auto mode and upcoming automation.")]
+    async fn set_state(&self) -> Result<String, String> {
+        let s = ask!(self, p => p.set_state());
+        to_text(set_state_json(&s))
+    }
+
+    #[tool(description = "Read a set file as it is on disk: returns {text, hash}. WORKFLOW for changing a set: set_source -> edit the text (prefer replacing one track or mix block, keep comments and formatting) -> set_check -> set_write with base_hash = this hash. If set_write says the set changed, read it again with set_source, redo your edit on the new text, and write with the new hash. Keep the hash: it is what protects edits made meanwhile in vim, in codj or by another agent.")]
+    async fn set_source(&self, Parameters(a): Parameters<SetNameArgs>) -> Result<String, String> {
+        let (text, hash) = ask!(self, p => p.set_source(&a.name));
+        to_text(json!({ "name": a.name, "text": text, "hash": hash }))
+    }
+
+    #[tool(description = "Validate set text exactly as if it were saved (parse, library search, grids, compile) without saving: returns {valid, errors} with every error as `file:line:col: message`. Call it after every edit and fix all errors before set_write (which refuses text with errors). Language: `track <id> \"<file or search>\"` with indented `grid`/`gain`/`cue <name> bar N [beat M]`/`loop <name> bar N len K bars` lines; `mix <a> -> <b> at <a>.<cue>|bar N over K bars` with `<b> play from <cue>`, `bar N <item>; ...` and `bars I..J <t>.<control> <from> -> <to> [linear|smooth|exp]` lines (controls fader low mid high filter gain; `<t>.<band> kill`, `swap <band>`, `<t> stop`). Bar numbers inside a mix count from its start on the outgoing track's grid. Full syntax: set_language_help.")]
+    async fn set_check(&self, Parameters(a): Parameters<SetCheckArgs>) -> Result<String, String> {
+        let errors = ask!(self, p => p.set_check(&a.text));
+        to_text(json!({ "valid": errors.is_empty(), "errors": errors }))
+    }
+
+    #[tool(description = "Save a set file after checking it. Needs `base_hash`, the hash from the set_source you based the text on; if the file changed since (vim, codj, another agent) it is refused with \"set changed since you read it\" and you must set_source again, redo the edit on the new text and retry. Text with errors is refused too (run set_check first). A new `name` creates a new file (base_hash \"\"). The write is attributed to you in the set's history. Writing never changes what is playing: a running mix keeps its plan, the edit applies to the next arm. Set language in short: `track <id> \"<file>\"` + `cue <name> bar N`, `loop <name> bar N len K bars`, `grid <bpm>`; `mix <a> -> <b> at <a>.<cue> over K bars` + `<b> play from <cue>`, `bars I..J <t>.<control> <from> -> <to>`, `bar N swap low`, `<t> stop` (see set_language_help).")]
+    async fn set_write(&self, Parameters(a): Parameters<SetWriteArgs>) -> Result<String, String> {
+        let author = self.author();
+        self.gate("set_write", Effect::Safe, &format!("name={} base_hash={} author={author} bytes={}", a.name, a.base_hash, a.text.len()))?;
+        let reply = ask!(self, p => p.set_write(&a.name, &a.text, &a.base_hash, &author));
+        to_text(write_result(&reply)?)
+    }
+
+    #[tool(description = "A cheat sheet of the set language (.codj files): tracks, cues, loops, grids, mixes, items, controls and the rules for bar numbers. Read it before writing a set.")]
+    async fn set_language_help(&self) -> Result<String, String> {
+        Ok(SET_LANGUAGE_HELP.to_string())
+    }
+
+    #[tool(description = "Make a set active (by name, file name or stem; \"\" = none). Cue, loop, grid and record tools and the set_arm family work on the active set. Does not change what is playing.")]
+    async fn set_use(&self, Parameters(a): Parameters<SetNameArgs>) -> Result<String, String> {
+        self.gate("set_use", Effect::Safe, &format!("name={}", a.name))?;
+        to_text(reply_detail(&ask!(self, p => p.set_use(&a.name)))?)
+    }
+
+    #[tool(description = "Capture the deck's current position as cue `name` in the active set (a `cue <name> bar N [beat M]` line in that track's block; an existing cue of that name is replaced; a track not yet in the set is added). Deck 0 = A, 1 = B.")]
+    async fn set_cue(&self, Parameters(a): Parameters<SetCaptureArgs>) -> Result<String, String> {
+        let deck = check_deck(a.deck)?;
+        check_name(&a.name)?;
+        self.gate("set_cue", Effect::Safe, &format!("deck={deck} name={}", a.name))?;
+        to_text(reply_detail(&ask!(self, p => p.set_cue(deck, &a.name)))?)
+    }
+
+    #[tool(description = "Capture the deck's active loop as loop `name` in the active set (a `loop <name> bar N len K beats|bars` line). Set the loop on the deck first. Deck 0 = A, 1 = B.")]
+    async fn set_loop_capture(&self, Parameters(a): Parameters<SetCaptureArgs>) -> Result<String, String> {
+        let deck = check_deck(a.deck)?;
+        check_name(&a.name)?;
+        self.gate("set_loop_capture", Effect::Safe, &format!("deck={deck} name={}", a.name))?;
+        to_text(reply_detail(&ask!(self, p => p.set_loop_capture(deck, &a.name)))?)
+    }
+
+    #[tool(description = "Write the deck's current beat grid (after any hand correction) into the active set as a `grid` line of that track. Deck 0 = A, 1 = B.")]
+    async fn set_grid_capture(&self, Parameters(a): Parameters<SetGridArgs>) -> Result<String, String> {
+        let deck = check_deck(a.deck)?;
+        self.gate("set_grid_capture", Effect::Safe, &format!("deck={deck}"))?;
+        to_text(reply_detail(&ask!(self, p => p.set_grid_capture(deck)))?)
+    }
+
+    #[tool(description = "Start (on=true) or stop (on=false) recording a mix into the active set: while recording, every control change on either deck is logged; stopping writes it as a `mix` block (replacing an existing mix of the same two tracks). Returns the summary, e.g. \"mix 2: aft -> smk, 16 bars, 9 items\". Recording only observes; it does not play anything.")]
+    async fn set_record(&self, Parameters(a): Parameters<SetRecordArgs>) -> Result<String, String> {
+        self.gate("set_record", Effect::Safe, &format!("on={}", a.on))?;
+        to_text(reply_detail(&ask!(self, p => p.set_record(a.on)))?)
+    }
+
+    #[tool(description = "LIVE: arm mix `mix` (0-based, file order) of the active set: loads the incoming track on the other deck and schedules the plan; it then runs by itself when the outgoing deck reaches the mix start. The outgoing track must be on a deck.")]
+    async fn set_arm(&self, Parameters(a): Parameters<SetMixArgs>) -> Result<String, String> {
+        self.gate("set_arm", Effect::SetRuntime, &format!("mix={}", a.mix))?;
+        reply_ok(ask!(self, p => p.set_arm(a.mix)))
+    }
+
+    #[tool(description = "LIVE: cancel the armed or running mix's remaining automation (controls stay where they are).")]
+    async fn set_disarm(&self) -> Result<String, String> {
+        self.gate("set_disarm", Effect::SetRuntime, "")?;
+        reply_ok(ask!(self, p => p.set_disarm()))
+    }
+
+    #[tool(description = "LIVE: auto mode on/off: after a mix ends, arm the next one whose outgoing track is now on air.")]
+    async fn set_auto(&self, Parameters(a): Parameters<SetAutoArgs>) -> Result<String, String> {
+        self.gate("set_auto", Effect::SetRuntime, &format!("on={}", a.on))?;
+        reply_ok(ask!(self, p => p.set_auto(a.on)))
+    }
+
+    #[tool(description = "LIVE: audition a mix: loads both tracks, puts the outgoing deck `bars_before` bars (default 8) before the mix start, arms and plays.")]
+    async fn set_preview(&self, Parameters(a): Parameters<SetPreviewArgs>) -> Result<String, String> {
+        let bars = a.bars_before.unwrap_or(8.0);
+        if !(bars.is_finite() && bars > 0.0) {
+            return Err("bars_before must be a positive number".to_string());
+        }
+        self.gate("set_preview", Effect::SetRuntime, &format!("mix={} bars_before={bars}", a.mix))?;
+        reply_ok(ask!(self, p => p.set_preview(a.mix, bars)))
+    }
+
+    #[tool(description = "LIVE: load track `track` (0-based, file order) of the active set onto the free deck, with the set's grid and gain overrides.")]
+    async fn set_load(&self, Parameters(a): Parameters<SetTrackArgs>) -> Result<String, String> {
+        self.gate("set_load", Effect::SetRuntime, &format!("track={}", a.track))?;
+        reply_ok(ask!(self, p => p.set_load(a.track)))
+    }
+
     #[tool(description = "Audio engine health: xruns, second-output underruns and skips, sample rate.")]
     async fn audio_health(&self) -> Result<String, String> {
         let h = ask!(self, p => p.audio_health());
@@ -623,9 +909,19 @@ impl Codj {
 #[tool_handler(
     router = self.tool_router,
     name = "codj",
-    instructions = "Control codj/codjd. `library` lists tracks; their `index` is what play_index and queue_add take. Tools marked LIVE are refused unless the server was started with `codj mcp --live`."
+    instructions = "Control codj/codjd. `library` lists tracks; their `index` is what play_index and queue_add take. Tools marked LIVE are refused unless the server was started with `codj mcp --live`. Sets: sets_list, set_source, set_check, set_write (with base_hash) and the cue/loop/grid/record tools edit set files and never change what is playing; set_language_help has the syntax."
 )]
-impl ServerHandler for Codj {}
+impl ServerHandler for Codj {
+    async fn initialize(
+        &self,
+        request: rmcp::model::InitializeRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::InitializeResult, rmcp::ErrorData> {
+        *self.client.lock().unwrap() = Some(request.client_info.name.clone());
+        context.peer.set_peer_info(request.clone());
+        self.negotiate_initialize(&request)
+    }
+}
 
 /// `codj mcp [--live]`; returns the exit code
 pub async fn run(args: &[String]) -> i32 {
@@ -686,6 +982,55 @@ mod tests {
         assert!(!needs_live(DeckSet("gain", 1)) && !needs_live(DeckSet("cue", 1)));
         assert!(!needs_live(DeckSet("cue_mix", 0)));
         assert!(refusal("toggle").contains("--live"));
+    }
+
+    #[test]
+    fn set_tool_guardrail() {
+        use Effect::*;
+        assert!(needs_live(SetRuntime));
+        assert!(refusal("set_arm").contains("--live") && refusal("set_arm").contains("set editing"));
+    }
+
+    #[test]
+    fn author_is_sanitized() {
+        assert_eq!(agent_author(Some("claude-code")), "agent:claude-code");
+        assert_eq!(agent_author(Some("tester")), "agent:tester");
+        assert_eq!(agent_author(Some("Claude Code v1.2")), "agent:Claude-Code-v1.2");
+        assert_eq!(agent_author(Some("x\ny: z\u{7}")), "agent:x-y-z");
+        assert_eq!(agent_author(Some("  ")), "agent:unknown");
+        assert_eq!(agent_author(None), "agent:unknown");
+        assert_eq!(agent_author(Some("../../etc")), "agent:..-..-etc");
+        assert_eq!(agent_author(Some(&"a".repeat(100))).len(), "agent:".len() + 40);
+    }
+
+    #[test]
+    fn set_replies() {
+        assert_eq!(reply_detail("ok").unwrap()["ok"], true);
+        assert_eq!(reply_detail("ok cue drop -> aft bar 33").unwrap()["detail"], "cue drop -> aft bar 33");
+        assert!(reply_detail("no active set").is_err());
+        assert!(reply_detail("okay").is_err());
+        assert_eq!(write_result("ok abc123").unwrap()["hash"], "abc123");
+        let e = write_result("set changed since you read it").unwrap_err();
+        assert!(e.contains("set_source"), "{e}");
+        assert_eq!(write_result("kaiku.codj:3:1: nope").unwrap_err(), "kaiku.codj:3:1: nope");
+        assert!(check_name("drop").is_ok() && check_name("a b").is_err() && check_name("").is_err());
+        assert!(SET_LANGUAGE_HELP.contains("swap") && SET_LANGUAGE_HELP.contains("mix aft -> smk"));
+    }
+
+    #[tokio::test]
+    async fn set_tools_are_gated_by_class() {
+        let s = Codj::new(false);
+        // refused before any D-Bus call
+        assert!(s.set_arm(Parameters(SetMixArgs { mix: 0 })).await.unwrap_err().contains("--live"));
+        assert!(s.set_disarm().await.unwrap_err().contains("--live"));
+        assert!(s.set_auto(Parameters(SetAutoArgs { on: true })).await.unwrap_err().contains("--live"));
+        assert!(s.set_preview(Parameters(SetPreviewArgs { mix: 0, bars_before: None })).await.unwrap_err().contains("--live"));
+        assert!(s.set_load(Parameters(SetTrackArgs { track: 0 })).await.unwrap_err().contains("--live"));
+        // argument checks come first for the always-allowed ones
+        assert!(s.set_cue(Parameters(SetCaptureArgs { deck: 2, name: "x".into() })).await.unwrap_err().contains("deck"));
+        assert!(s.set_cue(Parameters(SetCaptureArgs { deck: 0, name: "a b".into() })).await.unwrap_err().contains("bad name"));
+        let help = s.set_language_help().await.unwrap();
+        assert!(help.contains("track"));
     }
 
     #[test]
