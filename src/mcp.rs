@@ -48,6 +48,10 @@ pub enum Effect<'a> {
     DeckSet(&'a str, u32),
     /// the set runtime starts or stops audio: arm, disarm, auto, preview, load
     SetRuntime,
+    /// loading, unloading or sending a patch slot live: changes what the audience hears
+    Patch,
+    /// editing a loaded patch (knob, cell, pattern, structure): audible only when the slot is live
+    PatchEdit { slot_live: bool },
 }
 
 /// True when the call changes what the audience hears and needs `--live`.
@@ -62,7 +66,8 @@ pub fn needs_live(effect: Effect) -> bool {
             "cue_mix" => false,
             _ => deck == 0,
         },
-        Effect::SetRuntime => true,
+        Effect::SetRuntime | Effect::Patch => true,
+        Effect::PatchEdit { slot_live } => slot_live,
     }
 }
 
@@ -70,8 +75,110 @@ pub fn refusal(tool: &str) -> String {
     format!(
         "{tool} refused: it changes what the audience hears and this MCP server is not live. \
          Restart it with `codj mcp --live` to allow it. Reads, queue edits, deck 1 (cue deck) \
-         and set editing (sources, writes, cues, recording) are always allowed."
+         set editing (sources, writes, cues, recording) and patch files (list, source, check, write, import, \
+         state, node types, edits of a slot that is not live) are always allowed."
     )
+}
+
+/// A patch slot, 0-based: P1 is 0
+pub fn check_slot(slot: u32) -> Result<u32, String> {
+    if slot as usize >= crate::dj::patchdef::SLOTS {
+        return Err(format!("slot must be 0..3 (P1..P4), got {slot}"));
+    }
+    Ok(slot)
+}
+
+/// Ops of `PatchAction` (the contract's action list)
+pub const PATCH_OPS: [&str; 10] = ["add_node", "remove_node", "connect", "disconnect", "set_input", "set_param", "knob", "cell", "pattern", "rename"];
+
+/// The action as the JSON text codjd wants: an object with a known `op` (a JSON string holding one
+/// is accepted too, models like to double-encode)
+pub fn check_patch_action(action: &Value) -> Result<String, String> {
+    let owned;
+    let obj = match action {
+        Value::String(text) => {
+            owned = serde_json::from_str::<Value>(text).map_err(|e| format!("action is a string that is not JSON: {e}"))?;
+            &owned
+        }
+        other => other,
+    };
+    let Some(op) = obj.get("op").and_then(Value::as_str) else {
+        return Err(format!("action needs an \"op\": one of {}", PATCH_OPS.join(", ")));
+    };
+    if !PATCH_OPS.contains(&op) {
+        return Err(format!("unknown op {op:?}; use one of {}", PATCH_OPS.join(", ")));
+    }
+    Ok(obj.to_string())
+}
+
+/// Largest patch file `patch_write` / `patch_check` take
+pub const MAX_PATCH_BYTES: usize = 1 << 20;
+
+/// A patch file's text: JSON, not absurdly large
+pub fn check_patch_json(text: &str) -> Result<(), String> {
+    if text.len() > MAX_PATCH_BYTES {
+        return Err(format!("the patch is {} bytes, the limit is {MAX_PATCH_BYTES}", text.len()));
+    }
+    serde_json::from_str::<Value>(text).map(|_| ()).map_err(|e| format!("json is not valid JSON: {e}"))
+}
+
+/// A patch name: letters, digits, - and _
+pub fn check_patch_name(name: &str) -> Result<(), String> {
+    if crate::dj::patchdef::valid_name(name) {
+        Ok(())
+    } else {
+        Err(format!("bad patch name {name:?}: letters, digits, - and _ only (at most 64)"))
+    }
+}
+
+/// `PatchState` as JSON for agents; `queued` is null when no pattern is queued
+pub fn patch_state_json(slots: &[crate::dj_types::PatchSlot]) -> Value {
+    let rows: Vec<Value> = slots
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            if !s.loaded {
+                return json!({ "slot": i, "label": format!("P{}", i + 1), "loaded": false });
+            }
+            json!({
+                "slot": i,
+                "label": format!("P{}", i + 1),
+                "loaded": true,
+                "name": s.name,
+                "title": s.title,
+                "unsaved_edits": s.dirty,
+                "live": s.live,
+                "cpu": s.cpu,
+                "muted_reason": s.muted_reason,
+                "knobs": s.knobs.iter().map(|k| json!({ "name": k.0, "value": k.1, "min": k.2, "max": k.3 })).collect::<Vec<_>>(),
+                "sequencers": s.sequencers.iter().map(|q| json!({
+                    "name": q.0,
+                    "pattern": q.1,
+                    "pattern_letter": crate::dj::patch::pattern_letter(q.1 as usize).to_string(),
+                    "queued": (q.2 != crate::dj::patch::NONE_QUEUED).then_some(q.2),
+                    "step": q.3,
+                })).collect::<Vec<_>>(),
+                "fader": s.fader,
+                "headphones": s.headphones,
+            })
+        })
+        .collect();
+    json!({ "slots": rows })
+}
+
+/// Result of `patch_write`, like [`write_result`] but pointing at the patch tools
+pub fn patch_write_result(reply: &str) -> Result<Value, String> {
+    match reply.strip_prefix("ok") {
+        Some(rest) if rest.is_empty() || rest.starts_with(' ') => {
+            let hash = rest.trim();
+            Ok(if hash.is_empty() { json!({ "ok": true }) } else { json!({ "ok": true, "hash": hash }) })
+        }
+        _ if reply.contains("changed") => Err(format!(
+            "{reply}. The patch was edited since you read it (vim, codj or another agent). Call patch_source again, \
+             apply your change to that JSON and call patch_write with the new hash."
+        )),
+        _ => Err(reply.to_string()),
+    }
 }
 
 pub fn check_deck(deck: u32) -> Result<u32, String> {
@@ -475,6 +582,66 @@ pub struct SetTrackArgs {
 pub struct SetAutoArgs {
     /// true: after a mix ends, arm the next one whose outgoing track is on air
     pub on: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PatchNameArgs {
+    /// Patch name as listed by `patch_list` (the file name without .json)
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PatchCheckArgs {
+    /// The complete JSON text of the patch file to validate (nothing is saved)
+    pub json: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PatchWriteArgs {
+    /// Patch to write: letters, digits, - and _; a new name creates a new file
+    pub name: String,
+    /// The complete new JSON text of the patch file
+    pub json: String,
+    /// The `hash` that `patch_source` returned for the version this JSON is based on ("" only when creating a new patch)
+    pub base_hash: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PatchImportArgs {
+    /// Absolute path of a NoiseCraft .ncft file
+    pub path: String,
+    /// Name of the new patch: letters, digits, - and _
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PatchLoadArgs {
+    /// Slot 0..3 (P1..P4)
+    pub slot: u32,
+    /// Patch name from `patch_list`
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PatchSlotArgs {
+    /// Slot 0..3 (P1..P4)
+    pub slot: u32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PatchLiveArgs {
+    /// Slot 0..3 (P1..P4)
+    pub slot: u32,
+    /// true sends the slot to the master (the audience hears it), false back to headphones only
+    pub live: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct PatchActionArgs {
+    /// Slot 0..3 (P1..P4) holding the patch to edit
+    pub slot: u32,
+    /// One edit as an object: {"op":"knob","name":"cutoff","value":0.7}, {"op":"cell","seq":"drums","pattern":0,"step":4,"row":1,"on":true,"velocity":0.8}, {"op":"pattern","seq":"drums","pattern":1,"now":false}, {"op":"set_param","id":"2","param":"scale","value":"D dorian"}, {"op":"set_input","to":["6","reso"],"value":0.4}, {"op":"connect","from":["9","out"],"to":["6","cutoff"]}, {"op":"disconnect","to":["6","cutoff"]}, {"op":"add_node","id":"9","type":"Sine","name":"lfo","params":{}}, {"op":"remove_node","id":"9"}, {"op":"rename","id":"3","name":"bass"}
+    pub action: Value,
 }
 
 // ---- server ----
@@ -893,6 +1060,95 @@ impl Codj {
         reply_ok(ask!(self, p => p.set_load(a.track)))
     }
 
+    #[tool(description = "List the patch files (synth / drum machine definitions, JSON) in the patches folder: name and title. Patch decks are instruments built from a graph of nodes that play in time with the decks. WORKFLOW to make one: patch_node_types (what nodes exist) -> write the JSON -> patch_check -> patch_write -> (live only) patch_load -> patch_action for knobs and sequencer cells -> patch_live. Read an existing one with patch_source.")]
+    async fn patch_list(&self) -> Result<String, String> {
+        let files = ask!(self, p => p.patch_list());
+        let rows: Vec<Value> = files.iter().map(|(name, title)| json!({ "name": name, "title": title })).collect();
+        to_text(json!({ "patches": rows }))
+    }
+
+    #[tool(description = "Read a patch file as it is on disk: returns {name, json, hash}. To change a patch: patch_source -> edit the JSON (keep node ids and names stable so a loaded patch keeps its state) -> patch_check -> patch_write with base_hash = this hash. If patch_write says the patch changed, read it again and redo your edit. Keep the hash: it protects edits made meanwhile in vim, in codj or by another agent.")]
+    async fn patch_source(&self, Parameters(a): Parameters<PatchNameArgs>) -> Result<String, String> {
+        check_patch_name(&a.name)?;
+        let (text, hash) = ask!(self, p => p.patch_source(&a.name));
+        to_text(json!({ "name": a.name, "json": text, "hash": hash }))
+    }
+
+    #[tool(description = "Validate patch JSON exactly as if it were saved, without saving: returns {valid, errors}, every error as `<node id or name>: message` (or `patch: message` for the whole file). Call it after every edit and fix all errors before patch_write. Rules: exactly one AudioOut; every `ins` entry is [source node id, output name] or a number; Knob nodes need a unique name; a feedback loop must pass through a Delay or Hold. patch_node_types lists the node types with their inputs, outputs and params.")]
+    async fn patch_check(&self, Parameters(a): Parameters<PatchCheckArgs>) -> Result<String, String> {
+        check_patch_json(&a.json)?;
+        let errors = ask!(self, p => p.patch_check(&a.json));
+        to_text(json!({ "valid": errors.is_empty(), "errors": errors }))
+    }
+
+    #[tool(description = "Save a patch file after checking it. Needs `base_hash`, the hash from the patch_source you based the JSON on (\"\" only when creating a new patch); if the file changed since, it is refused and you must patch_source again, redo the edit and retry. JSON with errors is refused too (run patch_check first). The write is attributed to you in the history. Writing a file does not change what is playing: a slot that has this patch loaded keeps its program until it is loaded again (patch_load). Format: {\"codj_patch\":1,\"title\":\"...\",\"nodes\":{\"1\":{\"type\":\"Clock\",\"name\":\"clock\",\"params\":{\"source\":\"master\"}},\"2\":{\"type\":\"Saw\",\"ins\":{\"freq\":[\"3\",\"freq\"]}}}}.")]
+    async fn patch_write(&self, Parameters(a): Parameters<PatchWriteArgs>) -> Result<String, String> {
+        check_patch_name(&a.name)?;
+        check_patch_json(&a.json)?;
+        let author = self.author();
+        self.gate("patch_write", Effect::Safe, &format!("name={} base_hash={} author={author} bytes={}", a.name, a.base_hash, a.json.len()))?;
+        let reply = ask!(self, p => p.patch_write(&a.name, &a.json, &a.base_hash, &author));
+        to_text(patch_write_result(&reply)?)
+    }
+
+    #[tool(description = "Import a NoiseCraft (.ncft) file as a patch named `name`: node types, params and connections map 1:1 where the node exists; MidiIn, ClockOut and Scope are dropped, modules are flattened. Returns {ok, detail} with the notes about what was dropped. Does not change what is playing.")]
+    async fn patch_import(&self, Parameters(a): Parameters<PatchImportArgs>) -> Result<String, String> {
+        check_patch_name(&a.name)?;
+        if !a.path.ends_with(".ncft") || !a.path.starts_with('/') {
+            return Err(format!("path must be an absolute path of a .ncft file, got {:?}", a.path));
+        }
+        let author = self.author();
+        self.gate("patch_import", Effect::Safe, &format!("path={} name={} author={author}", a.path, a.name))?;
+        to_text(reply_detail(&ask!(self, p => p.patch_import(&a.path, &a.name, &author)))?)
+    }
+
+    #[tool(description = "State of the four patch slots P1..P4 (slot 0..3): loaded patch name and title, unsaved_edits, live (the audience hears it) or cue-only (headphones), cpu share (0..1), muted_reason (e.g. \"cpu overrun\"), knobs (name, value, min, max), sequencers (name, pattern 0..7 = A..H, queued pattern or null, current step) and the slot's fader. Knob names here are what patch_action's knob op takes.")]
+    async fn patch_state(&self) -> Result<String, String> {
+        let slots = ask!(self, p => p.patch_state());
+        to_text(patch_state_json(&slots))
+    }
+
+    #[tool(description = "The catalog of node types for writing patch JSON: for each type its inputs (with defaults), outputs, params and a note, plus the file format rules. Call this first when you write or change a patch. Signals are plain numbers: frequencies in Hz, gates 0 or 1, levels -1..1; a sequencer's gate output drives an ADSR or a drum sound, its freq output an oscillator.")]
+    async fn patch_node_types(&self) -> Result<String, String> {
+        to_text(crate::dj::patchdef::catalog_json())
+    }
+
+    #[tool(description = "Edit the patch loaded in `slot` live, one op at a time: knob (turn a knob by name), cell (turn a sequencer step on or off, with velocity), pattern (switch the sequencer's pattern, queued to the next bar unless now:true), set_param, set_input, connect, disconnect, add_node, remove_node, rename. Returns {ok} or the reason. The change applies at once and stays an unsaved edit of the slot (undo in codj, patch_write the JSON to keep it). Knob, cell and pattern edits never glitch; a structural edit recompiles the slot and drops it back to cue-only. An edit of a slot that is LIVE (the audience hears it) is refused unless the server runs with --live; edit slots in cue-only freely. Look at patch_state for knob and sequencer names.")]
+    async fn patch_action(&self, Parameters(a): Parameters<PatchActionArgs>) -> Result<String, String> {
+        let slot = check_slot(a.slot)?;
+        let json = check_patch_action(&a.action)?;
+        // an edit is audible when the slot is live: the guardrail looks at what the daemon says
+        let slot_live = if self.live {
+            false
+        } else {
+            ask!(self, p => p.patch_state()).get(slot as usize).is_some_and(|s| s.loaded && s.live)
+        };
+        self.gate("patch_action", Effect::PatchEdit { slot_live }, &format!("slot={slot} action={json}"))?;
+        to_text(reply_detail(&ask!(self, p => p.patch_action(slot, &json)))?)
+    }
+
+    #[tool(description = "LIVE: compile and load patch `name` into `slot` (0..3), replacing what was there. It starts cue-only (headphones), so loading is silent for the audience until patch_live. Loading into a slot that is live changes what the audience hears, hence LIVE.")]
+    async fn patch_load(&self, Parameters(a): Parameters<PatchLoadArgs>) -> Result<String, String> {
+        let slot = check_slot(a.slot)?;
+        check_patch_name(&a.name)?;
+        self.gate("patch_load", Effect::Patch, &format!("slot={slot} name={}", a.name))?;
+        to_text(reply_detail(&ask!(self, p => p.patch_load(slot, &a.name)))?)
+    }
+
+    #[tool(description = "LIVE: unload the patch of `slot` (0..3). Silences it for the audience if it was live.")]
+    async fn patch_unload(&self, Parameters(a): Parameters<PatchSlotArgs>) -> Result<String, String> {
+        let slot = check_slot(a.slot)?;
+        self.gate("patch_unload", Effect::Patch, &format!("slot={slot}"))?;
+        to_text(reply_detail(&ask!(self, p => p.patch_unload(slot)))?)
+    }
+
+    #[tool(description = "LIVE: send the patch in `slot` to the master (live=true: the audience hears it) or back to headphones only (live=false). Tweak a patch in cue-only first, then go live; the slot has an output limiter and is muted by itself if it uses too much cpu.")]
+    async fn patch_live(&self, Parameters(a): Parameters<PatchLiveArgs>) -> Result<String, String> {
+        let slot = check_slot(a.slot)?;
+        self.gate("patch_live", Effect::Patch, &format!("slot={slot} live={}", a.live))?;
+        to_text(reply_detail(&ask!(self, p => p.patch_live(slot, a.live)))?)
+    }
+
     #[tool(description = "Audio engine health: xruns, second-output underruns and skips, sample rate.")]
     async fn audio_health(&self) -> Result<String, String> {
         let h = ask!(self, p => p.audio_health());
@@ -909,7 +1165,7 @@ impl Codj {
 #[tool_handler(
     router = self.tool_router,
     name = "codj",
-    instructions = "Control codj/codjd. `library` lists tracks; their `index` is what play_index and queue_add take. Tools marked LIVE are refused unless the server was started with `codj mcp --live`. Sets: sets_list, set_source, set_check, set_write (with base_hash) and the cue/loop/grid/record tools edit set files and never change what is playing; set_language_help has the syntax."
+    instructions = "Control codj/codjd. `library` lists tracks; their `index` is what play_index and queue_add take. Tools marked LIVE are refused unless the server was started with `codj mcp --live`. Sets: sets_list, set_source, set_check, set_write (with base_hash) and the cue/loop/grid/record tools edit set files and never change what is playing; set_language_help has the syntax. Patch decks (synths and drum machines that play with the decks): patch_node_types -> write the JSON -> patch_check -> patch_write (with base_hash) -> patch_load (LIVE) -> patch_action for knobs and sequencer cells -> patch_live (LIVE); patch_list, patch_source, patch_import, patch_state read and edit files and state."
 )]
 impl ServerHandler for Codj {
     async fn initialize(
@@ -982,6 +1238,92 @@ mod tests {
         assert!(!needs_live(DeckSet("gain", 1)) && !needs_live(DeckSet("cue", 1)));
         assert!(!needs_live(DeckSet("cue_mix", 0)));
         assert!(refusal("toggle").contains("--live"));
+    }
+
+    #[test]
+    fn patch_tool_guardrail() {
+        use Effect::*;
+        assert!(needs_live(Patch));
+        // editing a slot that only the headphones hear is fine, a live one needs --live
+        assert!(!needs_live(PatchEdit { slot_live: false }));
+        assert!(needs_live(PatchEdit { slot_live: true }));
+        assert!(refusal("patch_live").contains("--live") && refusal("patch_live").contains("patch files"));
+    }
+
+    #[test]
+    fn patch_argument_validation() {
+        assert_eq!(check_slot(0), Ok(0));
+        assert_eq!(check_slot(3), Ok(3));
+        assert!(check_slot(4).unwrap_err().contains("0..3"));
+        assert!(check_patch_name("acid-line_2").is_ok());
+        for bad in ["", "../x", "a b", "a/b", "x.json"] {
+            assert!(check_patch_name(bad).is_err(), "{bad:?}");
+        }
+        assert!(check_patch_json("{\"nodes\":{}}").is_ok());
+        assert!(check_patch_json("{nodes").unwrap_err().contains("not valid JSON"));
+        assert!(check_patch_json(&" ".repeat(MAX_PATCH_BYTES + 1)).unwrap_err().contains("limit"));
+        // an action is an object with a known op, or a string holding one
+        let knob = json!({"op": "knob", "name": "cutoff", "value": 0.5});
+        assert_eq!(serde_json::from_str::<Value>(&check_patch_action(&knob).unwrap()).unwrap(), knob);
+        assert_eq!(serde_json::from_str::<Value>(&check_patch_action(&Value::String(knob.to_string())).unwrap()).unwrap(), knob);
+        assert!(check_patch_action(&json!({"name": "x"})).unwrap_err().contains("\"op\""));
+        assert!(check_patch_action(&json!({"op": "explode"})).unwrap_err().contains("unknown op"));
+        assert!(check_patch_action(&json!("not json")).unwrap_err().contains("not JSON"));
+        assert!(check_patch_action(&json!(7)).is_err());
+        for op in PATCH_OPS {
+            assert!(check_patch_action(&json!({ "op": op })).is_ok(), "{op}");
+        }
+    }
+
+    #[test]
+    fn patch_state_and_write_replies() {
+        let slots = vec![
+            crate::dj_types::PatchSlot {
+                loaded: true,
+                name: "d1".into(),
+                live: true,
+                knobs: vec![("cutoff".into(), 0.3, 0.0, 1.0)],
+                sequencers: vec![("drums".into(), 1, u32::MAX, 5), ("bass".into(), 0, 2, 0)],
+                ..Default::default()
+            },
+            crate::dj_types::PatchSlot::default(),
+        ];
+        let v = patch_state_json(&slots);
+        assert_eq!(v["slots"][0]["label"], "P1");
+        assert_eq!(v["slots"][0]["knobs"][0]["name"], "cutoff");
+        assert_eq!(v["slots"][0]["sequencers"][0]["pattern_letter"], "B");
+        assert!(v["slots"][0]["sequencers"][0]["queued"].is_null(), "u32::MAX means none");
+        assert_eq!(v["slots"][0]["sequencers"][1]["queued"], 2);
+        assert_eq!(v["slots"][1]["loaded"], false);
+        assert_eq!(patch_write_result("ok abc").unwrap()["hash"], "abc");
+        let e = patch_write_result("set changed since you read it").unwrap_err();
+        assert!(e.contains("patch_source") && e.contains("patch_write"), "{e}");
+        assert!(patch_write_result("refused: 1 error(s): x").unwrap_err().starts_with("refused"));
+    }
+
+    #[test]
+    fn node_types_cover_what_an_agent_needs() {
+        let v = crate::dj::patchdef::catalog_json();
+        let nodes = v["nodes"].as_array().unwrap();
+        for t in ["Clock", "MonoSeq", "GateSeq", "Saw", "ADSR", "Filter", "Kick", "Mix4", "AudioOut", "Knob"] {
+            assert!(nodes.iter().any(|n| n["type"] == t), "{t}");
+        }
+        let seq = nodes.iter().find(|n| n["type"] == "MonoSeq").unwrap();
+        assert!(seq["outputs"].as_array().unwrap().iter().any(|o| o == "freq") && seq["inputs"]["clock"].is_number());
+        assert!(v["format"]["rules"].is_array());
+    }
+
+    #[tokio::test]
+    async fn patch_live_tools_are_gated_by_class() {
+        let s = Codj::new(false);
+        assert!(s.patch_load(Parameters(PatchLoadArgs { slot: 0, name: "x".into() })).await.unwrap_err().contains("--live"));
+        assert!(s.patch_unload(Parameters(PatchSlotArgs { slot: 0 })).await.unwrap_err().contains("--live"));
+        assert!(s.patch_live(Parameters(PatchLiveArgs { slot: 0, live: true })).await.unwrap_err().contains("--live"));
+        // argument errors come before anything else
+        assert!(s.patch_load(Parameters(PatchLoadArgs { slot: 9, name: "x".into() })).await.unwrap_err().contains("0..3"));
+        assert!(s.patch_action(Parameters(PatchActionArgs { slot: 0, action: json!({"op": "bogus"}) })).await.unwrap_err().contains("unknown op"));
+        // the node catalog needs no daemon
+        assert!(s.patch_node_types().await.unwrap().contains("AudioOut"));
     }
 
     #[test]

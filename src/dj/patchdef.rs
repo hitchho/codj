@@ -91,6 +91,8 @@ pub const CATALOG: &[NodeType] = &[
     nt("Notes", &[], &[], &[("text", "string")], "a comment, ignored"),
 ];
 
+/// (used by the fake daemon and the tests; codjd is the real judge of a patch)
+#[allow(dead_code)]
 pub fn is_known_type(t: &str) -> bool {
     CATALOG.iter().any(|n| n.name == t)
 }

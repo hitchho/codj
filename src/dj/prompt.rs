@@ -25,7 +25,7 @@ use tui_input::{Input, InputRequest};
 use zbus::Connection;
 
 use super::editor::{diff_stat, diff_style, line_diff, unified_diff, AUTHOR};
-use crate::dj_types::{DeckInfo, SetState};
+use crate::dj_types::{DeckInfo, PatchSlot, SetState};
 use crate::parser::AgentSettings;
 use crate::ServerProxy;
 
@@ -38,6 +38,11 @@ pub const SET_TOOLS: [&str; 9] =
     ["sets_list", "set_source", "set_check", "set_write", "set_use", "set_cue", "set_loop_capture", "set_grid_capture", "set_record"];
 /// set tools that arm or load things: refused by `codj mcp` without `--live`
 pub const LIVE_TOOLS: [&str; 5] = ["set_arm", "set_disarm", "set_auto", "set_preview", "set_load"];
+/// patch tools that never need `--live` (files, state, node catalog, edits of slots not on air)
+pub const PATCH_TOOLS: [&str; 8] =
+    ["patch_list", "patch_source", "patch_check", "patch_write", "patch_import", "patch_action", "patch_state", "patch_node_types"];
+/// patch tools refused by `codj mcp` without `--live`
+pub const PATCH_LIVE_TOOLS: [&str; 3] = ["patch_load", "patch_unload", "patch_live"];
 /// note shown when an undo is written (the D-Bus call has no note field, the author is `human`)
 pub const UNDO_NOTE: &str = "undo agent change";
 const MAX_OUT_LINES: usize = 2000;
@@ -93,12 +98,17 @@ pub fn mcp_config_json(exe: &Path, live: bool) -> String {
 }
 
 /// Full names (`mcp__codj__set_check`) of the MCP tools the agent may call: `[agent] mcp_tools`
-/// when set, else every set tool, plus the live ones when live
+/// when set, else every set and patch tool, plus the live ones when live
 pub fn allowed_tools(custom: Option<&[String]>, live: bool) -> Vec<String> {
     let full = |t: &str| if t.starts_with("mcp__") { t.to_string() } else { format!("mcp__{MCP_NAME}__{t}") };
     match custom {
         Some(list) => list.iter().map(|t| full(t)).collect(),
-        None => SET_TOOLS.iter().chain(if live { LIVE_TOOLS.iter() } else { [].iter() }).map(|t| full(t)).collect(),
+        None => SET_TOOLS
+            .iter()
+            .chain(PATCH_TOOLS.iter())
+            .chain(if live { LIVE_TOOLS.iter().chain(PATCH_LIVE_TOOLS.iter()) } else { [].iter().chain([].iter()) })
+            .map(|t| full(t))
+            .collect(),
     }
 }
 
@@ -218,8 +228,32 @@ fn deck_line(name: &str, d: &DeckInfo) -> String {
     )
 }
 
-/// What the agent is told about the set and the decks, plus the rules, then the request
-pub fn build_prompt(request: &str, set: Option<&SetState>, decks: &[DeckInfo], live: bool) -> String {
+/// One line per patch slot for the preamble
+fn patch_line(i: usize, s: &PatchSlot) -> String {
+    if !s.loaded {
+        return format!("P{}: empty", i + 1);
+    }
+    let knobs: Vec<String> = s.knobs.iter().map(|k| format!("{} {:.2}", k.0, k.1)).collect();
+    let seqs: Vec<String> = s
+        .sequencers
+        .iter()
+        .map(|q| format!("{} pattern {}{}", q.0, super::patch::pattern_letter(q.1 as usize), if q.2 == super::patch::NONE_QUEUED { String::new() } else { format!(" (next: {})", super::patch::pattern_letter(q.2 as usize)) }))
+        .collect();
+    format!(
+        "P{}: {}{}, {}{}{}{}{}",
+        i + 1,
+        s.name,
+        if s.dirty { " (unsaved edits)" } else { "" },
+        if s.live { "LIVE (the audience hears it)" } else { "cue-only (headphones)" },
+        if s.muted_reason.is_empty() { String::new() } else { format!(", MUTED: {}", s.muted_reason) },
+        if knobs.is_empty() { String::new() } else { format!("; knobs: {}", knobs.join(", ")) },
+        if seqs.is_empty() { String::new() } else { format!("; sequencers: {}", seqs.join(", ")) },
+        if s.cpu >= 0.1 { format!("; cpu {:.0}%", s.cpu * 100.0) } else { String::new() },
+    )
+}
+
+/// What the agent is told about the set, the decks and the patch slots, plus the rules, then the request
+pub fn build_prompt(request: &str, set: Option<&SetState>, decks: &[DeckInfo], patches: &[PatchSlot], live: bool) -> String {
     let mut t = String::new();
     t.push_str("You are helping a DJ who is performing right now with codj, a terminal DJ app that talks to the codjd audio daemon. The DJ edits \"sets\" (text files: tracks, cues and the transitions between them, see the set language) and asked you to change one.\n\n");
     match set {
@@ -243,14 +277,19 @@ pub fn build_prompt(request: &str, set: Option<&SetState>, decks: &[DeckInfo], l
     for (i, name) in ["A", "B"].iter().enumerate() {
         t.push_str(&format!("  {}\n", decks.get(i).map(|d| deck_line(name, d)).unwrap_or_else(|| format!("Deck {name}: empty"))));
     }
+    t.push_str("\nPatch decks (synths and drum machines that play in time with the decks; four slots P1-P4, slot numbers 0-3 in the tools):\n");
+    for i in 0..4 {
+        t.push_str(&format!("  {}\n", patches.get(i).map(|s| patch_line(i, s)).unwrap_or_else(|| format!("P{}: empty", i + 1))));
+    }
     t.push_str("\nRules:\n");
     t.push_str("- Edit sets only through the codj MCP set tools (sets_list, set_source, set_check, set_write). Never write a set file any other way.\n");
     t.push_str("- Always call set_check on the complete new text and fix every error before set_write; pass the base_hash that set_source returned. If set_write says the set changed since you read it, read it again and redo your edit on the new text.\n");
     t.push_str("- Prefer replacing one track or mix block over rewriting the whole file, so the diff stays small. Keep everything the request does not mention exactly as it is.\n");
+    t.push_str("- Patches are JSON files edited only through the patch tools: patch_node_types (the node catalog) -> write the JSON -> patch_check until it is valid -> patch_write with the base_hash of patch_source (\"\" for a new patch). patch_action turns knobs and sequencer cells of a loaded slot (names in patch_state); a slot marked cue-only is safe to tweak, one marked LIVE is what the audience hears right now.\n");
     if live {
-        t.push_str("- Live mode is on: the arm/preview/load tools work and change what the audience hears. Use them only if the request asks for it, and say what you did.\n");
+        t.push_str("- Live mode is on: the arm/preview/load tools and patch_load/patch_unload/patch_live work and change what the audience hears. Use them only if the request asks for it, say what you did, and prefer patch_load into a free slot and a check in cue-only before patch_live.\n");
     } else {
-        t.push_str("- Never touch audio: do not arm, preview, load or change decks or the mixer. The audio-affecting tools are refused in this session anyway.\n");
+        t.push_str("- Never touch audio: do not arm, preview, load or change decks or the mixer, and do not load, unload or send patch slots live. The audio-affecting tools (and edits of a LIVE slot) are refused in this session anyway.\n");
     }
     t.push_str("- Answer in a few short lines: what you changed and why.\n");
     t.push_str("\nRequest:\n");
@@ -906,7 +945,7 @@ mod tests {
     #[test]
     fn the_preamble_says_what_is_going_on_and_the_rules() {
         let a = DeckInfo { loaded: true, title: "Aftertekno".into(), artist: "Foo".into(), bpm: 124.04, key: "8A".into(), position: 83.0, duration: 300.0, playing: true, ..Default::default() };
-        let t = build_prompt("make the mix longer", Some(&set()), &[a, DeckInfo::default()], false);
+        let t = build_prompt("make the mix longer", Some(&set()), &[a, DeckInfo::default()], &[], false);
         assert!(t.contains("Active set: demo (file /sets/demo.set)"));
         assert!(t.contains("warm: Aftertekno") && t.contains("warm -> mid, beat 8, 64 beats (16 bars)"));
         assert!(t.contains("Deck A: \"Aftertekno\" by Foo, 124.0 BPM, key 8A, 1:23 / 5:00, playing"));
@@ -915,9 +954,54 @@ mod tests {
         assert!(t.contains("set_check") && t.contains("before set_write"));
         assert!(t.contains("Never touch audio"));
         assert!(t.ends_with("Request:\nmake the mix longer\n"));
-        let live = build_prompt("x", None, &[], true);
+        let live = build_prompt("x", None, &[], &[], true);
         assert!(live.contains("Live mode is on") && !live.contains("Never touch audio"));
         assert!(live.contains("No set is active") && live.contains("Deck A: empty"));
+    }
+
+    #[test]
+    fn the_preamble_tells_about_patches_and_the_slots() {
+        let slots = vec![
+            PatchSlot {
+                loaded: true,
+                name: "d1".into(),
+                dirty: true,
+                live: true,
+                cpu: 0.3,
+                muted_reason: "cpu overrun".into(),
+                knobs: vec![("cutoff".into(), 0.3, 0.0, 1.0)],
+                sequencers: vec![("drums".into(), 1, 2, 0), ("bass".into(), 0, u32::MAX, 3)],
+                ..Default::default()
+            },
+            PatchSlot { loaded: true, name: "pad".into(), ..Default::default() },
+        ];
+        let t = build_prompt("make a bassline", None, &[], &slots, false);
+        assert!(t.contains("P1: d1 (unsaved edits), LIVE (the audience hears it), MUTED: cpu overrun; knobs: cutoff 0.30; sequencers: drums pattern B (next: C), bass pattern A; cpu 30%"), "{t}");
+        assert!(t.contains("P2: pad, cue-only (headphones)"), "{t}");
+        assert!(t.contains("P3: empty") && t.contains("P4: empty"));
+        assert!(t.contains("patch_node_types") && t.contains("patch_check") && t.contains("patch_write") && t.contains("patch_action"));
+        assert!(t.contains("do not load, unload or send patch slots live"));
+        let live = build_prompt("x", None, &[], &slots, true);
+        assert!(live.contains("patch_load/patch_unload/patch_live work"));
+        // without the slots polled all four read as empty
+        assert!(build_prompt("x", None, &[], &[], false).contains("P1: empty"));
+    }
+
+    #[test]
+    fn the_agent_may_use_the_patch_tools_by_default_and_the_live_ones_when_live() {
+        let safe = allowed_tools(None, false);
+        for t in PATCH_TOOLS {
+            assert!(safe.contains(&format!("mcp__codj__{t}")), "{t}");
+        }
+        for t in PATCH_LIVE_TOOLS {
+            assert!(!safe.contains(&format!("mcp__codj__{t}")), "{t}");
+        }
+        let live = allowed_tools(None, true);
+        for t in PATCH_TOOLS.iter().chain(&PATCH_LIVE_TOOLS).chain(&LIVE_TOOLS).chain(&SET_TOOLS) {
+            assert!(live.contains(&format!("mcp__codj__{t}")), "{t}");
+        }
+        // the lists name real MCP tools: the live ones are exactly the gated ones
+        assert_eq!(PATCH_LIVE_TOOLS, ["patch_load", "patch_unload", "patch_live"]);
     }
 
     fn snap(items: &[(&str, &str, &str)]) -> Snapshot {

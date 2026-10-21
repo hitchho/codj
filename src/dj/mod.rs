@@ -1445,8 +1445,9 @@ impl DjScreen {
     /// Builds the preamble from what the screen knows and starts the agent
     fn submit_prompt(&mut self, request: String) {
         let (set, decks, _) = self.set_snapshot();
+        let (patches, _) = self.patch_slots();
         let live = self.agent.live.unwrap_or(false);
-        let full = prompt::build_prompt(&request, set.as_ref().filter(|s| s.is_active()), &decks, live);
+        let full = prompt::build_prompt(&request, set.as_ref().filter(|s| s.is_active()), &decks, &patches, live);
         if let Some(p) = self.prompt.as_mut() {
             p.start(full);
         }
