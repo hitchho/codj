@@ -197,7 +197,7 @@ Letters are the same in every terminal; `Alt` combinations are the mixer. Digits
 |Nudge − / + (hold)|`q` / `w`|`o` / `p`|
 |Hot cue 1–4 (empty: set, set: jump)|`1` `2` `3` `4`|`7` `8` `9` `0`|
 |Clear hot cue|`Shift + 1`…`4`|`Shift + 7`…`0`|
-|Beat jump back / forward (4 beats)|`d` / `f`|`j` / `;`|
+|Beat jump back / forward (4 beats)|`e` / `r`|`u` / `i`|
 |EQ low + / −|`Alt + q` / `Alt + a`|`Alt + u` / `Alt + j`|
 |EQ mid + / −|`Alt + w` / `Alt + s`|`Alt + i` / `Alt + k`|
 |EQ high + / −|`Alt + e` / `Alt + d`|`Alt + o` / `Alt + l`|

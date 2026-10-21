@@ -293,8 +293,8 @@ pub fn bind(k: &NKey) -> Option<Binding> {
         'q' => Hold(H::Nudge(0, -1)),
         'w' => Hold(H::Nudge(0, 1)),
         '1'..='4' => Tap(T::Hotcue(0, c as u8 - b'1')),
-        'd' => Tap(T::BeatJump(0, -JUMP_BEATS)),
-        'f' => Tap(T::BeatJump(0, JUMP_BEATS)),
+        'e' => Tap(T::BeatJump(0, -JUMP_BEATS)),
+        'r' => Tap(T::BeatJump(0, JUMP_BEATS)),
         // deck B
         '/' => Hold(H::Cue(1)),
         '.' => Tap(T::PlayPause(1)),
@@ -308,8 +308,8 @@ pub fn bind(k: &NKey) -> Option<Binding> {
         '8' => Tap(T::Hotcue(1, 1)),
         '9' => Tap(T::Hotcue(1, 2)),
         '0' => Tap(T::Hotcue(1, 3)),
-        'j' => Tap(T::BeatJump(1, -JUMP_BEATS)),
-        ';' => Tap(T::BeatJump(1, JUMP_BEATS)),
+        'u' => Tap(T::BeatJump(1, -JUMP_BEATS)),
+        'i' => Tap(T::BeatJump(1, JUMP_BEATS)),
         // mixer
         'g' => Hold(H::Ctl(Ctl::Fader(0), 1)),
         'b' => Hold(H::Ctl(Ctl::Fader(0), -1)),
@@ -771,7 +771,8 @@ mod tests {
         assert_eq!(b('s'), Some(Binding::Hold(Hold::Rate(0, 1))));
         assert_eq!(b('q'), Some(Binding::Hold(Hold::Nudge(0, -1))));
         assert_eq!(b('3'), Some(Binding::Tap(Tap::Hotcue(0, 2))));
-        assert_eq!(b('d'), Some(Binding::Tap(Tap::BeatJump(0, -4.0))));
+        assert_eq!(b('e'), Some(Binding::Tap(Tap::BeatJump(0, -4.0))));
+        assert_eq!(b('r'), Some(Binding::Tap(Tap::BeatJump(0, 4.0))));
         assert_eq!(b('/'), Some(Binding::Hold(Hold::Cue(1))));
         assert_eq!(b('.'), Some(Binding::Tap(Tap::PlayPause(1))));
         assert_eq!(b(','), Some(Binding::Tap(Tap::Sync(1))));
@@ -780,10 +781,12 @@ mod tests {
         assert_eq!(b('p'), Some(Binding::Hold(Hold::Nudge(1, 1))));
         assert_eq!(b('0'), Some(Binding::Tap(Tap::Hotcue(1, 3))));
         assert_eq!(b('7'), Some(Binding::Tap(Tap::Hotcue(1, 0))));
-        assert_eq!(b('j'), Some(Binding::Tap(Tap::BeatJump(1, -4.0))));
-        assert_eq!(b(';'), Some(Binding::Tap(Tap::BeatJump(1, 4.0))));
+        assert_eq!(b('u'), Some(Binding::Tap(Tap::BeatJump(1, -4.0))));
+        assert_eq!(b('i'), Some(Binding::Tap(Tap::BeatJump(1, 4.0))));
         assert_eq!(b('5'), None);
-        assert_eq!(b('u'), None);
+        // the old jump keys are free now (f, ; and j are taken by the control hints later on)
+        assert_eq!(b('d'), None);
+        assert_eq!(b('j'), None);
     }
 
     #[test]
@@ -877,7 +880,7 @@ mod tests {
         let mut bb = deck(false);
         bb.headphones = true;
         k.set_snapshot(&[a, bb], &MixerInfo { quantize: true, ..Default::default() });
-        for c in ['x', '.', '1', '2', 'v', 'm', 'c', 'd'] {
+        for c in ['x', '.', '1', '2', 'v', 'm', 'c', 'e'] {
             k.on_key(&press(c), t0);
         }
         k.on_key(&ev(KeyCode::Char('2'), KeyModifiers::SHIFT, KeyEventKind::Press), t0);

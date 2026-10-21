@@ -540,7 +540,7 @@ fn draw_status(buf: &mut Buffer, area: Rect, v: &View) {
     } else if let Some(n) = v.note {
         buf.set_stringn(area.x, area.y, n, w, Style::default().fg(Color::Yellow));
     } else {
-        let hint = "A: z cue x play c sync v loop a/s pitch q/w nudge 1-4 cues d/f jump | B: / . , m  k/l  o/p  7-0  j/; | Alt+qwer uiop eq/filter | g b h n t y faders";
+        let hint = "A: z cue x play c sync v loop a/s pitch q/w nudge 1-4 cues e/r jump | B: / . , m  k/l  o/p  7-0  u/i | Alt+qwer uiop eq/filter | g b h n t y faders";
         buf.set_stringn(area.x, area.y, hint, w, dim());
     }
 }
