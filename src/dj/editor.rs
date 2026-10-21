@@ -29,6 +29,8 @@ pub const CHECK_DEBOUNCE: Duration = Duration::from_millis(400);
 pub const CONFLICT_REASON: &str = "set changed since you read it";
 /// author of everything written from this pane
 pub const AUTHOR: &str = "human";
+/// how long a status message hides the cursor line's error
+const STATUS_FOR: Duration = Duration::from_secs(5);
 
 // ---------------------------------------------------------------- errors -> markers
 
@@ -787,10 +789,10 @@ impl Editor {
         let w = msg_row.width as usize;
         if let Some(c) = &self.cmd {
             buf.set_stringn(msg_row.x, msg_row.y, format!(":{c}█"), w, Style::default().fg(Color::White));
+        } else if let Some((s, _)) = self.status.as_ref().filter(|(_, at)| at.elapsed() < STATUS_FOR) {
+            buf.set_stringn(msg_row.x, msg_row.y, s, w, Style::default().fg(Color::Yellow));
         } else if let Some(m) = marker_on(&self.markers, self.state.cursor.row) {
             buf.set_stringn(msg_row.x, msg_row.y, format!("✗ line {} col {}: {}", m.line + 1, m.col, m.msg), w, Style::default().fg(Color::Red));
-        } else if let Some((s, _)) = &self.status {
-            buf.set_stringn(msg_row.x, msg_row.y, s, w, Style::default().fg(Color::Yellow));
         } else if let Some(l) = self.loose_errors.first() {
             buf.set_stringn(msg_row.x, msg_row.y, format!("✗ {l}"), w, Style::default().fg(Color::Red));
         } else if self.check.pending() {

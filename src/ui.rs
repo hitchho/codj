@@ -1426,6 +1426,8 @@ impl<'a> UI<'a> {
         if let Some(dj) = self.dj.as_mut() {
             dj.tick(Instant::now());
         }
+        // a pane may have closed by itself (:wq): give the keyboard flags back
+        self.sync_dj_kbd();
     }
 
     pub async fn check_state_streams(&mut self) {
