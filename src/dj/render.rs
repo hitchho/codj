@@ -9,6 +9,8 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Widget},
 };
 
+use super::hints::{self, Target};
+use super::keys::{Ctl, Slot};
 use super::wave::{draw_strip, time_to_col, Waveform};
 use crate::dj_types::{DeckInfo, MixerInfo, SetState};
 use crate::types::Music;
@@ -74,6 +76,94 @@ pub struct View<'a> {
     /// an editor or prompt pane replaces the set strip and the library; it is drawn by the
     /// caller into [`panel_rect`]
     pub panel: Option<Panel>,
+    pub hints: HintView<'a>,
+}
+
+/// What the control hints need on screen
+#[derive(Clone)]
+pub struct HintView<'a> {
+    /// the labels are up
+    pub active: bool,
+    /// letters typed so far
+    pub typed: &'a str,
+    pub labels: &'a [(Target, &'static str)],
+    pub selected: Option<Target>,
+    /// status chip of the selection: "◆ A filter -0.30"
+    pub chip: Option<&'a str>,
+    /// beats of the next loop and of a beat jump, per deck
+    pub loop_len: [f64; 2],
+    pub jump_len: [f64; 2],
+    /// trim in dB, per deck
+    pub gain: [f64; 2],
+    pub sync_range: f64,
+}
+
+impl Default for HintView<'_> {
+    fn default() -> Self {
+        HintView {
+            active: false,
+            typed: "",
+            labels: &[],
+            selected: None,
+            chip: None,
+            loop_len: [hints::DEFAULT_BEATS; 2],
+            jump_len: [hints::DEFAULT_BEATS; 2],
+            gain: [0.0; 2],
+            sync_range: hints::DEFAULT_SYNC_RANGE,
+        }
+    }
+}
+
+/// Where a control is drawn: `label` is where its hint goes (over its caption or the gap before
+/// it), `hl` the whole control, inverted while it is selected
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Spot {
+    pub target: Target,
+    pub label: Rect,
+    pub hl: Rect,
+}
+
+fn text_width(spans: &[Span]) -> u16 {
+    spans.iter().map(|s| s.content.chars().count() as u16).sum()
+}
+
+/// Records a control at (`x`, `y`) when all of it fits in `clip`
+fn add_spot(spots: &mut Vec<Spot>, clip: Rect, target: Target, x: u16, y: u16, label_w: u16, hl_w: u16) {
+    if hl_w == 0 || y < clip.top() || y >= clip.bottom() || x < clip.left() || x + hl_w > clip.right() {
+        return;
+    }
+    spots.push(Spot { target, label: Rect::new(x, y, label_w.min(hl_w), 1), hl: Rect::new(x, y, hl_w, 1) });
+}
+
+/// Inverts the selected control and draws the labels
+fn draw_hints(buf: &mut Buffer, spots: &[Spot], h: &HintView) {
+    if let Some(sel) = h.selected {
+        for sp in spots.iter().filter(|s| s.target == sel) {
+            for x in sp.hl.left()..sp.hl.right() {
+                buf[(x, sp.hl.y)].modifier.insert(Modifier::REVERSED | Modifier::BOLD);
+            }
+        }
+    }
+    if !h.active {
+        return;
+    }
+    let label_style = Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD);
+    let typed_style = Style::default().fg(Color::Black).bg(Color::Gray).add_modifier(Modifier::BOLD);
+    for sp in spots {
+        let Some((_, label)) = h.labels.iter().find(|(t, _)| *t == sp.target) else { continue };
+        if !label.starts_with(h.typed) {
+            continue;
+        }
+        let w = sp.label.width as usize;
+        let up = label.to_uppercase();
+        let typed_n = h.typed.chars().count();
+        for (i, x) in (sp.label.left()..sp.label.right()).enumerate() {
+            let cell = &mut buf[(x, sp.label.y)];
+            cell.reset();
+            cell.set_char(up.chars().nth(i).filter(|_| i < w).unwrap_or(' '));
+            cell.set_style(if i < typed_n { typed_style } else { label_style });
+        }
+    }
 }
 
 /// Which pane has the keyboard (the performance keys are off while one is open)
@@ -111,7 +201,8 @@ fn dim() -> Style {
     Style::default().fg(DIM)
 }
 
-pub fn draw(buf: &mut Buffer, area: Rect, v: &View) {
+pub fn draw(buf: &mut Buffer, area: Rect, v: &View) -> Vec<Spot> {
+    let mut spots = Vec::new();
     // paint the whole screen, the previous (normal) view must not shine through
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
@@ -122,7 +213,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, v: &View) {
         let msg = format!("DJ mode needs at least {}x{} (now {}x{})", MIN_SIZE.0, MIN_SIZE.1, area.width, area.height);
         buf.set_stringn(area.x, area.y, msg, area.width as usize, Style::default().fg(Color::Yellow));
         buf.set_stringn(area.x, area.y + 1, "Esc: back", area.width as usize, dim());
-        return;
+        return spots;
     }
     let body_h = area.height - 2;
     let mixer_h = 4;
@@ -155,12 +246,12 @@ pub fn draw(buf: &mut Buffer, area: Rect, v: &View) {
             Rect::new(decks.x + half, decks.y, decks.width - half, decks.height)
         };
         let info = v.decks.get(i).cloned().unwrap_or_default();
-        draw_deck(buf, r, i, &info, v.waves[i], v.release_events, v.doubt[i]);
+        draw_deck(buf, r, i, &info, v.waves[i], v.release_events, v.doubt[i], &v.hints, &mut spots);
     }
     if let Some(set) = v.set {
         draw_set(buf, set_area, set, v.decks, v.rec);
     }
-    draw_mixer(buf, mixer, v);
+    draw_mixer(buf, mixer, v, &mut spots);
     if v.panel.is_none() {
         draw_library(buf, lib, v);
     }
@@ -168,6 +259,8 @@ pub fn draw(buf: &mut Buffer, area: Rect, v: &View) {
     if let Some(lines) = v.overlay {
         draw_overlay(buf, decks, lines);
     }
+    draw_hints(buf, &spots, &v.hints);
+    spots
 }
 
 /// Height of a pane: what the strip and library had, grown to half the body while the decks keep
@@ -535,13 +628,27 @@ fn draw_status(buf: &mut Buffer, area: Rect, v: &View) {
         buf.set_stringn(area.x, area.y, format!(":{}█", v.input), w, Style::default().fg(Color::White));
         return;
     }
-    if let Some(e) = v.error {
-        buf.set_stringn(area.x, area.y, e, w, Style::default().fg(Color::Red));
+    // the selection's chip sits at the right end; the text gives way to it
+    let chip = v.hints.chip.filter(|c| c.chars().count() + 8 < w);
+    let chip_w = chip.map_or(0, |c| c.chars().count() + 1);
+    let text_w = w - chip_w;
+    if v.hints.active {
+        let badge = Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD);
+        buf.set_stringn(area.x, area.y, " HINTS ", text_w, badge);
+        let typed = v.hints.typed.to_uppercase();
+        let msg = format!(" type a label{} · Esc or f cancels · keys do not play now", if typed.is_empty() { String::new() } else { format!(" ({typed}…)") });
+        buf.set_stringn(area.x + 7, area.y, msg, text_w.saturating_sub(7), Style::default().fg(Color::Yellow));
+    } else if let Some(e) = v.error {
+        buf.set_stringn(area.x, area.y, e, text_w, Style::default().fg(Color::Red));
     } else if let Some(n) = v.note {
-        buf.set_stringn(area.x, area.y, n, w, Style::default().fg(Color::Yellow));
+        buf.set_stringn(area.x, area.y, n, text_w, Style::default().fg(Color::Yellow));
     } else {
-        let hint = "A: z cue x play c sync v loop a/s pitch q/w nudge 1-4 cues e/r jump | B: / . , m  k/l  o/p  7-0  u/i | Alt+qwer uiop eq/filter | g b h n t y faders";
-        buf.set_stringn(area.x, area.y, hint, w, dim());
+        let hint = "f hints ] [ \\ edit ; toggle | A: z cue x play c sync v loop a/s pitch q/w nudge 1-4 cues e/r jump | B: / . , m  k/l  o/p  7-0  u/i | Alt+qwer uiop eq/filter | g b h n t y faders";
+        buf.set_stringn(area.x, area.y, hint, text_w, dim());
+    }
+    if let Some(c) = chip {
+        let x = area.right() - chip_w as u16 + 1;
+        buf.set_stringn(x, area.y, c, chip_w - 1, Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD));
     }
 }
 
@@ -553,6 +660,8 @@ fn draw_deck(
     wave: WaveView,
     release: bool,
     doubt: bool,
+    h: &HintView,
+    spots: &mut Vec<Spot>,
 ) {
     if area.width < 12 || area.height < 3 {
         return;
@@ -607,10 +716,13 @@ fn draw_deck(
         Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
     ));
     tempo.push(Span::raw("  "));
+    let rate_col = text_width(&tempo) - 2;
     tempo.push(Span::styled(
         format!("{rate_pct:+.2}%"),
         if rate_pct.abs() < 0.005 { dim() } else { Style::default().fg(Color::Yellow) },
     ));
+    let mut found: Vec<(Target, usize, u16, u16, u16)> =
+        vec![(Target::Slot(Slot::Rate(idx as u8)), 1, rate_col, 2, text_width(&tempo) - rate_col)];
     tempo.push(Span::raw("  "));
     tempo.push(if d.synced {
         Span::styled("SYNC", Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD))
@@ -625,20 +737,38 @@ fn draw_deck(
         Span::styled(format!("  -{}", fmt_short(remaining)), dim()),
         Span::raw("  "),
     ];
+    let loop_col = text_width(&time) - 2;
     time.push(if d.loop_beats > 0.0 {
         Span::styled(
             format!(" LOOP {} ", trim_beats(d.loop_beats)),
             Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD),
         )
     } else {
-        Span::styled("loop --", dim())
+        // the length the next loop key makes
+        Span::styled(format!("loop {}", hints::fmt_beats(h.loop_len[idx])), dim())
     });
+    found.push((Target::LoopLen(idx as u8), 2, loop_col, 2, text_width(&time) - loop_col));
     time.push(Span::raw("  "));
     time.push(if d.headphones {
         Span::styled("HP ●", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
     } else {
         Span::styled("HP ○", dim())
     });
+    // jump size and trim, when the line has room
+    let room = inner.width.saturating_sub(2);
+    for (target, text) in [
+        (Target::Jump(idx as u8), format!("jmp {}", hints::fmt_beats(h.jump_len[idx]))),
+        (Target::Slot(Slot::Gain(idx as u8)), format!("gain {:+.1}", h.gain[idx])),
+    ] {
+        let col = text_width(&time);
+        let len = text.chars().count() as u16;
+        if col + 2 + len > room {
+            break;
+        }
+        time.push(Span::raw("  "));
+        time.push(Span::styled(text, dim()));
+        found.push((target, 2, col, 2, len + 2));
+    }
     if d.duration > 1.0 && d.decoded + 0.5 < d.duration {
         time.push(Span::styled(
             format!("  decoding {}%", (d.decoded / d.duration * 100.0) as u32),
@@ -654,6 +784,11 @@ fn draw_deck(
     // text first, the waveforms get what is left (at least 2 rows if there is room)
     let n_text = lines.len().min(inner.height.saturating_sub(2).max(1) as usize);
     let text_area = Rect::new(inner.x + 1, inner.y, inner.width.saturating_sub(2), n_text as u16);
+    for (target, line, col, label_w, hl_w) in found {
+        if line < n_text {
+            add_spot(spots, text_area, target, text_area.x + col, text_area.y + line as u16, label_w, hl_w);
+        }
+    }
     Paragraph::new(lines.into_iter().take(n_text).collect::<Vec<_>>()).render(text_area, buf);
     let wave_top = inner.y + n_text as u16;
     let rest = inner.bottom().saturating_sub(wave_top);
@@ -865,9 +1000,11 @@ fn unipolar(v: f64, width: usize, color: Color) -> Vec<Span<'static>> {
     ]
 }
 
-fn mixer_row(d: &DeckInfo, idx: usize, w: usize) -> Line<'static> {
+fn mixer_row(d: &DeckInfo, idx: usize, w: usize) -> (Line<'static>, Vec<(Target, u16, u16, u16)>) {
     let color = DECK_COLORS[idx];
     let name = if idx == 0 { "A" } else { "B" };
+    let deck = idx as u8;
+    let mut found = Vec::new();
     let mut spans = vec![Span::styled(
         format!(" {name} "),
         Style::default().fg(Color::Black).bg(color).add_modifier(Modifier::BOLD),
@@ -875,27 +1012,36 @@ fn mixer_row(d: &DeckInfo, idx: usize, w: usize) -> Line<'static> {
     let slot_w = w.saturating_sub(4) / 5;
     let show_val = slot_w >= 17;
     let bar_w = slot_w.saturating_sub(5 + if show_val { 7 } else { 0 }).max(3);
-    let bipolars = [("LOW", d.eq.0), ("MID", d.eq.1), ("HI ", d.eq.2), ("FLT", d.filter)];
-    for (label, v) in bipolars {
+    let bipolars = [
+        ("LOW", d.eq.0, Ctl::Eq(deck, 0)),
+        ("MID", d.eq.1, Ctl::Eq(deck, 1)),
+        ("HI ", d.eq.2, Ctl::Eq(deck, 2)),
+        ("FLT", d.filter, Ctl::Filter(deck)),
+    ];
+    for (label, v, ctl) in bipolars {
         spans.push(Span::raw(" "));
+        let col = text_width(&spans);
         spans.push(Span::styled(label, Style::default().fg(color)));
         spans.push(Span::raw(" "));
         spans.extend(bipolar(v, bar_w, color));
         if show_val {
             spans.push(Span::styled(format!(" {v:+.2}"), dim()));
         }
+        found.push((Target::Slot(Slot::Ctl(ctl)), col, 3, text_width(&spans) - col));
     }
     spans.push(Span::raw(" "));
+    let col = text_width(&spans);
     spans.push(Span::styled("FAD", Style::default().fg(color)));
     spans.push(Span::raw(" "));
     spans.extend(unipolar(d.fader, bar_w + 2, color));
     if show_val {
         spans.push(Span::styled(format!(" {:.2}", d.fader), dim()));
     }
-    Line::from(spans)
+    found.push((Target::Slot(Slot::Ctl(Ctl::Fader(deck))), col, 3, text_width(&spans) - col));
+    (Line::from(spans), found)
 }
 
-fn draw_mixer(buf: &mut Buffer, area: Rect, v: &View) {
+fn draw_mixer(buf: &mut Buffer, area: Rect, v: &View, spots: &mut Vec<Spot>) {
     let m = v.mixer;
     let mut title = vec![
         Span::styled("─ Mixer ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
@@ -930,8 +1076,18 @@ fn draw_mixer(buf: &mut Buffer, area: Rect, v: &View) {
     let w = area.width as usize;
     let a = v.decks.first().unwrap_or(&blank);
     let b = v.decks.get(1).unwrap_or(&blank);
-    // crossfader
-    let bar_w = w.saturating_sub(24).max(9);
+    // crossfader, then master, cue mix and sync range when the line is wide enough
+    let extras: Vec<(Slot, String)> = if w >= 72 {
+        vec![
+            (Slot::Master, format!("MST {:.2}", m.master)),
+            (Slot::CueMix, format!("CUE {:.2}", m.cue_mix)),
+            (Slot::SyncRange, format!("RNG ±{:.0}%", v.hints.sync_range * 100.0)),
+        ]
+    } else {
+        Vec::new()
+    };
+    let extra_w: usize = extras.iter().map(|(_, t)| 2 + t.chars().count()).sum();
+    let bar_w = if extras.is_empty() { w.saturating_sub(24).max(9) } else { w.saturating_sub(17 + extra_w).max(9) };
     let pos = (((m.crossfader.clamp(-1.0, 1.0) + 1.0) / 2.0) * (bar_w - 1) as f64).round() as usize;
     let mut xf = vec![Span::styled(" XF ", Style::default().fg(Color::Black).bg(Color::White)), Span::raw(" "), Span::styled("A ", Style::default().fg(DECK_COLORS[0]))];
     for i in 0..bar_w {
@@ -942,9 +1098,28 @@ fn draw_mixer(buf: &mut Buffer, area: Rect, v: &View) {
         });
     }
     xf.push(Span::styled(" B", Style::default().fg(DECK_COLORS[1])));
+    let xf_end = text_width(&xf);
     xf.push(Span::styled(format!("  {:+.2}", m.crossfader), dim()));
-    Paragraph::new(vec![Line::from(title), mixer_row(a, 0, w), mixer_row(b, 1, w), Line::from(xf)])
-        .render(area, buf);
+    let mut found = vec![(Target::Slot(Slot::Ctl(Ctl::Crossfader)), 0u16, 4u16, xf_end, 3usize)];
+    for (slot, text) in extras {
+        let col = text_width(&xf);
+        xf.push(Span::raw("  "));
+        let len = text.chars().count() as u16;
+        xf.push(Span::styled(text, dim()));
+        found.push((Target::Slot(slot), col, 2, len + 2, 3));
+    }
+    let (row_a, found_a) = mixer_row(a, 0, w);
+    let (row_b, found_b) = mixer_row(b, 1, w);
+    let clip = Rect::new(area.x, area.y, area.width, area.height);
+    for (row, list) in [(1u16, found_a), (2, found_b)] {
+        for (t, col, lw, hw) in list {
+            add_spot(spots, clip, t, area.x + col, area.y + row, lw, hw);
+        }
+    }
+    for (t, col, lw, hw, row) in found {
+        add_spot(spots, clip, t, area.x + col, area.y + row as u16, lw, hw);
+    }
+    Paragraph::new(vec![Line::from(title), row_a, row_b, Line::from(xf)]).render(area, buf);
 }
 
 fn draw_library(buf: &mut Buffer, area: Rect, v: &View) {
@@ -1080,6 +1255,10 @@ mod tests {
     }
 
     pub fn render(w: u16, h: u16, f: impl FnOnce(&mut View)) -> String {
+        render_full(w, h, f).0
+    }
+
+    pub fn render_full(w: u16, h: u16, f: impl FnOnce(&mut View)) -> (String, Vec<Spot>) {
         let decks = [deck_a(), deck_b()];
         let mixer = MixerInfo { crossfader: -0.25, mode: "internal".into(), quantize: true, xruns: 0, ..Default::default() };
         let wf = wave();
@@ -1103,19 +1282,22 @@ mod tests {
             rec: None,
             overlay: None,
             panel: None,
+            hints: HintView::default(),
         };
         f(&mut v);
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        let mut spots = Vec::new();
         term.draw(|frame| {
             let area = frame.area();
-            draw(frame.buffer_mut(), area, &v);
+            spots = draw(frame.buffer_mut(), area, &v);
         })
         .unwrap();
         let buf = term.backend().buffer().clone();
-        (0..h)
+        let text = (0..h)
             .map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>())
             .collect::<Vec<_>>()
-            .join("\n")
+            .join("\n");
+        (text, spots)
     }
 
     #[test]
@@ -1432,5 +1614,144 @@ mod tests {
         assert_eq!(fmt_time(83.44), "01:23.4");
         assert_eq!(fmt_time(-3.0), "00:00.0");
         assert_eq!(fmt_short(95.5), "1:35");
+    }
+
+    fn test_view<'a>(decks: &'a [DeckInfo], mixer: &'a MixerInfo, lib: &'a [Music]) -> View<'a> {
+        View {
+            decks,
+            mixer,
+            waves: [WaveView::Loading, WaveView::Loading],
+            doubt: [false, false],
+            link_ok: true,
+            error: None,
+            note: None,
+            focus: Focus::Decks,
+            input: "",
+            search: "",
+            lib,
+            lib_total: lib.len(),
+            lib_sel: 0,
+            release_events: true,
+            set: None,
+            rec: None,
+            overlay: None,
+            panel: None,
+            hints: HintView::default(),
+        }
+    }
+
+    fn leak_labels() -> &'static [(Target, &'static str)] {
+        Box::leak(hints::table().into_boxed_slice())
+    }
+
+    #[test]
+    fn every_control_has_a_spot_at_120x35_and_labels_do_not_move_anything() {
+        let (plain, spots) = render_full(120, 35, |_| {});
+        for (t, _) in hints::table() {
+            assert!(spots.iter().any(|s| s.target == t), "no spot for {t:?}");
+        }
+        assert_eq!(spots.len(), 22);
+        let (with, _) = render_full(120, 35, |v| {
+            v.hints = HintView { active: true, labels: leak_labels(), ..HintView::default() };
+        });
+        println!("{with}");
+        assert_eq!(plain.lines().count(), with.lines().count());
+        // labels replace captions in place: same rows, the text around them is the same
+        for (a, b) in plain.lines().zip(with.lines()) {
+            assert_eq!(a.chars().count(), b.chars().count());
+        }
+        assert!(with.contains("HINTS"));
+        for l in ["A  ", "TA", "TS", "GA", "XA", "CA", "VA", "ZA", "BA", "BS", "BD"] {
+            assert!(with.contains(l), "label {l} missing");
+        }
+    }
+
+    #[test]
+    fn labels_sit_on_their_controls_in_yellow() {
+        let labels = leak_labels();
+        let mut term = Terminal::new(TestBackend::new(120, 35)).unwrap();
+        let decks = [deck_a(), deck_b()];
+        let mixer = MixerInfo::default();
+        let lib = lib();
+        let mut spots = Vec::new();
+        term.draw(|frame| {
+            let mut v = test_view(&decks, &mixer, &lib);
+            v.hints = HintView { active: true, labels, ..HintView::default() };
+            let area = frame.area();
+            spots = draw(frame.buffer_mut(), area, &v);
+        })
+        .unwrap();
+        let buf = term.backend().buffer();
+        for sp in &spots {
+            let cell = &buf[(sp.label.x, sp.label.y)];
+            assert_eq!(cell.bg, Color::Yellow, "{:?}", sp.target);
+            assert_eq!(cell.fg, Color::Black);
+            let want = hints::label_of(sp.target).unwrap().to_uppercase();
+            assert_eq!(cell.symbol(), &want[..1], "{:?}", sp.target);
+        }
+    }
+
+    #[test]
+    fn typed_prefix_hides_the_other_labels() {
+        let (text, _) = render_full(120, 35, |v| {
+            v.hints = HintView { active: true, typed: "x", labels: leak_labels(), ..HintView::default() };
+        });
+        assert!(text.contains("XA") && text.contains("XS"));
+        assert!(!text.contains("TA") && !text.contains("GA"));
+        assert!(text.contains("(X…)"));
+    }
+
+    #[test]
+    fn selection_is_inverted_and_has_a_chip() {
+        let sel = Target::Slot(Slot::Ctl(Ctl::Filter(0)));
+        let labels = leak_labels();
+        let mut term = Terminal::new(TestBackend::new(120, 35)).unwrap();
+        let decks = [deck_a(), deck_b()];
+        let mixer = MixerInfo::default();
+        let lib = lib();
+        let mut spots = Vec::new();
+        term.draw(|frame| {
+            let mut v = test_view(&decks, &mixer, &lib);
+            v.hints = HintView { labels, selected: Some(sel), chip: Some("◆ A filter -0.30"), ..HintView::default() };
+            let area = frame.area();
+            spots = draw(frame.buffer_mut(), area, &v);
+        })
+        .unwrap();
+        let buf = term.backend().buffer();
+        let sp = spots.iter().find(|s| s.target == sel).unwrap();
+        for x in sp.hl.left()..sp.hl.right() {
+            assert!(buf[(x, sp.hl.y)].modifier.contains(Modifier::REVERSED));
+        }
+        let other = spots.iter().find(|s| s.target == Target::Slot(Slot::Ctl(Ctl::Filter(1)))).unwrap();
+        assert!(!buf[(other.hl.x, other.hl.y)].modifier.contains(Modifier::REVERSED));
+        let last: String = (0..120).map(|x| buf[(x, 34)].symbol().to_string()).collect();
+        assert!(last.trim_end().ends_with("◆ A filter -0.30"), "{last}");
+    }
+
+    #[test]
+    fn small_screens_label_only_what_is_shown() {
+        for (w, h) in [(100, 30), (80, 24), (70, 20), (60, 14)] {
+            let (text, spots) = render_full(w, h, |v| {
+                v.hints = HintView { active: true, labels: leak_labels(), ..HintView::default() };
+            });
+            assert_eq!(text.lines().count(), h as usize);
+            assert!(text.contains("DECK A") && text.contains("Library"), "{w}x{h}");
+            for sp in &spots {
+                assert!(sp.hl.right() <= w && sp.hl.bottom() <= h, "{w}x{h} {:?}", sp.target);
+            }
+            // the mixer strip is always there
+            for t in [Slot::Ctl(Ctl::Filter(0)), Slot::Ctl(Ctl::Fader(1)), Slot::Ctl(Ctl::Crossfader)] {
+                assert!(spots.iter().any(|s| s.target == Target::Slot(t)), "{w}x{h} {t:?}");
+            }
+            println!("{w}x{h}: {} spots", spots.len());
+        }
+        // 60 columns: no room for master / cue mix / sync range on the crossfader row
+        let (_, spots) = render_full(60, 14, |_| {});
+        assert!(!spots.iter().any(|s| s.target == Target::Slot(Slot::Master)));
+        let (_, spots) = render_full(80, 24, |_| {});
+        assert!(spots.iter().any(|s| s.target == Target::Slot(Slot::Master)));
+        // too small for the screen: nothing to label
+        let (_, spots) = render_full(40, 10, |_| {});
+        assert!(spots.is_empty());
     }
 }

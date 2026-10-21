@@ -547,8 +547,12 @@ async fn handle_events<'a>(ui: &mut ui::UI<'a>, frame: std::time::Duration) -> i
         match event::read()? {
             Event::Key(key) if ui.dj_active() => ui.dj_key(&key),
             // the normal view's geometry is stale behind the DJ screen: a click must not seek or
-            // play anything
-            Event::Mouse(_) if ui.dj_active() => {}
+            // play anything. Only the wheel is used: it edits the selected control.
+            Event::Mouse(m) if ui.dj_active() => match m.kind {
+                event::MouseEventKind::ScrollUp => ui.dj_wheel(true),
+                event::MouseEventKind::ScrollDown => ui.dj_wheel(false),
+                _ => {}
+            },
             Event::Key(key) => {
                 if ui::Region::handle_events(ui, &key).await? {
                     return Ok(true);

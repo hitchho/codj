@@ -1406,6 +1406,13 @@ impl<'a> UI<'a> {
         }
     }
 
+    /// A mouse wheel detent in DJ mode (clicks are ignored there)
+    pub fn dj_wheel(&mut self, up: bool) {
+        if let Some(dj) = self.dj.as_mut() {
+            dj.wheel(up, Instant::now());
+        }
+    }
+
     /// `:edit`: the file to open in `$EDITOR`, once
     pub fn dj_take_edit(&mut self) -> Option<std::path::PathBuf> {
         self.dj.as_mut()?.take_edit_request()

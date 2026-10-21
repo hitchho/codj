@@ -10,6 +10,7 @@
 
 pub mod capture;
 pub mod editor;
+pub mod hints;
 pub mod keys;
 pub mod prompt;
 pub mod render;
@@ -1095,6 +1096,9 @@ impl DjScreen {
                 }
             }
             Nav::RecordToggle => self.record(None),
+            Nav::NoSelection => self.set_note("no control selected: f shows the hints, type a label to pick one"),
+            // handled inside DjKeys, which owns the selection
+            Nav::Hints | Nav::Toggle | Nav::Step(_) | Nav::Reset => {}
             Nav::LoadSmart => {
                 // the deck that is not playing; both idle: A
                 let playing = |i: usize| self.session.shared.lock().unwrap().decks[i].playing;
@@ -1105,8 +1109,21 @@ impl DjScreen {
         Outcome::Stay
     }
 
+    /// A wheel detent (or a knob turn, `up` = clockwise): edits the selected control, else
+    /// scrolls the library. Ignored while the editor or the prompt box has the screen.
+    pub fn wheel(&mut self, up: bool, now: Instant) {
+        if self.editor.is_some() || self.prompt.as_ref().is_some_and(|p| p.visible) {
+            return;
+        }
+        let dir = if up { 1 } else { -1 };
+        if !self.keys.wheel(dir, now) {
+            self.pane.scroll(-dir as isize);
+        }
+    }
+
     /// Ends all holds and sends whatever is pending, at once
     pub fn settle(&mut self, now: Instant) {
+        self.keys.cancel_hints();
         self.keys.release_all();
         let calls = self.keys.tick(now);
         self.session.send(calls);
@@ -1205,6 +1222,13 @@ impl DjScreen {
             .filter(|(_, until)| now < *until)
             .max_by_key(|(_, until)| *until)
             .map(|(n, _)| n.as_str());
+        let labels = hints::table();
+        let typed = self.keys.hints().typed.clone();
+        let chip = self
+            .keys
+            .hints()
+            .selected
+            .map(|t| format!("◆ {} {}", t.name(), t.format(self.keys.value_of(t, now))));
         let prompt_visible = self.prompt.as_ref().is_some_and(|p| p.visible);
         let hidden_note = self.prompt.as_ref().filter(|p| !p.visible).and_then(|p| p.hidden_note());
         let note = note.or(hidden_note.as_deref());
@@ -1234,8 +1258,20 @@ impl DjScreen {
             rec: s.rec.filter(|r| r.0).map(|r| (r.1, r.2)),
             overlay: s.overlay.as_deref(),
             panel,
+            hints: render::HintView {
+                active: self.keys.hints().active,
+                typed: &typed,
+                labels: &labels,
+                selected: self.keys.hints().selected,
+                chip: chip.as_deref(),
+                loop_len: self.keys.loop_len(),
+                jump_len: self.keys.jump_len(),
+                gain: [self.keys.gain_shown(0, now), self.keys.gain_shown(1, now)],
+                sync_range: self.keys.sync_range(),
+            },
         };
-        render::draw(frame.buffer_mut(), area, &view);
+        let spots = render::draw(frame.buffer_mut(), area, &view);
+        self.keys.set_visible(spots.iter().map(|s| s.target).collect());
         if let Some(r) = render::panel_rect(area, &view) {
             if let Some(ed) = self.editor.as_mut() {
                 ed.render(frame.buffer_mut(), r);
