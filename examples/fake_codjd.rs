@@ -443,6 +443,8 @@ impl Fake {
                 "crossfader" => s.mixer.crossfader = value,
                 "master" => s.mixer.master = value,
                 "cue_mix" => s.mixer.cue_mix = value,
+                // not part of MixerInfo: only logged, so the client's edits can be checked
+                "sync_range" => {}
                 "quantize" => s.mixer.quantize = value > 0.5,
                 other => return format!("unknown control {other}"),
             }

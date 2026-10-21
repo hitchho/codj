@@ -9,6 +9,8 @@
 # Phase 3 drives capture and recording (:cue, :loopsave, :gridsave, :rec, F9).
 # Phase 4 drives the editor pane (F10: insert, error marker, :w, write conflict) and the AI
 # prompt box (:ai with examples/fake_agent.sh as the agent: streamed output, diff, undo).
+# Phase 5 drives the control hints: f, a label, ] [ \ ; edits, the mouse wheel (SGR mouse
+# sequences sent as literal keys), the beat-jump keys e r u i, Esc.
 # Needs busctl and jq (the fake agent and the conflict step talk to the fake codjd with them).
 #
 # tmux does not forward the kitty keyboard protocol, so this exercises the no-release fallback.
@@ -159,4 +161,46 @@ $T kill-server
 kill $FAKE
 echo "== editor/prompt calls received by the fake"; cat "$W/calls-edit.log"
 echo "== codj stderr (editor phase)"; cat "$W/codj-edit.err"
+# --- phase 5: control hints, selection editing, mouse wheel
+export CODJ_FAKE_LOG=$W/calls-hints.log
+rm -f "$W"/calls-hints.log
+rm -f "$HOME/.config/codj/config.toml"
+"$BIN/examples/fake_codjd" 2>"$W/fake5.err" & FAKE=$!
+sleep 1
+S=djhint
+$T new-session -d -x 140 -y 40 -s $S "$BIN/codj 2>$W/codj-hints.err; sleep 30"
+sleep 2
+# a mouse wheel detent as an SGR mouse report: button 64 = up, 65 = down
+wheel() { for i in $(seq "$2"); do $T send-keys -t $S -l -- "$(printf '\033[<%s;40;12M' "$1")"; sleep 0.15; done; }
+keys M; sleep 0.5
+keys Enter Down '>'; sleep 1                   # decks loaded
+keys e r u i; sleep 0.5; cap hint_jump_keys      # DjBeatJump A -4/+4, B -4/+4
+keys f; sleep 0.4; cap hints_shown              # labels on every control
+keys a; sleep 0.3; cap hint_selected_filter_a   # label a: A filter, chip in the status line
+keys ']' ']' ']'; sleep 0.4; cap hint_filter_up
+keys '[' ; sleep 0.3
+keys f w; sleep 0.3                              # crossfader
+keys '\;'; sleep 0.3                            # back to A filter (tmux needs ; escaped)
+keys ']'; sleep 0.3
+keys '\;' ']'; sleep 0.3                        # crossfader again
+wheel 64 3; sleep 0.3                            # wheel up edits the selected crossfader
+wheel 65 1; sleep 0.3
+cap hint_wheel_crossfader
+keys '\'; sleep 0.3; cap hint_reset           # crossfader back to 0
+keys f c a; sleep 0.3; keys ']' ']'; sleep 0.3  # A loop length 4 -> 8 -> 16
+cap hint_loop_len
+keys v; sleep 0.5                                # loops 16 beats
+keys f x s; sleep 0.3; keys ']' ']'; sleep 0.3   # B pitch +0.2 %
+keys f z a; sleep 0.3; keys ']' '['; sleep 0.3   # A gain
+keys f Escape; sleep 0.3                         # hints cancelled, selection kept
+cap hint_cancelled
+keys Escape; sleep 0.3                           # selection cleared
+cap hint_cleared
+wheel 65 2; sleep 0.4                            # nothing selected: scrolls the library
+cap hint_wheel_library
+keys Escape; sleep 0.5                           # leaves DJ mode
+$T kill-server
+kill $FAKE
+echo "== hints calls received by the fake"; cat "$W/calls-hints.log"
+echo "== codj stderr (hints phase)"; cat "$W/codj-hints.err"
 exit 0

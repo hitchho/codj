@@ -192,12 +192,12 @@ Letters are the same in every terminal; `Alt` combinations are the mixer. Digits
 |Cue (hold = preview)|`z`|`/`|
 |Play / pause|`x`|`.`|
 |Sync to the other deck|`c`|`,`|
-|Loop 4 beats on / off|`v`|`m`|
+|Loop on / off (4 beats unless you [changed the loop length](#control-hints-and-editing))|`v`|`m`|
 |Pitch − / +|`a` / `s`|`k` / `l`|
 |Nudge − / + (hold)|`q` / `w`|`o` / `p`|
 |Hot cue 1–4 (empty: set, set: jump)|`1` `2` `3` `4`|`7` `8` `9` `0`|
 |Clear hot cue|`Shift + 1`…`4`|`Shift + 7`…`0`|
-|Beat jump back / forward (4 beats)|`e` / `r`|`u` / `i`|
+|Beat jump back / forward (4 beats unless you changed the jump size)|`e` / `r`|`u` / `i`|
 |EQ low + / −|`Alt + q` / `Alt + a`|`Alt + u` / `Alt + j`|
 |EQ mid + / −|`Alt + w` / `Alt + s`|`Alt + i` / `Alt + k`|
 |EQ high + / −|`Alt + e` / `Alt + d`|`Alt + o` / `Alt + l`|
@@ -207,6 +207,10 @@ Letters are the same in every terminal; `Alt` combinations are the mixer. Digits
 |Key|Does|
 |---|----|
 |`t` / `y`|Crossfader toward A / toward B|
+|`f`|[Control hints](#control-hints-and-editing): label every control, type a label to select it|
+|`]` / `[` / `\`|Step the selected control up / down / reset it|
+|`;`|Toggle between the last two selected controls|
+|Mouse wheel|Edits the selected control (up = +); with nothing selected it scrolls the library. Clicks do nothing in DJ mode|
 |`F1` / `F2`|Headphone cue on deck A / B|
 |`F5`|Quantize on / off (mixer-wide)|
 |`F6` / `F7` / `F8`|[Set](#sets-in-dj-mode): arm the next mix / auto mode on-off / disarm|
@@ -218,9 +222,66 @@ Letters are the same in every terminal; `Alt` combinations are the mixer. Digits
 |`Enter`|Load it onto the deck that is not playing (A when both are idle)|
 |`Tab`|Type in the library search (same regex and `artist:`/`title:`/`genre:` filters as the list); `Tab` or `Enter` hands the keys back to the decks, `Esc` clears the search|
 |`Shift + ;` (`:`)|DJ command line: `:q` back to the normal view, `:load a`, `:load b`, `:grid a x2` / `/2` / `x1.5` / `/1.5` / `reset` to correct a deck's detected tempo (saved per track). A yellow `?` after the BPM means the tempo detectors disagree, so the grid is likely half, double or 1.5× off. Sync refuses changes over ±16 % and says which tempos clash.|
-|`Esc`|Closes the set error overlay if open, else back to the normal view|
+|`Esc`|Closes the set error overlay if open; cancels the hints if they are up; clears the selected control; else back to the normal view|
 
 Tap vs hold: tapping EQ, filter, faders and crossfader steps 0.05, pitch steps 0.1 %. Holding ramps after 0.2 s with an ease-in to a full sweep in about 1.5 s (pitch ramps slowly, 1 to 4 %/s). Values are sent at most about 30 times a second per control and coalesced, so a slow bus never builds a backlog; the screen always shows what codjd reports.
+
+## Control hints and editing
+
+Every adjustable control on the screen can be picked with a short label and then edited with one hand on a key, the wheel or a knob, the way Vimium labels links.
+
+1. `f` draws a label (black on yellow) over or next to every control. While the labels are up the keys only match labels: nothing plays, `Esc` or `f` cancels.
+2. Type the label. The controls and their labels use the left hand only (`a s d q w e r t z x c v g b`); the seven most used ones have a single letter:
+
+|Label|Control|Label|Control|
+|-----|-------|-----|-------|
+|`a` / `s`|filter A / B|`e` / `r`|channel fader A / B|
+|`d` / `q`|EQ low A / B|`w`|crossfader|
+|`ta` / `ts`|EQ mid A / B|`ga` / `gs`|EQ high A / B|
+|`xa` / `xs`|pitch A / B|`za` / `zs`|gain (trim, dB) A / B|
+|`ca` / `cs`|loop length A / B (for the next `v` / `m`)|`va` / `vs`|beat jump size A / B (for `e r u i`)|
+|`ba`|master|`bs`|cue mix|
+|`bd`|sync range (the largest tempo change a synced play may need)||
+
+   The table is fixed, so a label never moves with the window size. A control the screen has no room for at the moment (small terminals drop master / cue mix / sync range first, then jump size and gain) gets no label and cannot be picked.
+3. The control is now selected: it is drawn inverted, the right end of the status line shows a chip like `◆ A filter -0.30`, and `f` brings the labels back for another pick. `;` swaps with the control selected before it (two controls you play together: filter and crossfader). `Esc` clears the selection.
+
+Editing the selected control:
+
+|Control|`]` / `[` step|`\` or knob press|
+|-------|---------------|-------------------|
+|EQ, filter, crossfader, channel fader, cue mix, master|0.05|EQ / filter 0, crossfader 0, fader 1, cue mix 0, master 1|
+|Pitch|0.1 %|0 %|
+|Gain|0.5 dB|the track's auto-gain (what the deck loaded with)|
+|Loop length, jump size|×2 / ÷2 along 1/4 1/2 1 2 4 8 16 32 beats|4 beats|
+|Sync range|0.01 (1 %)|0.16 (codjd's default)|
+
+Everything goes through the normal `DjSet` path (coalesced, at most ~30 a second per control), so codjd sees a manual move: it cancels the automation of that control and records it into a mix recording. Loop length and jump size are only used by the next `v` / `m` and `e r u i`; they live in codj, not in codjd. The decks show them as `loop 4` (idle loops), `jmp 4` and `gain +0.0` in the time line when it has room; the mixer line shows `MST`, `CUE` and `RNG` on wide terminals (72 columns and up).
+
+Codjd does not report a manual gain trim or the sync range, so codj shows the last value it sent itself (a track loaded afterwards starts from its own auto-gain again). The sync range is assumed to be codjd's default 0.16 whenever DJ mode opens, since codjd cannot be asked for it.
+
+**Acceleration** (keys, wheel and knob alike): detents less than 60 ms apart multiply the step, x2 for the second, x4 from the third on, until you pause or reverse. A slow turn is always one step per detent; a held `]` accelerates through the keyboard's auto-repeat. For loop length and jump size a x4 detent moves up to four notches.
+
+**Mouse wheel**: enabled in DJ mode for the wheel only. With a selected control the wheel edits it (up = +); with none it scrolls the library list. It is ignored while the set editor or the AI prompt box is open.
+
+## Hardware knob
+
+A rotary encoder that sends volume keys (the knob on many keyboards' media cluster) can drive the same editing. It is off until the config names the device:
+
+```toml
+[knob]
+device = "AK820 Consumer Control"   # part of the input device's name (see `evtest`); empty = off
+up = 115                            # Linux input key codes, these are the defaults:
+down = 114                          #   KEY_VOLUMEUP, KEY_VOLUMEDOWN,
+press = 113                         #   KEY_MUTE
+grab = true                         # EVIOCGRAB the device only while DJ mode is open
+```
+
+- Turning edits the selected control with the same acceleration (up = +); press resets it. With nothing selected, turning scrolls the library and a press loads the highlighted track onto the deck that is not playing (like `Enter`).
+- Only the three configured codes are acted on; everything else the device sends is dropped unseen (never logged or stored), because the device may also be your keyboard.
+- With `grab = true` the device is taken exclusively while DJ mode is open, so the system volume does not move; leaving DJ mode releases it again (and so does the kernel if codj dies or panics, because the grab belongs to the open file). A device that also has letter keys is never grabbed, it would swallow your typing; use the consumer-control node (`device` matches the first node whose name contains it and that has one of the configured keys).
+- It needs read access to `/dev/input/event*` (the `input` group). A missing device, no permission or an unplugged knob shows one note in the status line; DJ mode works without it.
+- The knob is read by the `evdev` crate on its own thread and handed to the screen over a channel; `cargo test` includes a test with a virtual device that is skipped when `/dev/uinput` is not writable.
 
 ## Sets in DJ mode
 
@@ -322,7 +383,7 @@ Auto-repeat of a tap key (play, sync, loop, hot cue, beat jump) is ignored.
 
 ## Testing without codjd's engine
 
-`examples/fake_codjd.rs` serves the deck API (and a fake set runtime: sets `demo` and `broken`, 3 tracks, 2 mixes, an armed mix that advances) with plausible changing state and logs every call, `examples/dj_e2e.sh` runs codj against it in tmux (sets, capture and recording included; it also serves a set's text and hash, with conflict detection on stale writes, for the editing methods), `examples/mcp_e2e.sh` drives `codj mcp` over JSON-RPC against it (set tools, stale/fresh `base_hash`, the `--live` guardrail), all on an isolated bus (`dbus-run-session`); neither touches the real session bus.
+`examples/fake_codjd.rs` serves the deck API (and a fake set runtime: sets `demo` and `broken`, 3 tracks, 2 mixes, an armed mix that advances) with plausible changing state and logs every call, `examples/dj_e2e.sh` runs codj against it in tmux (sets, capture and recording included, and phase 5: control hints, label selection, `] [ \ ;` edits, the mouse wheel as SGR mouse reports, the jump keys; it also serves a set's text and hash, with conflict detection on stale writes, for the editing methods), `examples/mcp_e2e.sh` drives `codj mcp` over JSON-RPC against it (set tools, stale/fresh `base_hash`, the `--live` guardrail), all on an isolated bus (`dbus-run-session`); neither touches the real session bus.
 
 # Configuration
 
