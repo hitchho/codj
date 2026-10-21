@@ -227,6 +227,27 @@ pub trait Server {
     /// warnings (not errors) of the set `name`, `file:line:col: message`
     async fn set_warnings(&self, name: &str) -> Result<Vec<String>>;
 
+    // patch decks, see docs/patches.md in the codjd repo; slots count from 0
+    /// (name, title) of every patch file
+    async fn patch_list(&self) -> Result<Vec<(String, String)>>;
+    /// (json, sha-256 hex hash) of a patch file
+    async fn patch_source(&self, name: &str) -> Result<(String, String)>;
+    /// errors of `json` as if saved (`<node>: message`), empty = valid
+    async fn patch_check(&self, json: &str) -> Result<Vec<String>>;
+    /// save after checking: `ok <new hash>` or the reason; empty `base_hash` creates
+    async fn patch_write(&self, name: &str, json: &str, base_hash: &str, author: &str) -> Result<String>;
+    /// import a NoiseCraft file: `ok <hash> (<notes>)`
+    async fn patch_import(&self, ncft_path: &str, name: &str, author: &str) -> Result<String>;
+    async fn patch_load(&self, slot: u32, name: &str) -> Result<String>;
+    async fn patch_unload(&self, slot: u32) -> Result<String>;
+    /// edit a loaded patch live: `action_json` is one op of the contract
+    async fn patch_action(&self, slot: u32, action_json: &str) -> Result<String>;
+    async fn patch_undo(&self, slot: u32) -> Result<String>;
+    async fn patch_redo(&self, slot: u32) -> Result<String>;
+    async fn patch_save(&self, slot: u32, name: &str, author: &str) -> Result<String>;
+    async fn patch_live(&self, slot: u32, live: bool) -> Result<String>;
+    async fn patch_state(&self) -> Result<Vec<dj_types::PatchSlot>>;
+
     async fn get_waveform(&self, path: &str, columns: u32) -> Result<Vec<u8>>;
     /// (xruns, second output underruns, second output skips, sample rate)
     async fn audio_health(&self) -> Result<(u64, u64, u64, u32)>;

@@ -122,6 +122,28 @@ impl SetState {
     }
 }
 
+/// One patch slot (P1..P4), see `docs/patches.md` in the codjd repo. D-Bus signature
+/// `(bssbbdsa(sddd)a(suuu)db)`; `PatchState` returns an array of these.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, Type)]
+pub struct PatchSlot {
+    pub loaded: bool,
+    pub name: String,
+    pub title: String,
+    pub dirty: bool,
+    /// sent to the master (else headphones only)
+    pub live: bool,
+    /// share of the audio callback, 0..1
+    pub cpu: f64,
+    /// "" or e.g. "cpu overrun"
+    pub muted_reason: String,
+    /// (name, value, min, max)
+    pub knobs: Vec<(String, f64, f64, f64)>,
+    /// (name, pattern, queued (u32::MAX = none), step)
+    pub sequencers: Vec<(String, u32, u32, u32)>,
+    pub fader: f64,
+    pub headphones: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,5 +156,7 @@ mod tests {
         );
         assert_eq!(<MixerInfo as Type>::SIGNATURE.to_string(), "(dddsbt)");
         assert_eq!(<SetState as Type>::SIGNATURE.to_string(), "(ssua(sss)a(ssdd)ibidba(ds))");
+        assert_eq!(<PatchSlot as Type>::SIGNATURE.to_string(), "(bssbbdsa(sddd)a(suuu)db)");
+        assert_eq!(<Vec<PatchSlot> as Type>::SIGNATURE.to_string(), "a(bssbbdsa(sddd)a(suuu)db)");
     }
 }
