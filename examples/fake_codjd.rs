@@ -13,6 +13,8 @@
 
 #[path = "../src/dj_types.rs"]
 mod dj_types;
+#[path = "../src/dj/patchdef.rs"]
+mod patchdef;
 #[path = "../src/types.rs"]
 mod types;
 
@@ -20,7 +22,8 @@ use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use dj_types::{DeckInfo, MixerInfo, SetState};
+use dj_types::{DeckInfo, MixerInfo, PatchSlot, SetState};
+use serde_json::{json, Value};
 use types::{OuterMusic, OuterPlaylist, PlayerStatus, PlayingStatus, Repeat, Sort};
 
 struct Deck {
@@ -236,6 +239,235 @@ struct Fake {
     log: Option<String>,
     /// set name -> text, for SetSource / SetCheck / SetWrite
     sources: Arc<Mutex<std::collections::BTreeMap<String, String>>>,
+    patches: Arc<Mutex<Patches>>,
+}
+
+/// One fake patch slot: the loaded patch is a JSON working copy with an undo stack
+#[derive(Default)]
+struct PSlot {
+    loaded: bool,
+    name: String,
+    doc: Value,
+    dirty: bool,
+    live: bool,
+    undo: Vec<Value>,
+    redo: Vec<Value>,
+    /// sequencer name -> (queued pattern, cycle it was queued in)
+    queued: std::collections::BTreeMap<String, (u32, u64)>,
+    fader: f64,
+    headphones: bool,
+}
+
+/// patch name -> file text, and the 4 slots; the step counter runs at 8 steps a second
+struct Patches {
+    files: std::collections::BTreeMap<String, String>,
+    slots: [PSlot; 4],
+    t0: Instant,
+}
+
+const STEPS_PER_S: f64 = 8.0;
+
+fn is_seq(n: &Value) -> bool {
+    matches!(n["type"].as_str(), Some("MonoSeq" | "GateSeq"))
+}
+
+/// the fake's PatchCheck: JSON, one AudioOut, known types
+fn patch_check(text: &str) -> Vec<String> {
+    let Ok(v) = serde_json::from_str::<Value>(text) else {
+        return vec!["patch: not valid JSON".into()];
+    };
+    let Some(nodes) = v["nodes"].as_object() else {
+        return vec!["patch: no nodes object".into()];
+    };
+    let mut errors = Vec::new();
+    for (id, n) in nodes {
+        match n["type"].as_str() {
+            Some(t) if patchdef::is_known_type(t) => {}
+            Some(t) => errors.push(format!("{id}: unknown type {t}")),
+            None => errors.push(format!("{id}: no type")),
+        }
+    }
+    if !nodes.values().any(|n| n["type"] == "AudioOut") {
+        errors.push("patch: no AudioOut node".into());
+    }
+    errors
+}
+
+impl Patches {
+    fn cycle_len_s(steps: f64) -> f64 {
+        steps / STEPS_PER_S
+    }
+
+    /// applies queued pattern switches whose bar has come
+    fn settle(&mut self) {
+        let t = self.t0.elapsed().as_secs_f64();
+        for slot in self.slots.iter_mut().filter(|s| s.loaded) {
+            let due: Vec<(String, u32)> = slot
+                .queued
+                .iter()
+                .filter(|(name, (_, cycle))| {
+                    let steps = steps_of(&slot.doc, name);
+                    (t / Self::cycle_len_s(steps)) as u64 > *cycle
+                })
+                .map(|(n, (p, _))| (n.clone(), *p))
+                .collect();
+            for (name, p) in due {
+                slot.queued.remove(&name);
+                if let Some(n) = seq_mut(&mut slot.doc, &name) {
+                    n["params"]["pattern"] = json!(p);
+                }
+            }
+        }
+    }
+
+    fn snapshot(&mut self) -> Vec<PatchSlot> {
+        self.settle();
+        let t = self.t0.elapsed().as_secs_f64();
+        self.slots
+            .iter()
+            .map(|s| {
+                if !s.loaded {
+                    return PatchSlot::default();
+                }
+                let nodes = s.doc["nodes"].as_object().cloned().unwrap_or_default();
+                let knobs = nodes
+                    .values()
+                    .filter(|n| n["type"] == "Knob")
+                    .map(|n| {
+                        let p = &n["params"];
+                        (n["name"].as_str().unwrap_or("").to_string(), p["value"].as_f64().unwrap_or(0.0), p["min"].as_f64().unwrap_or(0.0), p["max"].as_f64().unwrap_or(1.0))
+                    })
+                    .collect();
+                let sequencers = nodes
+                    .values()
+                    .filter(|n| is_seq(n))
+                    .map(|n| {
+                        let name = n["name"].as_str().unwrap_or("").to_string();
+                        let steps = n["params"]["steps"].as_f64().unwrap_or(16.0);
+                        let step = ((t * STEPS_PER_S) as u64 % steps as u64) as u32;
+                        let queued = s.queued.get(&name).map_or(u32::MAX, |q| q.0);
+                        (name, n["params"]["pattern"].as_u64().unwrap_or(0) as u32, queued, step)
+                    })
+                    .collect();
+                PatchSlot {
+                    loaded: true,
+                    name: s.name.clone(),
+                    title: s.doc["title"].as_str().unwrap_or("").to_string(),
+                    dirty: s.dirty,
+                    live: s.live,
+                    cpu: 0.04 + 0.01 * ((t * 3.0).sin() + 1.0),
+                    muted_reason: String::new(),
+                    knobs,
+                    sequencers,
+                    fader: s.fader,
+                    headphones: s.headphones,
+                }
+            })
+            .collect()
+    }
+}
+
+fn steps_of(doc: &Value, seq: &str) -> f64 {
+    doc["nodes"].as_object().and_then(|n| n.values().find(|n| is_seq(n) && n["name"] == seq)).and_then(|n| n["params"]["steps"].as_f64()).unwrap_or(16.0)
+}
+
+fn seq_mut<'a>(doc: &'a mut Value, name: &str) -> Option<&'a mut Value> {
+    doc["nodes"].as_object_mut()?.values_mut().find(|n| is_seq(n) && n["name"] == name)
+}
+
+/// Applies one `PatchAction` op to a slot's working copy; the message is the error
+fn apply_action(slot: &mut PSlot, a: &Value, cycle_of: &dyn Fn(f64) -> u64) -> Result<bool, String> {
+    let op = a["op"].as_str().ok_or("no op")?;
+    let before = slot.doc.clone();
+    let mut undoable = true;
+    match op {
+        "knob" => {
+            let name = a["name"].as_str().ok_or("no name")?;
+            let value = a["value"].as_f64().ok_or("no value")?;
+            let n = slot.doc["nodes"].as_object_mut().unwrap().values_mut().find(|n| n["type"] == "Knob" && n["name"] == name).ok_or(format!("no knob {name}"))?;
+            let (lo, hi) = (n["params"]["min"].as_f64().unwrap_or(0.0), n["params"]["max"].as_f64().unwrap_or(1.0));
+            n["params"]["value"] = json!(value.clamp(lo, hi));
+        }
+        "cell" => {
+            let seq = a["seq"].as_str().ok_or("no seq")?;
+            let (p, step, row) = (a["pattern"].as_u64().ok_or("no pattern")? as usize, a["step"].as_u64().ok_or("no step")?, a["row"].as_u64().ok_or("no row")?);
+            let on = a["on"].as_bool().ok_or("no on")?;
+            let vel = a["velocity"].as_f64().unwrap_or(1.0);
+            if p > 7 {
+                return Err("pattern 0..7".into());
+            }
+            let n = seq_mut(&mut slot.doc, seq).ok_or(format!("no sequencer {seq}"))?;
+            let gate = n["type"] == "GateSeq";
+            let pats = n["params"]["patterns"].as_array_mut().ok_or("no patterns")?;
+            while pats.len() <= p {
+                pats.push(json!({"steps": 16, "cells": []}));
+            }
+            let cells = pats[p]["cells"].as_array_mut().ok_or("no cells")?;
+            cells.retain(|c| !(c[0].as_u64() == Some(step) && c[1].as_u64() == Some(row)));
+            if on {
+                cells.push(if gate { json!([step, row, vel]) } else { json!([step, row]) });
+            }
+        }
+        "pattern" => {
+            undoable = false;
+            let seq = a["seq"].as_str().ok_or("no seq")?.to_string();
+            let p = a["pattern"].as_u64().ok_or("no pattern")? as u32;
+            if p > 7 {
+                return Err("pattern 0..7".into());
+            }
+            let steps = steps_of(&slot.doc, &seq);
+            let n = seq_mut(&mut slot.doc, &seq).ok_or(format!("no sequencer {seq}"))?;
+            if a["now"].as_bool().unwrap_or(false) {
+                n["params"]["pattern"] = json!(p);
+                slot.queued.remove(&seq);
+            } else {
+                slot.queued.insert(seq, (p, cycle_of(steps)));
+            }
+        }
+        "set_param" => {
+            let id = a["id"].as_str().ok_or("no id")?;
+            let n = slot.doc["nodes"].get_mut(id).ok_or(format!("{id}: no such node"))?;
+            n["params"][a["param"].as_str().ok_or("no param")?] = a["value"].clone();
+        }
+        "set_input" | "connect" | "disconnect" => {
+            let to = a["to"].as_array().ok_or("no to")?;
+            let id = to[0].as_str().unwrap_or("");
+            let input = to[1].as_str().unwrap_or("").to_string();
+            let n = slot.doc["nodes"].get_mut(id).ok_or(format!("{id}: no such node"))?;
+            match op {
+                "disconnect" => {
+                    if let Some(ins) = n["ins"].as_object_mut() {
+                        ins.remove(&input);
+                    }
+                }
+                "set_input" => n["ins"][&input] = a["value"].clone(),
+                _ => n["ins"][&input] = a["from"].clone(),
+            }
+        }
+        "add_node" => {
+            let id = a["id"].as_str().ok_or("no id")?.to_string();
+            let ty = a["type"].as_str().ok_or("no type")?;
+            if !patchdef::is_known_type(ty) {
+                return Err(format!("{id}: unknown type {ty}"));
+            }
+            slot.doc["nodes"][&id] = json!({"type": ty, "name": a["name"], "params": a["params"]});
+        }
+        "remove_node" => {
+            let id = a["id"].as_str().ok_or("no id")?;
+            slot.doc["nodes"].as_object_mut().unwrap().remove(id).ok_or(format!("{id}: no such node"))?;
+        }
+        "rename" => {
+            let id = a["id"].as_str().ok_or("no id")?;
+            slot.doc["nodes"].get_mut(id).ok_or(format!("{id}: no such node"))?["name"] = a["name"].clone();
+        }
+        other => return Err(format!("unknown op {other}")),
+    }
+    if undoable {
+        slot.undo.push(before);
+        slot.redo.clear();
+        slot.dirty = true;
+    }
+    Ok(undoable)
 }
 
 const DEMO_SOURCE: &str = "# demo set\ntrack warm \"Aftertekno\"\ntrack mid \"Smokin\"\ntrack peak \"Kaiku\"\nmix warm -> mid at bar 2 for 16 bars\n  bars 0-16 B fader 0 -> 1\n  bar 8 swap low\nmix mid -> peak at bar 2 for 8 bars\n  bar 0 B low kill\n";
@@ -809,6 +1041,159 @@ impl Fake {
         all.into_iter().take(n as usize).map(|(i, _)| i).collect()
     }
 
+    async fn patch_list(&self) -> Vec<(String, String)> {
+        self.log("PatchList".into());
+        self.patches
+            .lock()
+            .unwrap()
+            .files
+            .iter()
+            .map(|(n, t)| (n.clone(), serde_json::from_str::<Value>(t).ok().and_then(|v| v["title"].as_str().map(str::to_string)).unwrap_or_default()))
+            .collect()
+    }
+
+    async fn patch_source(&self, name: String) -> zbus::fdo::Result<(String, String)> {
+        self.log(format!("PatchSource {name}"));
+        match self.patches.lock().unwrap().files.get(&name) {
+            Some(t) => Ok((t.clone(), sha(t))),
+            None => Err(zbus::fdo::Error::Failed(format!("no patch named {name}"))),
+        }
+    }
+
+    async fn patch_check(&self, json: String) -> Vec<String> {
+        let errors = patch_check(&json);
+        self.log(format!("PatchCheck bytes={} errors={}", json.len(), errors.len()));
+        errors
+    }
+
+    async fn patch_write(&self, name: String, json: String, base_hash: String, author: String) -> String {
+        let mut p = self.patches.lock().unwrap();
+        let head = format!("PatchWrite {name} base={base_hash} author={author}");
+        match p.files.get(&name) {
+            Some(cur) if sha(cur) != base_hash => {
+                self.log(format!("{head} REFUSED stale"));
+                return "set changed since you read it".into();
+            }
+            None if !base_hash.is_empty() => {
+                self.log(format!("{head} REFUSED no such patch"));
+                return format!("no patch named {name}");
+            }
+            _ => {}
+        }
+        let errors = patch_check(&json);
+        if let Some(first) = errors.first() {
+            self.log(format!("{head} REFUSED errors={}", errors.len()));
+            return format!("refused: {} error(s): {first}", errors.len());
+        }
+        let hash = sha(&json);
+        self.log(format!("{head} ok hash={} text={}", &hash[..8], json.replace('\n', "\\n")));
+        p.files.insert(name, json);
+        format!("ok {hash}")
+    }
+
+    async fn patch_import(&self, ncft_path: String, name: String, author: String) -> String {
+        self.log(format!("PatchImport {ncft_path} {name} author={author}"));
+        if !ncft_path.ends_with(".ncft") || !std::path::Path::new(&ncft_path).exists() {
+            return format!("cannot read {ncft_path}");
+        }
+        let text = patchdef::template("acid", &name).unwrap();
+        let hash = sha(&text);
+        self.patches.lock().unwrap().files.insert(name, text);
+        format!("ok {hash} (dropped MidiIn, Scope)")
+    }
+
+    async fn patch_load(&self, slot: u32, name: String) -> String {
+        self.log(format!("PatchLoad {slot} {name}"));
+        let mut p = self.patches.lock().unwrap();
+        let Some(text) = p.files.get(&name).cloned() else { return format!("no patch named {name}") };
+        let Some(s) = p.slots.get_mut(slot as usize) else { return format!("no slot {slot}") };
+        let Ok(doc) = serde_json::from_str::<Value>(&text) else { return "invalid patch".into() };
+        *s = PSlot { loaded: true, name, doc, fader: 1.0, headphones: true, ..Default::default() };
+        "ok".into()
+    }
+
+    async fn patch_unload(&self, slot: u32) -> String {
+        self.log(format!("PatchUnload {slot}"));
+        match self.patches.lock().unwrap().slots.get_mut(slot as usize) {
+            Some(s) => {
+                *s = PSlot::default();
+                "ok".into()
+            }
+            None => format!("no slot {slot}"),
+        }
+    }
+
+    async fn patch_action(&self, slot: u32, action_json: String) -> String {
+        self.log(format!("PatchAction {slot} {action_json}"));
+        let Ok(a) = serde_json::from_str::<Value>(&action_json) else { return "action is not valid JSON".into() };
+        let mut p = self.patches.lock().unwrap();
+        let t0 = p.t0;
+        let Some(s) = p.slots.get_mut(slot as usize).filter(|s| s.loaded) else { return format!("slot {slot} is empty") };
+        let cycle_of = move |steps: f64| (t0.elapsed().as_secs_f64() / Patches::cycle_len_s(steps)) as u64;
+        match apply_action(s, &a, &cycle_of) {
+            Ok(_) => "ok".into(),
+            Err(e) => e,
+        }
+    }
+
+    async fn patch_undo(&self, slot: u32) -> String {
+        self.log(format!("PatchUndo {slot}"));
+        let mut p = self.patches.lock().unwrap();
+        let Some(s) = p.slots.get_mut(slot as usize).filter(|s| s.loaded) else { return format!("slot {slot} is empty") };
+        match s.undo.pop() {
+            Some(prev) => {
+                s.redo.push(std::mem::replace(&mut s.doc, prev));
+                s.dirty = !s.undo.is_empty();
+                "ok".into()
+            }
+            None => "nothing to undo".into(),
+        }
+    }
+
+    async fn patch_redo(&self, slot: u32) -> String {
+        self.log(format!("PatchRedo {slot}"));
+        let mut p = self.patches.lock().unwrap();
+        let Some(s) = p.slots.get_mut(slot as usize).filter(|s| s.loaded) else { return format!("slot {slot} is empty") };
+        match s.redo.pop() {
+            Some(next) => {
+                s.undo.push(std::mem::replace(&mut s.doc, next));
+                s.dirty = true;
+                "ok".into()
+            }
+            None => "nothing to redo".into(),
+        }
+    }
+
+    async fn patch_save(&self, slot: u32, name: String, author: String) -> String {
+        self.log(format!("PatchSave {slot} {name} author={author}"));
+        let mut p = self.patches.lock().unwrap();
+        let Some(s) = p.slots.get_mut(slot as usize).filter(|s| s.loaded) else { return format!("slot {slot} is empty") };
+        let text = serde_json::to_string_pretty(&s.doc).unwrap() + "\n";
+        s.dirty = false;
+        s.undo.clear();
+        s.redo.clear();
+        s.name = name.clone();
+        let hash = sha(&text);
+        p.files.insert(name, text);
+        format!("ok {hash}")
+    }
+
+    async fn patch_live(&self, slot: u32, live: bool) -> String {
+        self.log(format!("PatchLive {slot} {live}"));
+        match self.patches.lock().unwrap().slots.get_mut(slot as usize).filter(|s| s.loaded) {
+            Some(s) => {
+                s.live = live;
+                s.headphones = !live;
+                "ok".into()
+            }
+            None => format!("slot {slot} is empty"),
+        }
+    }
+
+    async fn patch_state(&self) -> Vec<PatchSlot> {
+        self.patches.lock().unwrap().snapshot()
+    }
+
     async fn dj_decks(&self) -> Vec<DeckInfo> {
         let mut st = self.st.lock().unwrap();
         st.advance();
@@ -866,6 +1251,14 @@ async fn main() -> zbus::Result<()> {
             recording: None,
         })),
         log: std::env::var("CODJ_FAKE_LOG").ok(),
+        patches: Arc::new(Mutex::new(Patches {
+            files: [("acid", "acid line"), ("pad1", "slow pad")]
+                .into_iter()
+                .map(|(n, t)| (n.to_string(), patchdef::template(if n == "acid" { "acid" } else { "pad" }, t).unwrap()))
+                .collect(),
+            slots: Default::default(),
+            t0: Instant::now(),
+        })),
         sources: Arc::new(Mutex::new(
             [("demo".to_string(), DEMO_SOURCE.to_string()), ("broken".to_string(), BROKEN_SOURCE.to_string())].into_iter().collect(),
         )),
