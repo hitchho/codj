@@ -93,6 +93,8 @@ pub struct LearnView<'a> {
     pub explain: Option<&'a str>,
     /// the active set's warnings
     pub warnings: usize,
+    /// the tutor pane, beside the library
+    pub tutor: Option<&'a super::tutor::TutorView>,
 }
 
 /// What the control hints need on screen
@@ -245,6 +247,9 @@ pub fn draw(buf: &mut Buffer, area: Rect, v: &View) -> Vec<Spot> {
         Some(_) => (0, panel_height(body_h, mixer_h, set_h + lib_h)),
         None => (set_h, lib_h),
     };
+    // the tutor pane never takes the decks' rows below a minimum: it shrinks the set strip first
+    let tutor = v.learn.tutor.filter(|_| v.panel.is_none());
+    let (set_h, lib_h) = if tutor.is_some() { tutor_layout(body_h, mixer_h, set_h, lib_h) } else { (set_h, lib_h) };
     let decks_h = body_h.saturating_sub(mixer_h + lib_h + set_h);
     let header = Rect::new(area.x, area.y, area.width, 1);
     let decks = Rect::new(area.x, area.y + 1, area.width, decks_h);
@@ -269,7 +274,19 @@ pub fn draw(buf: &mut Buffer, area: Rect, v: &View) -> Vec<Spot> {
     }
     draw_mixer(buf, mixer, v, &mut spots);
     if v.panel.is_none() {
-        draw_library(buf, lib, v);
+        match tutor {
+            Some(t) => {
+                // the library keeps the left side and the tutor takes the right; a narrow screen
+                // gives the tutor all of it
+                let tutor_w = if lib.width >= 100 { (lib.width / 2).clamp(48, 70) } else { lib.width };
+                let lib_w = lib.width - tutor_w;
+                if lib_w >= 24 {
+                    draw_library(buf, Rect::new(lib.x, lib.y, lib_w, lib.height), v);
+                }
+                draw_tutor(buf, Rect::new(lib.x + lib_w, lib.y, tutor_w, lib.height), t);
+            }
+            None => draw_library(buf, lib, v),
+        }
     }
     draw_status(buf, status, v);
     if let Some(lines) = v.overlay {
@@ -289,6 +306,65 @@ pub fn draw(buf: &mut Buffer, area: Rect, v: &View) -> Vec<Spot> {
         super::help::draw(buf, deck_rects, lower);
     }
     spots
+}
+
+/// Rows the decks keep while the tutor is open
+const DECKS_MIN_WITH_TUTOR: u16 = 10;
+
+/// (set strip rows, bottom rows) with the tutor open: the strip shrinks to a line on a medium
+/// screen and the bottom grows to what the tutor wants while the decks keep their minimum
+fn tutor_layout(body_h: u16, mixer_h: u16, set_h: u16, lib_h: u16) -> (u16, u16) {
+    let set_h = if body_h < 30 { set_h.min(1) } else { set_h };
+    let want = if body_h >= 30 { 10 } else if body_h >= 22 { 8 } else { 6 };
+    let room = body_h.saturating_sub(mixer_h + set_h + DECKS_MIN_WITH_TUTOR);
+    (set_h, lib_h.max(want.min(room)))
+}
+
+fn draw_tutor(buf: &mut Buffer, area: Rect, t: &super::tutor::TutorView) {
+    if area.width < 16 || area.height < 3 {
+        return;
+    }
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            buf[(x, y)].reset();
+        }
+    }
+    let title = if t.n > 0 { format!(" TUTOR {}/{} · {} ", t.n, super::tutor::Step::COUNT, t.title) } else { format!(" TUTOR · {} ", t.title) };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(Span::styled(title, Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)))
+        .title_bottom(Span::styled(format!(" {} ", t.footer), dim()));
+    let inner = block.inner(area);
+    block.render(area, buf);
+    let width = inner.width.saturating_sub(2) as usize;
+    let rows = inner.height as usize;
+    let why = crate::dj::glossary::wrap(&t.why, width);
+    let keys: Vec<&String> = t.keys.iter().collect();
+    // keys and the live checklist are what is acted on: they keep their rows, the why gives way
+    let acted = (keys.len() + t.live.len()).min(rows);
+    let why_rows = rows.saturating_sub(acted).min(why.len());
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, l) in why.iter().take(why_rows).enumerate() {
+        let text = if i + 1 == why_rows && why_rows < why.len() { format!("{}…", trunc(l, width.saturating_sub(1))) } else { l.clone() };
+        lines.push(Line::from(text));
+    }
+    for k in &keys {
+        lines.push(Line::from(vec![Span::styled("▸ ", Style::default().fg(Color::Yellow)), Span::styled(trunc(k, width.saturating_sub(2)), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))]));
+    }
+    for l in &t.live {
+        let style = if l.starts_with('✓') {
+            Style::default().fg(Color::Green)
+        } else if l.contains('►') || l.starts_with('★') {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            dim()
+        };
+        lines.push(Line::from(Span::styled(trunc(l, width), style)));
+    }
+    for (i, line) in lines.into_iter().take(rows).enumerate() {
+        buf.set_line(inner.x + 1, inner.y + i as u16, &line, inner.width.saturating_sub(2));
+    }
 }
 
 /// Height of a pane: what the strip and library had, grown to half the body while the decks keep
@@ -1790,6 +1866,67 @@ mod tests {
         let marks: &'static [(String, char)] = Box::leak(vec![("/m/hot.flac".to_string(), 'B')].into_boxed_slice());
         let text = render(120, 35, |v| v.learn.marks = marks);
         assert!(text.contains("★B"), "{text}");
+    }
+
+    fn tutor_view() -> &'static crate::dj::tutor::TutorView {
+        use crate::dj::tutor::*;
+        let t = Tutor::open(None, std::time::Instant::now());
+        let d = [deck_a(), deck_b()];
+        let mixer = MixerInfo { mode: "internal".into(), ..Default::default() };
+        let mut view = t.view(&d, &mixer, [None, None]);
+        view.n = 3;
+        view.title = Step::HearB.title().into();
+        view.why = Step::HearB.why().into();
+        view.keys = Step::HearB.keys().iter().map(|k| k.to_string()).collect();
+        view.live = live_lines(Step::HearB, &d, &mixer, [None, None], &Finding::Nothing);
+        Box::leak(Box::new(view))
+    }
+
+    #[test]
+    fn the_tutor_pane_sits_beside_the_library_and_never_hides_the_decks() {
+        let tv = tutor_view();
+        let plain = render(120, 35, |_| {});
+        let text = render(120, 35, |v| v.learn.tutor = Some(tv));
+        println!("{text}");
+        assert_eq!(text.lines().count(), 35);
+        for l in ["TUTOR 3/8", "Listen to B in headphones", "F2  headphones on B", "internal mode", "Tab skips · Esc pauses", "DECK A", "DECK B", "Mixer", "Library"] {
+            assert!(text.contains(l), "{l}\n{text}");
+        }
+        // the decks keep what they showed in the text rows, and have rows left for the waveforms
+        for l in ["Aftertekno — Pneumatix", "129.55 BPM", "01:23.4", "Smokin — Aasi & Swooh", "HP ●"] {
+            assert!(plain.contains(l) && text.contains(l), "{l}");
+        }
+        let deck_rows = text.lines().take_while(|l| !l.contains("Mixer")).count();
+        assert!(deck_rows >= 12, "{deck_rows} rows for the decks");
+        // the library stays on the left, readable
+        assert!(text.lines().any(|l| l.starts_with("│▸ Smokin")), "{text}");
+    }
+
+    #[test]
+    fn the_tutor_pane_degrades() {
+        let tv = tutor_view();
+        for (w, h) in [(140, 40), (120, 30), (100, 30), (80, 24), (70, 20), (60, 14)] {
+            for set in [false, true] {
+                let text = render(w, h, |v| {
+                    v.learn.tutor = Some(tv);
+                    if set {
+                        with_set(demo_set())(v);
+                    }
+                });
+                assert_eq!(text.lines().count(), h as usize);
+                assert!(text.contains("TUTOR") && text.contains("DECK A") && text.contains("DECK B"), "{w}x{h}\n{text}");
+                // keys of the step survive every size that has any room for them
+                if h >= 20 {
+                    assert!(text.contains("F2  headphones on B"), "{w}x{h}\n{text}");
+                }
+            }
+        }
+        // an open editor / prompt pane takes the rows instead
+        let text = render(120, 35, |v| {
+            v.learn.tutor = Some(tv);
+            v.panel = Some(Panel::Editor);
+        });
+        assert!(!text.contains("TUTOR 3/8"), "{text}");
     }
 
     #[test]

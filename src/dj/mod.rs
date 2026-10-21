@@ -16,6 +16,7 @@ pub mod hints;
 pub mod keys;
 pub mod mixnew;
 pub mod prompt;
+pub mod tutor;
 pub mod render;
 pub mod wave;
 
@@ -104,6 +105,10 @@ struct Shared {
     warn_sig: String,
     /// codjd has no `SetWarnings`: polling stops
     warn_missing: bool,
+    /// per deck: the beat grid of the loaded track (path it was fetched for), for bar counting
+    grids: [Option<(String, tutor::Grid)>; 2],
+    /// the tutor's search for a track pair
+    finding: tutor::Finding,
 }
 
 /// Short text for a D-Bus failure; an old codjd without the deck API gets a clear hint
@@ -450,6 +455,8 @@ impl Session {
             warnings: Vec::new(),
             warn_sig: String::new(),
             warn_missing: false,
+            grids: [None, None],
+            finding: tutor::Finding::Searching,
         }));
         let (tx, mut rx) = mpsc::unbounded_channel::<DjCall>();
         let (set_tx, mut set_rx) = mpsc::unbounded_channel::<SetCall>();
@@ -612,6 +619,35 @@ impl Session {
         });
     }
 
+    /// The tutor's search for two tracks with close tempos: `GetGrid` on a few tracks and
+    /// `SimilarTo` of the first, in a blocking task (see `tutor::find_pair` for the caps)
+    fn find_pair(&self, library: Vec<(String, String)>) {
+        self.shared.lock().unwrap().finding = tutor::Finding::Searching;
+        let (shared, conn) = (self.shared.clone(), self.conn.clone());
+        tokio::task::spawn_blocking(move || {
+            let h = tokio::runtime::Handle::current();
+            let found = h.block_on(ServerProxy::new(&conn)).ok().and_then(|proxy| {
+                tutor::find_pair(
+                    &library,
+                    |p| {
+                        h.block_on(async { tokio::time::timeout(CALL_TIMEOUT, proxy.similar_to(p, 8)).await.ok().and_then(|r| r.ok()).unwrap_or_default() })
+                            .into_iter()
+                            .map(|i| i as usize)
+                            .collect()
+                    },
+                    |p| {
+                        h.block_on(async {
+                            let g = tokio::time::timeout(CALL_TIMEOUT, proxy.get_grid(p)).await.ok()?.ok()?;
+                            // analysed, steady and not in doubt about half or double time
+                            (g.7 && !g.6 && !g.5).then_some(g.0)
+                        })
+                    },
+                )
+            });
+            shared.lock().unwrap().finding = found.map_or(tutor::Finding::Nothing, tutor::Finding::Found);
+        });
+    }
+
     /// Fetches the waveform for any loaded track we do not have one for yet
     fn ensure_waves(&self) {
         let mut s = self.shared.lock().unwrap();
@@ -627,7 +663,8 @@ impl Session {
                     if let Some(g) = grid {
                         let mut s = shared.lock().unwrap();
                         if s.doubt[i].as_ref().map(|(q, _)| q.as_str()) == Some(p.as_str()) {
-                            s.doubt[i] = Some((p, g.6));
+                            s.doubt[i] = Some((p.clone(), g.6));
+                            s.grids[i] = Some((p, tutor::Grid { first_beat_s: g.1, downbeat_offset: g.2, beats_per_bar: g.3 }));
                         }
                     }
                 });
@@ -721,6 +758,8 @@ pub enum Command {
     Help(String),
     /// `:mix new [recipe [bars]]`: no recipe lists them
     MixNew { recipe: Option<String>, bars: Option<u32> },
+    /// `:tutor [reset]`
+    Tutor { reset: bool },
     Nothing,
     Unknown(String),
 }
@@ -817,6 +856,11 @@ pub fn parse_command(cmd: &str) -> Command {
             capture::parse(w, &words.collect::<Vec<_>>()).unwrap_or(Command::Nothing)
         }
         Some("mix") => mixnew::parse(&words.collect::<Vec<_>>()),
+        Some("tutor") => match words.next() {
+            None => Command::Tutor { reset: false },
+            Some("reset") if words.next().is_none() => Command::Tutor { reset: true },
+            Some(_) => Command::Unknown("usage: tutor [reset]".into()),
+        },
         Some("e") => Command::Editor,
         None => Command::Nothing,
         Some(other) => Command::Unknown(format!(
@@ -852,6 +896,22 @@ impl Pane {
 
     pub fn selected_path(&self) -> Option<String> {
         self.selected().map(|m| <&std::path::Path>::from(&m.path).to_string_lossy().into_owned())
+    }
+
+    /// Moves the highlight to the track at `path` (the search filter is cleared to find it)
+    pub fn select_path(&mut self, path: &str) -> bool {
+        let at = |lib: &[Music]| lib.iter().position(|m| <&std::path::Path>::from(&m.path).to_string_lossy() == path);
+        if at(&self.lib).is_none() {
+            self.search.clear();
+            self.refilter();
+        }
+        match at(&self.lib) {
+            Some(i) => {
+                self.sel = i;
+                true
+            }
+            None => false,
+        }
     }
 
     pub fn start_search(&mut self) {
@@ -995,6 +1055,12 @@ pub struct DjScreen {
     knob: Option<crate::knob::Knob>,
     /// the `?` key map is up
     help: bool,
+    /// the guided first mix, while open or paused
+    tutor: Option<tutor::Tutor>,
+    /// the tutor has moved the library highlight to its pair's first / second track
+    tutor_sel: (bool, bool),
+    /// where the tutor saves its progress (None: not at all)
+    tutor_path: Option<std::path::PathBuf>,
 }
 
 impl DjScreen {
@@ -1017,6 +1083,9 @@ impl DjScreen {
             agent: Default::default(),
             knob: None,
             help: false,
+            tutor: None,
+            tutor_sel: (false, false),
+            tutor_path: tutor::state_path(),
         }
     }
 
@@ -1120,6 +1189,63 @@ impl DjScreen {
             } else {
                 format!("no help for {q:?}; did you mean: {}", near.join(", "))
             });
+        }
+    }
+
+    /// `:tutor` opens or resumes the guided mix, `:tutor reset` starts it over
+    fn tutor_command(&mut self, reset: bool) {
+        let now = Instant::now();
+        let mut search = false;
+        if reset {
+            match self.tutor.as_mut() {
+                Some(t) => t.restart(now),
+                None => {
+                    if let Some(p) = &self.tutor_path {
+                        tutor::forget(p);
+                    }
+                    self.tutor = Some(tutor::Tutor::open(self.tutor_path.clone(), now));
+                }
+            }
+            search = true;
+            self.set_note("tutor restarted from the first step");
+        } else {
+            match self.tutor.as_mut() {
+                Some(t) if t.visible => self.set_note("the tutor is open: Tab skips a step, Esc pauses it"),
+                Some(t) => t.resume(now),
+                None => {
+                    self.tutor = Some(tutor::Tutor::open(self.tutor_path.clone(), now));
+                    search = true;
+                }
+            }
+        }
+        self.tutor_sel = (false, false);
+        let at_pick = self.tutor.as_ref().is_some_and(|t| t.step == tutor::Step::Pick);
+        if search && at_pick {
+            let library = self.pane.all.iter().map(|m| (<&std::path::Path>::from(&m.path).to_string_lossy().into_owned(), m.title.clone())).collect();
+            self.session.find_pair(library);
+        }
+    }
+
+    /// The tutor looks at the decks; at step 1 it moves the library highlight to the proposal
+    fn tick_tutor(&mut self, decks: &[DeckInfo], mixer: &MixerInfo, now: Instant) {
+        let finding = self.session.shared.lock().unwrap().finding.clone();
+        let Some(t) = self.tutor.as_mut().filter(|t| t.visible) else { return };
+        t.finding = finding;
+        if t.update(decks, mixer, now).is_some() {
+            self.tutor_sel = (false, false);
+        }
+        if t.step != tutor::Step::Pick || self.pane.typing() {
+            return;
+        }
+        if let tutor::Finding::Found(p) = &t.finding {
+            let a_loaded = decks.first().is_some_and(|d| d.loaded && d.path == p.a.path);
+            if !self.tutor_sel.0 {
+                self.tutor_sel.0 = true;
+                self.pane.select_path(&p.a.path);
+            } else if a_loaded && !self.tutor_sel.1 {
+                self.tutor_sel.1 = true;
+                self.pane.select_path(&p.b.path);
+            }
         }
     }
 
@@ -1302,6 +1428,25 @@ impl DjScreen {
                 return Outcome::Stay;
             }
         }
+        // while the tutor is open Tab skips its step and Esc pauses it (Shift+Tab still searches)
+        if !self.pane.typing() && key.kind == KeyEventKind::Press && !self.keys.hints().active {
+            let selected = self.keys.hints().selected.is_some();
+            if let Some(t) = self.tutor.as_mut().filter(|t| t.visible) {
+                match key.code {
+                    KeyCode::Esc if !selected => {
+                        t.close();
+                        self.set_note("tutor paused: :tutor resumes where you left off");
+                        return Outcome::Stay;
+                    }
+                    KeyCode::Tab if !key.modifiers.contains(KeyModifiers::SHIFT) => {
+                        t.skip(now);
+                        self.tutor_sel = (false, false);
+                        return Outcome::Stay;
+                    }
+                    _ => {}
+                }
+            }
+        }
         if self.pane.typing() {
             return match self.pane.handle_typing(key) {
                 Some(cmd) => self.run_command(&cmd),
@@ -1408,6 +1553,7 @@ impl DjScreen {
             Command::Ai(text) => self.open_prompt(Some(text), Instant::now()),
             Command::Help(query) => self.help_command(&query),
             Command::MixNew { recipe, bars } => self.mix_new(recipe, bars),
+            Command::Tutor { reset } => self.tutor_command(reset),
             Command::Nothing => {}
             Command::Unknown(msg) => self.set_note(msg),
         }
@@ -1429,6 +1575,7 @@ impl DjScreen {
             p.tick();
         }
         self.poll_knob();
+        self.tick_tutor(&decks, &mixer, now);
         self.keys.set_snapshot(&decks, &mixer);
         let calls = self.keys.tick(now);
         self.session.send(calls);
@@ -1479,6 +1626,16 @@ impl DjScreen {
         } else {
             self.keys.hints().selected.map(|t| glossary::explain(t).to_string())
         };
+        // the tutor's pane and its proposal marks in the library
+        let grids = [0, 1].map(|i| s.grids[i].as_ref().filter(|(p, _)| *p == s.decks[i].path).map(|(_, g)| *g));
+        let tutor_view = self.tutor.as_ref().filter(|t| t.visible).map(|t| t.view(&s.decks, &s.mixer, grids));
+        let marks: Vec<(String, char)> = match self.tutor.as_ref() {
+            Some(t) if t.visible && t.step == tutor::Step::Pick => match &t.finding {
+                tutor::Finding::Found(p) => vec![(p.a.path.clone(), 'A'), (p.b.path.clone(), 'B')],
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        };
         let prompt_visible = self.prompt.as_ref().is_some_and(|p| p.visible);
         let hidden_note = self.prompt.as_ref().filter(|p| !p.visible).and_then(|p| p.hidden_note());
         let note = note.or(hidden_note.as_deref());
@@ -1522,9 +1679,10 @@ impl DjScreen {
             learn: render::LearnView {
                 help: self.help,
                 popup: s.popup.as_ref().map(|(t, l)| (t.as_str(), l.as_slice())),
-                marks: &[],
+                marks: &marks,
                 explain: explain.as_deref(),
                 warnings: s.warnings.len(),
+                tutor: tutor_view.as_ref(),
             },
         };
         let spots = render::draw(frame.buffer_mut(), area, &view);
@@ -1680,6 +1838,26 @@ mod tests {
             vec!["a.codj:1:1: bad".to_string(), "warning: a.codj:5:1: short".to_string()]
         );
         assert_eq!(errors_with_warnings(vec![], vec![]), Vec::<String>::new());
+    }
+
+    #[test]
+    fn tutor_command_and_highlighting_a_track() {
+        assert_eq!(parse_command("tutor"), Command::Tutor { reset: false });
+        assert_eq!(parse_command("tutor reset"), Command::Tutor { reset: true });
+        assert!(matches!(parse_command("tutor now"), Command::Unknown(_)));
+        assert!(matches!(parse_command("tutor reset now"), Command::Unknown(_)));
+        let mut p = pane();
+        assert!(p.select_path("/m/Hot minute.flac"));
+        assert_eq!(p.selected().unwrap().title, "Hot minute");
+        // a search that hides the track is cleared to find it
+        p.start_search();
+        type_str(&mut p, "smokin");
+        p.handle_typing(&key(KeyCode::Enter));
+        assert_eq!(p.lib.len(), 1);
+        assert!(p.select_path("/m/Aftertekno.flac"));
+        assert_eq!(p.lib.len(), 3);
+        assert_eq!(p.selected().unwrap().title, "Aftertekno");
+        assert!(!p.select_path("/m/none.flac"));
     }
 
     #[test]
