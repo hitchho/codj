@@ -210,6 +210,7 @@ Letters are the same in every terminal; `Alt` combinations are the mixer. Digits
 |`F1` / `F2`|Headphone cue on deck A / B|
 |`F5`|Quantize on / off (mixer-wide)|
 |`F6` / `F7` / `F8`|[Set](#sets-in-dj-mode): arm the next mix / auto mode on-off / disarm|
+|`F9`|[Record](#capture-and-recording) a mix into the active set on / off (same as `:rec`)|
 |`Up` / `Down`, `PageUp` / `PageDown`|Move in the library|
 |`<` or `Shift + a`|Load the highlighted track onto deck A (`Shift + ,`)|
 |`>` or `Shift + b`|Load it onto deck B (`Shift + .`)|
@@ -248,6 +249,21 @@ Mixes and tracks are numbered from 1 on screen (the bus counts from 0).
 
 While a set is active a strip sits between the decks and the mixer: the set name, `✓ no errors` or `✗ N errors` in red, `AUTO` when auto mode is on, the track list with the track on air (`▶`, green) and the incoming one (`»`, yellow) and the mixes as segments between them (`───16b▶` is a 16-bar mix, bold when armed). For the armed mix there is a progress bar over its length in bars with the current bar and a `◆` at each upcoming automation item, and below it the next items (`bar 16 · swap low`). Without an armed mix the strip lists the mixes and which one F6 would arm. It is 6 rows on a tall screen, 4 on a medium one and one line on a small one. `SetState` is polled at about 7 Hz while a set is active, once a second otherwise.
 
+## Capture and recording
+
+Playing by hand turns into set code: codjd writes the active set's file itself (line-level edits, comments and formatting stay, git commit or `.bak` per edit, see "Editing from codj" in `docs/set-language.md`). All of it needs an active set (`:set <name>`) and a codjd with the "Set editing" methods (`docs/dj-api.md`); the commands answer in the status line with codjd's reply.
+
+|Command|Does|
+|-------|----|
+|`:cue <name> [a\|b]`|Capture the deck's position as cue `name` (`cue drop bar 33` in that track's block; a track not yet in the set is added). Status line: `cue drop → aft bar 33`|
+|`:loopsave <name> [a\|b]`|Capture the deck's active loop as loop `name`|
+|`:gridsave [a\|b]`|Write the deck's current grid (after `:grid` corrections) into the set as a `grid` line|
+|`:rec` / `:rec on` / `:rec off`, `F9`|Start / stop recording a mix. While recording every control change on either deck (keys, MCP, D-Bus) is logged; stopping writes the `mix` block and says e.g. `recorded mix 2: aft → smk, 16 bars, 9 items`|
+
+Names are set-language identifiers (letters, digits, `_`, `-`, starting with a letter or `_`). Without `a` or `b` the deck is chosen by this rule: the deck that is playing; when both play, the louder one (channel fader times its share of the crossfader), on a tie the one on the crossfader's side (A when centered); when neither plays, the only loaded deck; otherwise the command asks for `a` or `b`.
+
+While recording the set strip shows a red `● REC 12.5 bars · 34 events` (bars of the outgoing deck's clock, events logged so far); `SetRecording` is polled at about 4 Hz while recording and once a second otherwise, so a recording started over MCP shows too.
+
 ## Hold and release
 
 Hold-to-preview cue, hold-to-nudge and the ramps need to know when a key is released. In terminals with the kitty keyboard protocol (kitty, foot, WezTerm, Ghostty, Alacritty) DJ mode asks for key press/repeat/release events while it is open (`DISAMBIGUATE_ESCAPE_CODES | REPORT_EVENT_TYPES | REPORT_ALL_KEYS_AS_ESCAPE_CODES`; letters only report releases with the last flag) and gives the extra flags back when you leave DJ mode, on exit and in the panic hook. While you type in the search box or command line the extra flags are off, so typed text arrives as text.
@@ -262,7 +278,7 @@ Auto-repeat of a tap key (play, sync, loop, hot cue, beat jump) is ignored.
 
 ## Testing without codjd's engine
 
-`examples/fake_codjd.rs` serves the deck API (and a fake set runtime: sets `demo` and `broken`, 3 tracks, 2 mixes, an armed mix that advances) with plausible changing state and logs every call, `examples/dj_e2e.sh` runs codj against it in tmux, all on an isolated bus (`dbus-run-session`); neither touches the real session bus.
+`examples/fake_codjd.rs` serves the deck API (and a fake set runtime: sets `demo` and `broken`, 3 tracks, 2 mixes, an armed mix that advances) with plausible changing state and logs every call, `examples/dj_e2e.sh` runs codj against it in tmux (sets, capture and recording included; it also serves a set's text and hash, with conflict detection on stale writes, for the editing methods), `examples/mcp_e2e.sh` drives `codj mcp` over JSON-RPC against it (set tools, stale/fresh `base_hash`, the `--live` guardrail), all on an isolated bus (`dbus-run-session`); neither touches the real session bus.
 
 # Configuration
 

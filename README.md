@@ -81,7 +81,22 @@ Waybar:
 
 Tools: `library`, `now_playing`, `queue`, `track_features`, `similar`, `analysis_status`, `play_index`, `toggle`, `next`, `previous`, `seek`, `set_volume`, `queue_add`, `queue_remove`, `queue_similar`, `deck_state`, `deck_load`, `deck_play`, `deck_pause`, `deck_seek`, `deck_set`, `audio_health`, `audio_devices`.
 
-Live guardrail: by default anything that changes what the audience hears is refused: `play_index`, `toggle`, `next`, `previous`, `seek`, `set_volume`, every `deck_*` call on deck 0 and `deck_set` of `master` or `crossfader`. Reads, queue edits and deck 1 (the cue deck) always work. Use `"args": ["mcp", "--live"]` to allow everything. State-changing calls are logged to stderr with a timestamp.
+Set tools (sets are `.codj` text files, see `docs/set-language.md` in the codjd repo; `set_language_help` returns a cheat sheet of the syntax):
+
+|Tool|Does|Class|
+|----|----|-----|
+|`sets_list`, `set_state`|Set files with error counts; the active set's tracks, mixes (0-based, file order) and runtime state|always|
+|`set_source`|`{text, hash}` of a set file as on disk|always|
+|`set_check`|Errors (`file:line:col: message`) of a text as if it were saved, nothing is written|always|
+|`set_write`|Save after checking; needs `base_hash` (the hash of the version you edited); the history names the author `agent:<MCP client name>`|always|
+|`set_use`|Make a set active|always|
+|`set_cue`, `set_loop_capture`, `set_grid_capture`|Capture a deck's position / loop / grid into the active set|always|
+|`set_record`|Start / stop recording a mix into the active set|always|
+|`set_arm`, `set_disarm`, `set_auto`, `set_preview`, `set_load`|Run the set: they start, stop or load audio|`--live` only|
+
+Workflow for an agent editing a set: `sets_list` -> `set_source` (keep the `hash`) -> edit the text, preferably one track or mix block, leaving the rest as it is -> `set_check` until `valid` -> `set_write` with `base_hash` = that hash. If it answers "set changed since you read it" (vim, codj or another agent saved meanwhile) call `set_source` again, redo the edit on the new text and write with the new hash. Writing a set never changes what is playing; a running mix keeps its plan and the edit applies to the next arm. Needs a codjd with the set editing methods (`docs/dj-api.md`, "Set editing" and "Set sources").
+
+Live guardrail: by default anything that changes what the audience hears is refused: `play_index`, `toggle`, `next`, `previous`, `seek`, `set_volume`, every `deck_*` call on deck 0 and `deck_set` of `master` or `crossfader`. The set runtime tools (`set_arm`, `set_disarm`, `set_auto`, `set_preview`, `set_load`) are refused the same way. Reads, queue edits, deck 1 (the cue deck) and set editing (sources, writes, captures, recording) always work. Use `"args": ["mcp", "--live"]` to allow everything. State-changing calls are logged to stderr with a timestamp.
 
 # Thanks to:
 - [Ratatui](https://github.com/ratatui-org/ratatui)
