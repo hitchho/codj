@@ -835,6 +835,8 @@ pub struct DjScreen {
     prompt: Option<prompt::Prompt>,
     /// `[agent]` from the config, for the prompt box
     agent: crate::parser::AgentSettings,
+    /// the hardware knob while DJ mode is open (dropping it releases the device)
+    knob: Option<crate::knob::Knob>,
 }
 
 impl DjScreen {
@@ -855,6 +857,7 @@ impl DjScreen {
             editor: None,
             prompt: None,
             agent: Default::default(),
+            knob: None,
         }
     }
 
@@ -865,6 +868,39 @@ impl DjScreen {
 
     pub fn set_agent(&mut self, agent: crate::parser::AgentSettings) {
         self.agent = agent;
+    }
+
+    /// Starts reading the hardware knob when the config names one (`[knob]`)
+    pub fn set_knob(&mut self, settings: &crate::parser::KnobSettings) {
+        self.knob = crate::knob::Knob::start(settings);
+    }
+
+    /// What the knob did: turning edits the selected control (else scrolls the library), pressing
+    /// resets it (else loads the highlighted track onto the free deck). Notes show in the status
+    /// line. Nothing acts while a text box or pane has the keyboard.
+    fn poll_knob(&mut self) {
+        use crate::knob::{KnobAction, Msg};
+        let Some(knob) = self.knob.as_ref() else { return };
+        for msg in knob.drain() {
+            match msg {
+                Msg::Note(n) => self.set_note(n),
+                Msg::Action(..) if self.typing() => {}
+                Msg::Action(KnobAction::Up, t) => self.wheel(true, t),
+                Msg::Action(KnobAction::Down, t) => self.wheel(false, t),
+                Msg::Action(KnobAction::Press, t) => {
+                    if !self.keys.press(t) {
+                        self.load_smart();
+                    }
+                }
+            }
+        }
+    }
+
+    /// load the highlighted track onto the deck that is not playing; both idle: A
+    fn load_smart(&mut self) {
+        let playing = |i: usize| self.session.shared.lock().unwrap().decks[i].playing;
+        let deck = if playing(0) && !playing(1) { 1 } else { 0 };
+        self.load(deck);
     }
 
     /// `:e` / F10: the editor pane on the active set
@@ -1099,12 +1135,7 @@ impl DjScreen {
             Nav::NoSelection => self.set_note("no control selected: f shows the hints, type a label to pick one"),
             // handled inside DjKeys, which owns the selection
             Nav::Hints | Nav::Toggle | Nav::Step(_) | Nav::Reset => {}
-            Nav::LoadSmart => {
-                // the deck that is not playing; both idle: A
-                let playing = |i: usize| self.session.shared.lock().unwrap().decks[i].playing;
-                let deck = if playing(0) && !playing(1) { 1 } else { 0 };
-                self.load(deck);
-            }
+            Nav::LoadSmart => self.load_smart(),
         }
         Outcome::Stay
     }
@@ -1185,6 +1216,7 @@ impl DjScreen {
         if let Some(p) = self.prompt.as_mut() {
             p.tick();
         }
+        self.poll_knob();
         self.keys.set_snapshot(&decks, &mixer);
         let calls = self.keys.tick(now);
         self.session.send(calls);

@@ -40,3 +40,16 @@ list = "/home/user/.config/codj/lua/list.lua"
 # live = false            # true: the agent's MCP server may arm/preview/load (codj mcp --live)
 # prompt_via = "stdin"    # "stdin": prompt on stdin; "arg": prompt as the last argument
 # mcp_tools = ["sets_list", "set_source", "set_check", "set_write"]   # allow-list, unset = all set tools
+
+[knob]
+# a hardware knob for DJ mode: a rotary encoder that sends volume keys (e.g. the one on a
+# keyboard's media cluster). Off unless `device` is set. Turning edits the control picked with
+# the hints (f in DJ mode), or scrolls the library when none is picked; pressing resets the
+# control, or loads the highlighted track onto the free deck. Only the three key codes below are
+# ever read from the device, everything else is dropped unseen.
+# device = "AK820 Consumer Control"   # part of the input device's name (see `evtest`)
+# up = 115                            # Linux input key codes: KEY_VOLUMEUP,
+# down = 114                          #   KEY_VOLUMEDOWN,
+# press = 113                         #   KEY_MUTE
+# grab = true                         # take the device exclusively while DJ mode is open, so the
+#                                     # system volume stays put (never for a device that types letters)

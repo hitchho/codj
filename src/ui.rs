@@ -374,6 +374,8 @@ pub struct UI<'a> {
     pub soulseek_config: Option<crate::parser::SoulseekSettings>,
     /// `[agent]` from the config file, for the DJ screen's prompt box
     pub agent_config: crate::parser::AgentSettings,
+    /// `[knob]` from the config, for DJ mode
+    pub knob_config: crate::parser::KnobSettings,
     /// the terminal speaks the kitty keyboard protocol (set by main)
     pub keyboard_enhanced: bool,
     /// live DJ mode, when on; it replaces the whole normal view
@@ -1333,6 +1335,7 @@ impl<'a> UI<'a> {
             soulseek_connected: false,
             soulseek_config: None,
             agent_config: Default::default(),
+            knob_config: Default::default(),
             keyboard_enhanced: false,
             dj: None,
             dj_kbd_pushed: false,
@@ -1362,6 +1365,7 @@ impl<'a> UI<'a> {
         let conn = self.state.proxy.inner().connection().clone();
         let mut dj = crate::dj::DjScreen::new(conn, library, self.dj_kbd_pushed);
         dj.set_agent(self.agent_config.clone());
+        dj.set_knob(&self.knob_config);
         self.dj = Some(Box::new(dj));
     }
 
@@ -1720,6 +1724,7 @@ impl<'a> UI<'a> {
         self.music_list.setp_szie = config.step_size.unwrap_or(7);
         self.geometry.configuration.lyrics = self.displayed_lyrics.displayable;
         self.agent_config = config.agent.clone().unwrap_or_default();
+        self.knob_config = config.knob.clone().unwrap_or_default();
 
         // store soulseek config for later connection via dbus
         if let Some(slsk) = &config.soulseek {

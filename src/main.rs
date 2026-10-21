@@ -35,6 +35,7 @@ mod bar;
 mod dedup;
 mod dj;
 mod dj_types;
+mod knob;
 mod mcp;
 mod search;
 mod settings;

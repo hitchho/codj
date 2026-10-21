@@ -63,6 +63,21 @@ pub struct AgentSettings {
     pub mcp_tools: Option<Vec<String>>,
 }
 
+/// `[knob]`: a hardware knob (rotary encoder sending volume keys) for DJ mode. Off unless `device`
+/// is set. Only the three key codes below are ever read from the device.
+#[derive(Deserialize, Serialize, Debug, Clone, Default)]
+pub struct KnobSettings {
+    /// part of the input device's name (`evtest` lists them), e.g. "AK820 Consumer Control"
+    pub device: Option<String>,
+    /// Linux input key codes: default 115 KEY_VOLUMEUP, 114 KEY_VOLUMEDOWN, 113 KEY_MUTE
+    pub up: Option<u16>,
+    pub down: Option<u16>,
+    pub press: Option<u16>,
+    /// take the device exclusively while DJ mode is open, so the system volume stays put
+    /// (default true; never done for a device that also types letters)
+    pub grab: Option<bool>,
+}
+
 #[derive(Deserialize, Serialize, Debug, Clone)]
 #[serde(tag = "config")]
 pub struct Config {
@@ -73,6 +88,7 @@ pub struct Config {
     pub step_size: Option<usize>,
     pub soulseek: Option<SoulseekSettings>,
     pub agent: Option<AgentSettings>,
+    pub knob: Option<KnobSettings>,
 }
 
 impl Default for Config {
@@ -85,6 +101,7 @@ impl Default for Config {
             step_size: Some(7),
             soulseek: None,
             agent: None,
+            knob: None,
         }
     }
 }
@@ -136,5 +153,20 @@ mod test {
         assert_eq!(a.mcp_tools, Some(vec!["set_check".to_string()]));
         let none: Config = basic_toml::from_str("fps = 20\n").unwrap();
         assert!(none.agent.is_none());
+    }
+
+    #[test]
+    fn parse_knob_settings() {
+        let conf: Config = basic_toml::from_str(
+            "[knob]\ndevice = \"AK820 Consumer Control\"\nup = 200\ngrab = false\n",
+        )
+        .unwrap();
+        let k = conf.knob.unwrap();
+        assert_eq!(k.device.as_deref(), Some("AK820 Consumer Control"));
+        assert_eq!(k.up, Some(200));
+        assert_eq!(k.down, None);
+        assert_eq!(k.grab, Some(false));
+        let none: Config = basic_toml::from_str("fps = 20\n").unwrap();
+        assert!(none.knob.is_none());
     }
 }
