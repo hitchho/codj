@@ -32,3 +32,11 @@ list = "/home/user/.config/codj/lua/list.lua"
 # prefer_free_slots = true          # rank peers with free upload slots higher
 # download_dir = "/home/user/Music/soulseek"
 # share_dir = "/home/user/Music/shared"  # optional, uses dummy file if not set
+
+[agent]
+# the AI agent behind the DJ screen's prompt box (:ai <text>, F11); codj holds no AI keys, the
+# command brings its own login. Split on spaces, "double quotes" group words.
+# command = "claude -p"
+# live = false            # true: the agent's MCP server may arm/preview/load (codj mcp --live)
+# prompt_via = "stdin"    # "stdin": prompt on stdin; "arg": prompt as the last argument
+# mcp_tools = ["sets_list", "set_source", "set_check", "set_write"]   # allow-list, unset = all set tools

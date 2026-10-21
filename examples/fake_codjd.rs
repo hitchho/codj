@@ -59,22 +59,6 @@ const SET_ITEMS: [&[(f64, &str)]; 2] = [
 /// The text of the set "demo" as the fake serves it through SetSource / SetWrite
 const DEMO_TEXT: &str = "# demo\nset \"demo: 3 tracks\"\n\ntrack warm \"Aftertekno\"\n  cue drop bar 33\n\ntrack mid \"Smokin\"\n\nmix warm -> mid at bar 3 over 16 bars\n  bar 0 mid play\n";
 
-/// opaque stand-in for the sha-256 of the text
-fn fake_hash(text: &str) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    text.hash(&mut h);
-    format!("{:016x}", h.finish())
-}
-
-/// `file:line:col: message` for every line with the word BAD in it
-fn fake_check(text: &str) -> Vec<String> {
-    text.lines()
-        .enumerate()
-        .filter_map(|(i, l)| l.find("BAD").map(|c| format!("demo.codj:{}:{}: syntax error near BAD", i + 1, c + 1)))
-        .collect()
-}
-
 struct State {
     decks: [Deck; 2],
     mixer: MixerInfo,
@@ -250,6 +234,31 @@ impl State {
 struct Fake {
     st: Arc<Mutex<State>>,
     log: Option<String>,
+    /// set name -> text, for SetSource / SetCheck / SetWrite
+    sources: Arc<Mutex<std::collections::BTreeMap<String, String>>>,
+}
+
+const DEMO_SOURCE: &str = "# demo set\ntrack warm \"Aftertekno\"\ntrack mid \"Smokin\"\ntrack peak \"Kaiku\"\nmix warm -> mid at bar 2 for 16 bars\n  bars 0-16 B fader 0 -> 1\n  bar 8 swap low\nmix mid -> peak at bar 2 for 8 bars\n  bar 0 B low kill\n";
+const BROKEN_SOURCE: &str = "# broken set\ntrack warm \"Aftertekno\"\nmix warm -> mid2 ERROR\n  bar 40 ERROR\n";
+
+fn sha(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// the fake's "check": an error for every line containing `ERROR` (editor e2e) or `BAD`
+/// (MCP e2e)
+fn fake_check(text: &str) -> Vec<String> {
+    text.lines()
+        .enumerate()
+        .filter_map(|(i, l)| {
+            if let Some(c) = l.find("ERROR") {
+                Some(format!("fake.codj:{}:{}: ERROR marker found: {}", i + 1, c + 1, l.trim()))
+            } else {
+                l.find("BAD").map(|c| format!("demo.codj:{}:{}: syntax error near BAD", i + 1, c + 1))
+            }
+        })
+        .collect()
 }
 
 impl Fake {
@@ -665,38 +674,6 @@ impl Fake {
         }
     }
 
-    async fn set_source(&self, name: String) -> zbus::fdo::Result<(String, String)> {
-        self.log(format!("SetSource {name}"));
-        match name.as_str() {
-            "demo" | "demo.codj" => {
-                let st = self.st.lock().unwrap();
-                Ok((st.text.clone(), fake_hash(&st.text)))
-            }
-            other => Err(zbus::fdo::Error::Failed(format!("no set named {other}"))),
-        }
-    }
-
-    async fn set_check(&self, text: String) -> Vec<String> {
-        self.log(format!("SetCheck {} bytes", text.len()));
-        fake_check(&text)
-    }
-
-    async fn set_write(&self, name: String, text: String, base_hash: String, author: String) -> String {
-        self.log(format!("SetWrite {name} base={base_hash} author={author} bytes={}", text.len()));
-        let mut st = self.st.lock().unwrap();
-        if !matches!(name.as_str(), "demo" | "demo.codj") {
-            return format!("no set named {name}");
-        }
-        if base_hash != fake_hash(&st.text) {
-            return "set changed since you read it".into();
-        }
-        if let Some(first) = fake_check(&text).into_iter().next() {
-            return first;
-        }
-        st.text = text;
-        format!("ok {}", fake_hash(&st.text))
-    }
-
     async fn set_state(&self) -> SetState {
         let mut st = self.st.lock().unwrap();
         st.advance();
@@ -705,10 +682,52 @@ impl Fake {
 
     async fn set_list(&self) -> Vec<(String, String, u32)> {
         self.log("SetList".into());
-        vec![
-            ("demo".into(), "/fake/sets/demo.codj".into(), 0),
-            ("broken".into(), "/fake/sets/broken.codj".into(), 2),
-        ]
+        self.sources
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(n, t)| (n.clone(), format!("/fake/sets/{n}.codj"), fake_check(t).len() as u32))
+            .collect()
+    }
+
+    async fn set_source(&self, name: String) -> zbus::fdo::Result<(String, String)> {
+        self.log(format!("SetSource {name}"));
+        match self.sources.lock().unwrap().get(&name) {
+            Some(t) => Ok((t.clone(), sha(t))),
+            None => Err(zbus::fdo::Error::Failed(format!("no set named {name}"))),
+        }
+    }
+
+    async fn set_check(&self, text: String) -> Vec<String> {
+        let errors = fake_check(&text);
+        self.log(format!("SetCheck lines={} errors={}", text.lines().count(), errors.len()));
+        errors
+    }
+
+    async fn set_write(&self, name: String, text: String, base_hash: String, author: String) -> String {
+        let mut sources = self.sources.lock().unwrap();
+        let escaped = text.replace('\n', "\\n");
+        let head = format!("SetWrite {name} base={base_hash} author={author}");
+        match sources.get(&name) {
+            Some(cur) if sha(cur) != base_hash => {
+                self.log(format!("{head} REFUSED stale"));
+                return "set changed since you read it".into();
+            }
+            None if !base_hash.is_empty() => {
+                self.log(format!("{head} REFUSED no such set"));
+                return format!("no set named {name}");
+            }
+            _ => {}
+        }
+        let errors = fake_check(&text);
+        if let Some(first) = errors.first() {
+            self.log(format!("{head} REFUSED errors={}", errors.len()));
+            return format!("refused: {} error(s): {first}", errors.len());
+        }
+        let hash = sha(&text);
+        self.log(format!("{head} ok hash={} text={escaped}", &hash[..8]));
+        sources.insert(name, text);
+        format!("ok {hash}")
     }
 
     async fn set_errors(&self, name: String) -> Vec<String> {
@@ -780,6 +799,9 @@ async fn main() -> zbus::Result<()> {
             recording: None,
         })),
         log: std::env::var("CODJ_FAKE_LOG").ok(),
+        sources: Arc::new(Mutex::new(
+            [("demo".to_string(), DEMO_SOURCE.to_string()), ("broken".to_string(), BROKEN_SOURCE.to_string())].into_iter().collect(),
+        )),
     };
     let _conn = zbus::connection::Builder::session()?
         .name("net.rotko.Codj")?

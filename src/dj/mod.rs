@@ -9,7 +9,9 @@
 //! fetched once per loaded track. None of this blocks the UI loop.
 
 pub mod capture;
+pub mod editor;
 pub mod keys;
+pub mod prompt;
 pub mod render;
 pub mod wave;
 
@@ -560,6 +562,10 @@ pub enum Command {
     GridSave(Option<u8>),
     /// `:rec on|off`, bare `:rec` toggles
     Record(Option<bool>),
+    /// `:e`: the in-TUI editor pane on the active set
+    Editor,
+    /// `:ai <text>`: run the agent on a request ("" opens the prompt box)
+    Ai(String),
     Nothing,
     Unknown(String),
 }
@@ -582,6 +588,11 @@ fn one_based(word: Option<&str>) -> Option<u32> {
 
 /// `:` commands inside DJ mode. Quitting codj is deliberately not one of them.
 pub fn parse_command(cmd: &str) -> Command {
+    if let Some(rest) = cmd.trim().strip_prefix("ai") {
+        if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            return Command::Ai(rest.trim().to_string());
+        }
+    }
     let mut words = cmd.split_whitespace();
     match words.next() {
         Some("q" | "quit" | "q!" | "dj" | "normal" | "back" | "x" | "wq") => Command::Exit,
@@ -649,9 +660,10 @@ pub fn parse_command(cmd: &str) -> Command {
         Some(w @ ("cue" | "loopsave" | "gridsave" | "rec" | "record")) => {
             capture::parse(w, &words.collect::<Vec<_>>()).unwrap_or(Command::Nothing)
         }
+        Some("e") => Command::Editor,
         None => Command::Nothing,
         Some(other) => Command::Unknown(format!(
-            "unknown DJ command: {other} (q: back, load a|b|<track>, grid a|b x2|/2|.., set [name], arm <n|next>, disarm, auto on|off, preview <n> [bars], errors, edit, cue <name> [a|b], loopsave <name> [a|b], gridsave [a|b], rec [on|off])"
+            "unknown DJ command: {other} (q: back, load a|b|<track>, grid a|b x2|/2|.., set [name], arm <n|next>, disarm, auto on|off, preview <n> [bars], errors, edit, e, ai <request>, cue <name> [a|b], loopsave <name> [a|b], gridsave [a|b], rec [on|off])"
         )),
     }
 }
@@ -816,6 +828,12 @@ pub struct DjScreen {
     note: Option<(String, Instant)>,
     /// `:edit` asked for the editor on this file; main suspends the terminal and runs it
     edit_request: Option<std::path::PathBuf>,
+    /// the in-TUI set editor, while open
+    editor: Option<editor::Editor>,
+    /// the AI prompt box and the agent run behind it
+    prompt: Option<prompt::Prompt>,
+    /// `[agent]` from the config, for the prompt box
+    agent: crate::parser::AgentSettings,
 }
 
 impl DjScreen {
@@ -833,12 +851,58 @@ impl DjScreen {
             pane: Pane::new(library),
             note,
             edit_request: None,
+            editor: None,
+            prompt: None,
+            agent: Default::default(),
         }
     }
 
     /// the search box or command line has the keyboard (text is typed, not performed)
     pub fn typing(&self) -> bool {
-        self.pane.typing()
+        self.pane.typing() || self.editor.is_some() || self.prompt.as_ref().is_some_and(|p| p.visible)
+    }
+
+    pub fn set_agent(&mut self, agent: crate::parser::AgentSettings) {
+        self.agent = agent;
+    }
+
+    /// `:e` / F10: the editor pane on the active set
+    fn open_editor(&mut self, now: Instant) {
+        if self.editor.is_some() {
+            return;
+        }
+        let Some((set, _)) = self.active_set() else { return };
+        // the pane takes every key and no release will reach the deck keys: end holds first
+        self.settle(now);
+        self.editor = Some(editor::Editor::new(Some(self.session.conn.clone()), &set.name, &set.file));
+    }
+
+    /// F11 / `:ai [text]`: the prompt box, or back to a running or finished run
+    fn open_prompt(&mut self, text: Option<String>, now: Instant) {
+        self.settle(now);
+        if let Some(p) = self.prompt.as_mut() {
+            if p.busy() || p.phase == prompt::Phase::Review {
+                p.visible = true;
+                if text.is_some() {
+                    self.set_note("an agent run is still going: Ctrl-C cancels it");
+                }
+                return;
+            }
+        }
+        self.prompt = Some(prompt::Prompt::new(Some(self.session.conn.clone()), self.agent.clone()));
+        if let Some(t) = text.filter(|t| !t.is_empty()) {
+            self.submit_prompt(t);
+        }
+    }
+
+    /// Builds the preamble from what the screen knows and starts the agent
+    fn submit_prompt(&mut self, request: String) {
+        let (set, decks, _) = self.set_snapshot();
+        let live = self.agent.live.unwrap_or(false);
+        let full = prompt::build_prompt(&request, set.as_ref().filter(|s| s.is_active()), &decks, live);
+        if let Some(p) = self.prompt.as_mut() {
+            p.start(full);
+        }
     }
 
     fn set_note(&mut self, text: impl Into<String>) {
@@ -969,6 +1033,26 @@ impl DjScreen {
 
     /// Handles a key; performance keys are queued for the next [`tick`]
     pub fn handle_key(&mut self, key: &KeyEvent, now: Instant) -> Outcome {
+        match editor::key_focus(self.editor.is_some(), self.prompt.as_ref().is_some_and(|p| p.visible)) {
+            editor::KeyFocus::Editor => {
+                if let Some(ed) = self.editor.as_mut() {
+                    if ed.on_key(key, now) == editor::EditorOutcome::Close {
+                        self.editor = None;
+                    }
+                }
+                return Outcome::Stay;
+            }
+            editor::KeyFocus::Prompt => {
+                let outcome = self.prompt.as_mut().map(|p| p.on_key(key));
+                match outcome {
+                    Some(prompt::PromptOutcome::Close) => self.prompt = None,
+                    Some(prompt::PromptOutcome::Submit(text)) => self.submit_prompt(text),
+                    _ => {}
+                }
+                return Outcome::Stay;
+            }
+            editor::KeyFocus::Deck => {}
+        }
         // Esc closes the error overlay first
         if key.code == KeyCode::Esc && key.kind != KeyEventKind::Release {
             if self.session.shared.lock().unwrap().overlay.take().is_some() {
@@ -1001,6 +1085,8 @@ impl DjScreen {
             Nav::LibPageUp => self.pane.scroll(-5),
             Nav::LibPageDown => self.pane.scroll(5),
             Nav::Load(d) => self.load(d),
+            Nav::Editor => self.open_editor(now),
+            Nav::Prompt => self.open_prompt(None, now),
             Nav::SetArmNext => self.set_arm(ArmTarget::Next),
             Nav::SetAuto => self.set_auto(None),
             Nav::SetDisarm => {
@@ -1060,6 +1146,8 @@ impl DjScreen {
             Command::LoopSave(name, d) => self.capture(|deck| SetCall::LoopSave(deck, name), d),
             Command::GridSave(d) => self.capture(SetCall::GridSave, d),
             Command::Record(on) => self.record(on),
+            Command::Editor => self.open_editor(Instant::now()),
+            Command::Ai(text) => self.open_prompt(Some(text), Instant::now()),
             Command::Nothing => {}
             Command::Unknown(msg) => self.set_note(msg),
         }
@@ -1072,6 +1160,14 @@ impl DjScreen {
             let s = self.session.shared.lock().unwrap();
             (s.decks.clone(), s.mixer.clone())
         };
+        if let Some(ed) = self.editor.as_mut() {
+            if ed.tick(now) == editor::EditorOutcome::Close {
+                self.editor = None;
+            }
+        }
+        if let Some(p) = self.prompt.as_mut() {
+            p.tick();
+        }
         self.keys.set_snapshot(&decks, &mixer);
         let calls = self.keys.tick(now);
         self.session.send(calls);
@@ -1109,6 +1205,16 @@ impl DjScreen {
             .filter(|(_, until)| now < *until)
             .max_by_key(|(_, until)| *until)
             .map(|(n, _)| n.as_str());
+        let prompt_visible = self.prompt.as_ref().is_some_and(|p| p.visible);
+        let hidden_note = self.prompt.as_ref().filter(|p| !p.visible).and_then(|p| p.hidden_note());
+        let note = note.or(hidden_note.as_deref());
+        let panel = if self.editor.is_some() {
+            Some(render::Panel::Editor)
+        } else if prompt_visible {
+            Some(render::Panel::Prompt)
+        } else {
+            None
+        };
         let view = View {
             decks: &s.decks,
             mixer: &s.mixer,
@@ -1127,8 +1233,16 @@ impl DjScreen {
             set: s.set.as_ref().filter(|x| x.is_active()),
             rec: s.rec.filter(|r| r.0).map(|r| (r.1, r.2)),
             overlay: s.overlay.as_deref(),
+            panel,
         };
         render::draw(frame.buffer_mut(), area, &view);
+        if let Some(r) = render::panel_rect(area, &view) {
+            if let Some(ed) = self.editor.as_mut() {
+                ed.render(frame.buffer_mut(), r);
+            } else if let Some(p) = self.prompt.as_ref().filter(|p| p.visible) {
+                p.render(frame.buffer_mut(), r);
+            }
+        }
     }
 }
 

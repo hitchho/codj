@@ -55,7 +55,7 @@ done
 check "set_write documents base_hash" 'jq -e ".result.tools[] | select(.name==\"set_write\") | .description | test(\"base_hash\")" <<<"$R" >/dev/null'
 
 tool sets_list '{}'
-check "sets_list lists demo" 'jq -e ".sets[0].name==\"demo\"" <<<"$T" >/dev/null'
+check "sets_list lists demo" 'jq -e "[.sets[].name] | index(\"demo\") != null" <<<"$T" >/dev/null'
 tool set_source '{"name":"demo"}'
 H1=$(jq -r .hash <<<"$T"); TEXT=$(jq -r .text <<<"$T")
 check "set_source returns text and hash" '[ -n "$H1" ] && grep -q "track warm" <<<"$TEXT"'

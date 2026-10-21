@@ -7,6 +7,9 @@
 #
 # Phase 2 drives the set runtime (:set, F6/F7/F8, :preview, :edit with a fake $EDITOR).
 # Phase 3 drives capture and recording (:cue, :loopsave, :gridsave, :rec, F9).
+# Phase 4 drives the editor pane (F10: insert, error marker, :w, write conflict) and the AI
+# prompt box (:ai with examples/fake_agent.sh as the agent: streamed output, diff, undo).
+# Needs busctl and jq (the fake agent and the conflict step talk to the fake codjd with them).
 #
 # tmux does not forward the kitty keyboard protocol, so this exercises the no-release fallback.
 set -u
@@ -113,4 +116,47 @@ $T kill-server
 kill $FAKE
 echo "== capture calls received by the fake"; cat "$W/calls-cap.log"
 echo "== codj stderr (capture phase)"; cat "$W/codj-cap.err"
+# --- phase 4: editor pane and AI prompt box
+export CODJ_FAKE_LOG=$W/calls-edit.log
+rm -f "$W"/calls-edit.log
+AGENT=$(cd "$(dirname "$0")" && pwd)/fake_agent.sh
+mkdir -p "$HOME/.config/codj"
+printf '[agent]\ncommand = "%s"\n' "$AGENT" > "$HOME/.config/codj/config.toml"
+"$BIN/examples/fake_codjd" 2>"$W/fake4.err" & FAKE=$!
+sleep 1
+S=djedit
+$T new-session -d -x 140 -y 40 -s $S "$BIN/codj 2>$W/codj-edit.err; sleep 30"
+sleep 2
+# literal text (no key names)
+typ() { $T send-keys -t $S -l -- "$1"; sleep 0.3; }
+bus() { busctl --user --json=short call net.rotko.Codj /net/rotko/Codj net.rotko.Codj.Player "$@"; }
+keys M; sleep 0.5
+cmd set\ demo
+keys F10; sleep 1; cap edit_open
+keys G i; typ 'mix peak -> warm ERROR here'; sleep 1; cap edit_insert_error   # still in insert mode
+keys Escape; sleep 0.9; cap edit_error_marker
+keys ':'; typ w; keys Enter; sleep 0.8; cap edit_write_refused               # SetWrite refuses: errors
+keys d d o; typ '  bar 4 A loop 2 beats'; keys Escape; sleep 0.9; cap edit_fixed
+keys ':'; typ w; keys Enter; sleep 0.8; cap edit_written
+# someone else saves, then we save on a stale hash
+hash=$(bus SetSource s demo | jq -r '.data[1]')
+bus SetWrite ssss demo "# demo set (saved elsewhere)
+track warm \"Aftertekno\"
+" "$hash" agent:other >/dev/null
+keys i; typ '# '; keys Escape
+keys ':'; typ w; keys Enter; sleep 1; cap edit_conflict
+keys d; sleep 0.4; cap edit_conflict_diff
+keys o; sleep 1; cap edit_overwritten
+keys Escape; sleep 0.5; cap edit_closed
+# the prompt box
+cmd ai\ make\ it\ longer
+sleep 1.3; cap ai_running
+sleep 3.5; cap ai_review
+keys n; sleep 1.2; cap ai_undone
+keys Escape; sleep 0.5; cap ai_closed
+keys z x; sleep 0.5                    # deck keys are live again
+$T kill-server
+kill $FAKE
+echo "== editor/prompt calls received by the fake"; cat "$W/calls-edit.log"
+echo "== codj stderr (editor phase)"; cat "$W/codj-edit.err"
 exit 0

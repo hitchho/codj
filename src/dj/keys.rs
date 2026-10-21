@@ -144,6 +144,10 @@ pub enum Nav {
     SetDisarm,
     /// start / stop recording a mix into the active set (F9)
     RecordToggle,
+    /// the set editor pane (F10)
+    Editor,
+    /// the AI prompt box (F11)
+    Prompt,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -222,6 +226,8 @@ pub fn bind(k: &NKey) -> Option<Binding> {
             (KeyCode::F(7), false) => Some(Nav(self::Nav::SetAuto)),
             (KeyCode::F(8), false) => Some(Nav(self::Nav::SetDisarm)),
             (KeyCode::F(9), false) => Some(Nav(self::Nav::RecordToggle)),
+            (KeyCode::F(10), false) => Some(Nav(self::Nav::Editor)),
+            (KeyCode::F(11), false) => Some(Nav(self::Nav::Prompt)),
             (KeyCode::Esc, false) => Some(Nav(self::Nav::Exit)),
             (KeyCode::Tab, false) => Some(Nav(self::Nav::Search)),
             (KeyCode::Up, false) => Some(Nav(self::Nav::LibUp)),
@@ -809,6 +815,8 @@ mod tests {
         assert_eq!(f(7), Some(Binding::Nav(Nav::SetAuto)));
         assert_eq!(f(8), Some(Binding::Nav(Nav::SetDisarm)));
         assert_eq!(f(9), Some(Binding::Nav(Nav::RecordToggle)));
+        assert_eq!(f(10), Some(Binding::Nav(Nav::Editor)));
+        assert_eq!(f(11), Some(Binding::Nav(Nav::Prompt)));
     }
 
     #[test]

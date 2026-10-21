@@ -211,6 +211,7 @@ Letters are the same in every terminal; `Alt` combinations are the mixer. Digits
 |`F5`|Quantize on / off (mixer-wide)|
 |`F6` / `F7` / `F8`|[Set](#sets-in-dj-mode): arm the next mix / auto mode on-off / disarm|
 |`F9`|[Record](#capture-and-recording) a mix into the active set on / off (same as `:rec`)|
+|`F10` / `F11`|[Editor pane / AI prompt box](#editor-pane-and-ai-prompt-box)|
 |`Up` / `Down`, `PageUp` / `PageDown`|Move in the library|
 |`<` or `Shift + a`|Load the highlighted track onto deck A (`Shift + ,`)|
 |`>` or `Shift + b`|Load it onto deck B (`Shift + .`)|
@@ -236,6 +237,8 @@ Mixes and tracks are numbered from 1 on screen (the bus counts from 0).
 |`:auto on` / `:auto off`|Auto mode: after a mix ends, the next one whose outgoing track is on air is armed (`:auto` alone toggles)|
 |`:preview <n> [bars]`|Audition mix `n`: both tracks loaded, the outgoing deck `bars` (default 8) before the mix start, armed and playing|
 |`:load <n>`|Load track `n` of the set onto the free deck with the set's grid/gain overrides (`:load a` / `:load b` still load the library selection)|
+|`:e`|The in-TUI editor pane on the active set (also `F10`), see below|
+|`:ai <text>`|Run the AI agent on a request (also `F11`), see below|
 |`:errors`|The active set's errors as `file:line:col: message` in an overlay; `Esc` closes it|
 |`:edit`|Open the set file in `$EDITOR` (else `$VISUAL`, else `vi`). The terminal is handed over (raw mode, alternate screen, mouse capture and keyboard-protocol flags are given back), the audio keeps playing, and everything is restored when the editor exits; codjd reloads the file when you save|
 
@@ -244,6 +247,8 @@ Mixes and tracks are numbered from 1 on screen (the bus counts from 0).
 |`F6`|Arm the next mix (same as `:arm next`); a mix that is armed but not yet started is not re-armed|
 |`F7`|Auto mode on / off|
 |`F8`|Disarm|
+|`F10`|Editor pane (same as `:e`)|
+|`F11`|AI prompt box (same as `:ai`); brings back a hidden run|
 
 `Enter` is not used for this: it loads the library selection onto the free deck.
 
@@ -263,6 +268,45 @@ Playing by hand turns into set code: codjd writes the active set's file itself (
 Names are set-language identifiers (letters, digits, `_`, `-`, starting with a letter or `_`). Without `a` or `b` the deck is chosen by this rule: the deck that is playing; when both play, the louder one (channel fader times its share of the crossfader), on a tie the one on the crossfader's side (A when centered); when neither plays, the only loaded deck; otherwise the command asks for `a` or `b`.
 
 While recording the set strip shows a red `● REC 12.5 bars · 34 events` (bars of the outgoing deck's clock, events logged so far); `SetRecording` is polled at about 4 Hz while recording and once a second otherwise, so a recording started over MCP shows too.
+
+## Editor pane and AI prompt box
+
+Both need a codjd with `SetSource` / `SetCheck` / `SetWrite` ("Set sources" in `docs/dj-api.md`); against an older codjd they say `codjd has no SetSource: update codjd`. Both take the rows of the library and the set strip; the decks and the mixer stay visible. **While one is open the DJ keys are off**: the header turns magenta (`EDIT` / `AI`, "DJ keys are OFF while typing here") and every key goes to the pane. Key-release reporting is switched off meanwhile, like in the search box, so typed text arrives as text.
+
+### Editor (`:e` or `F10`)
+
+The active set's source in a vim-style editor ([edtui](https://crates.io/crates/edtui)): normal / insert / visual, motions, `dd`, `yy` / `p`, `u` / `Ctrl-r`, `/` search with `n` / `N`.
+
+|Key|Does|
+|---|----|
+|`Esc` in normal mode, `:q`|Close the pane (the deck keys are live again). With unsaved text `:q` refuses, `Esc` warns once and a second `Esc` (or `:q!`) discards|
+|`:w` or `Ctrl-s`|`SetWrite` with author `human` and the hash the text was read at. Refused texts (errors) show the reason in the last line|
+|`:wq` / `:x`|Write, then close once the write worked|
+|`:e!`|Read the source again, dropping your edits|
+
+Errors: the text is sent to `SetCheck` 400 ms after the last edit. Every `file:line:col: message` becomes a red `✗` in the gutter of its line, the title shows `✗ N`, and the message of the cursor's line is shown under the text. A message without a position is shown there too.
+
+If somebody else saved first (vim, an agent, a capture) `:w` is refused with "set changed since you read it" and the pane asks: `r` reload theirs (your edits are discarded), `d` view the diff (theirs to yours, `j` / `k` scroll), `o` overwrite (reads the current hash, then writes yours), `Esc` keep editing. `:edit` still hands the file to `$EDITOR`.
+
+### AI prompt box (`:ai <text>` or `F11`)
+
+`:ai make the second mix longer` (or `F11`, type, `Enter`) runs the agent from `[agent]` in the config as a child process. codj holds no AI keys: the command brings its own login.
+
+What it gets: a preamble (the active set's name and file, its tracks and mixes, both decks' track / BPM / key / position, and the rules: edit sets only through the codj MCP set tools, `set_check` before `set_write`, never touch audio unless live) followed by your text, on stdin or as the last argument (`prompt_via`). codj's MCP server is attached:
+
+- `claude` (the command's program name): `claude -p --mcp-config <tmp>.json --strict-mcp-config --tools "" --allowedTools mcp__codj__sets_list,mcp__codj__set_source,... ` and the prompt on stdin. The temp JSON is `{"mcpServers":{"codj":{"command":"<this codj binary>","args":["mcp"]}}}` (`"args":["mcp","--live"]` when `live = true`) and is deleted when the run ends. `--tools ""` turns off Claude's own file and shell tools, so the set tools are all it can use.
+- any other command: the same JSON file is written and named in the environment: `CODJ_MCP_CONFIG=<path>`, `CODJ_MCP_LIVE=0|1`, `CODJ_MCP_TOOLS=mcp__codj__set_check,...`. A wrapper script passes them on to its agent.
+
+The output (stdout and stderr) streams into the pane; the UI and the audio-facing polling never wait for it. `Ctrl-C` kills the child. `Esc` hides the pane (the agent keeps running; the status line says so and `F11` brings it back) so the deck keys work during a run. When the child exits, codj reads every set again and compares hashes: for each set the agent changed (or created) it shows a unified diff. `y` keeps; `n` undoes by writing the old text back with `SetWrite` (author `human`, on the hash the agent left, so a save made since refuses the undo; the pane notes "undo agent change"). A set the agent created is left in place.
+
+`[agent]` in the config:
+
+|field|default|description|
+|-----|-------|-----------|
+|`command`|`claude -p`|The agent command line; spaces split, `"double quotes"` group|
+|`live`|`false`|`true` passes `--live` to `codj mcp`, so the agent may arm / preview / load (it changes what the audience hears)|
+|`prompt_via`|`"stdin"`|`"stdin"` or `"arg"` (last argument; for `claude` after `--`)|
+|`mcp_tools`|all set tools (+ live ones when `live`)|Allow-list of MCP tool names, without the `mcp__codj__` prefix|
 
 ## Hold and release
 
