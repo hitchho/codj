@@ -8,6 +8,7 @@
 //! state, an executor task sends the calls the keys produce (coalesced), and waveforms are
 //! fetched once per loaded track. None of this blocks the UI loop.
 
+pub mod capture;
 pub mod keys;
 pub mod render;
 pub mod wave;
@@ -37,6 +38,9 @@ const NOTE_FOR: Duration = Duration::from_secs(6);
 /// the set runtime is polled every 4th tick (~7.5 Hz) while a set is active, else once a second
 const SET_POLL_ACTIVE: u32 = 4;
 const SET_POLL_IDLE: u32 = 30;
+/// ~4 Hz while recording, once a second otherwise (to notice a recording started from elsewhere)
+const REC_POLL_ACTIVE: u32 = 7;
+const REC_POLL_IDLE: u32 = 30;
 
 #[derive(Clone)]
 pub enum WaveSlot {
@@ -73,6 +77,12 @@ struct Shared {
     set_poll_error: Option<String>,
     /// a set call finished: poll again now
     set_poll_now: bool,
+    /// a record call finished: poll the recording again now
+    rec_poll_now: bool,
+    /// `SetRecording`: (recording, beats, events); None until the first good poll
+    rec: Option<(bool, f64, u32)>,
+    /// codjd has no `SetRecording`: polling stops
+    rec_missing: bool,
     /// feedback of a set command (list, "armed mix 2"), shown like a note
     info: Option<(String, Instant)>,
     /// the active set's errors, drawn over the decks until Esc
@@ -113,6 +123,11 @@ pub enum SetCall {
     Load(u32),
     List,
     Errors(String),
+    /// capture cue / loop `name` from this deck
+    Cue(u32, String),
+    LoopSave(u32, String),
+    GridSave(u32),
+    Record(bool),
 }
 
 impl SetCall {
@@ -126,6 +141,10 @@ impl SetCall {
             SetCall::Load(_) => "SetLoad",
             SetCall::List => "SetList",
             SetCall::Errors(_) => "SetErrors",
+            SetCall::Cue(..) => "SetCue",
+            SetCall::LoopSave(..) => "SetLoopCapture",
+            SetCall::GridSave(_) => "SetGridCapture",
+            SetCall::Record(_) => "SetRecord",
         }
     }
 
@@ -140,8 +159,27 @@ impl SetCall {
             SetCall::Preview(m, bars) => format!("previewing mix {} from {bars} bars before", m + 1),
             SetCall::Load(t) => format!("loaded track {}", t + 1),
             SetCall::List | SetCall::Errors(_) => String::new(),
+            SetCall::Cue(d, n) => format!("cue {n} saved from deck {}", deck_letter(*d)),
+            SetCall::LoopSave(d, n) => format!("loop {n} saved from deck {}", deck_letter(*d)),
+            SetCall::GridSave(d) => format!("grid of deck {} saved", deck_letter(*d)),
+            SetCall::Record(true) => "recording: play the mix, F9 or :rec off stops".into(),
+            SetCall::Record(false) => "recording stopped".into(),
         }
     }
+
+    /// what to say when codjd answered `ok <detail>`
+    fn done_with(&self, detail: &str) -> String {
+        let text = capture::pretty_reply(detail);
+        match self {
+            SetCall::Record(false) => format!("recorded {text}"),
+            SetCall::Record(true) => format!("recording: {text}"),
+            _ => text,
+        }
+    }
+}
+
+fn deck_letter(d: u32) -> char {
+    if d == 0 { 'A' } else { 'B' }
 }
 
 /// `:set` output: the sets with their error counts
@@ -172,6 +210,10 @@ async fn run_set_call(proxy: &ServerProxy<'_>, call: &SetCall) -> zbus::Result<S
         SetCall::Load(t) => SetReply::Status(proxy.set_load(*t).await?),
         SetCall::List => SetReply::List(proxy.set_list().await?),
         SetCall::Errors(n) => SetReply::Errors(proxy.set_errors(n).await?),
+        SetCall::Cue(d, n) => SetReply::Status(proxy.set_cue(*d, n).await?),
+        SetCall::LoopSave(d, n) => SetReply::Status(proxy.set_loop_capture(*d, n).await?),
+        SetCall::GridSave(d) => SetReply::Status(proxy.set_grid_capture(*d).await?),
+        SetCall::Record(on) => SetReply::Status(proxy.set_record(*on).await?),
     })
 }
 
@@ -243,6 +285,32 @@ async fn poll_set(proxy: &ServerProxy<'_>, shared: &Arc<Mutex<Shared>>, tick: u3
     }
 }
 
+/// Reads `SetRecording` when it is due: ~4 Hz while recording, once a second otherwise
+async fn poll_recording(proxy: &ServerProxy<'_>, shared: &Arc<Mutex<Shared>>, tick: u32) {
+    let due = {
+        let mut s = shared.lock().unwrap();
+        let every = if s.rec.is_some_and(|r| r.0) { REC_POLL_ACTIVE } else { REC_POLL_IDLE };
+        let forced = std::mem::take(&mut s.rec_poll_now);
+        !s.rec_missing && (forced || tick % every == 0)
+    };
+    if !due {
+        return;
+    }
+    let reply = tokio::time::timeout(CALL_TIMEOUT, proxy.set_recording()).await;
+    let mut s = shared.lock().unwrap();
+    match reply {
+        Ok(Ok(state)) => s.rec = Some(state),
+        Ok(Err(e)) => {
+            let text = e.to_string();
+            if text.contains("UnknownMethod") || text.contains("Unknown method") || text.contains("No such method") {
+                s.rec_missing = true;
+                s.rec = None;
+            }
+        }
+        Err(_) => {}
+    }
+}
+
 impl Session {
     pub fn start(conn: Connection) -> Session {
         let shared = Arc::new(Mutex::new(Shared {
@@ -256,6 +324,9 @@ impl Session {
             set_missing: false,
             set_poll_error: None,
             set_poll_now: false,
+            rec: None,
+            rec_missing: false,
+            rec_poll_now: false,
             info: None,
             overlay: None,
         }));
@@ -273,6 +344,7 @@ impl Session {
                 loop {
                     every.tick().await;
                     poll_set(&proxy, &shared, tick).await;
+                    poll_recording(&proxy, &shared, tick).await;
                     tick = tick.wrapping_add(1);
                     let both = tokio::time::timeout(CALL_TIMEOUT, async {
                         let decks = proxy.dj_decks().await.map_err(|e| describe_error("DjDecks", &e))?;
@@ -332,6 +404,9 @@ impl Session {
                         Ok(Ok(SetReply::Status(r))) if r == "ok" || r.is_empty() => {
                             s.info = Some((call.done(), now + NOTE_FOR));
                         }
+                        Ok(Ok(SetReply::Status(r))) if r.starts_with("ok ") => {
+                            s.info = Some((call.done_with(&r[3..]), now + NOTE_FOR));
+                        }
                         Ok(Ok(SetReply::Status(r))) => s.call_error = Some((format!("{}: {r}", call.name()), now)),
                         Ok(Ok(SetReply::List(sets))) => s.info = Some((format_set_list(&sets), now + NOTE_FOR * 2)),
                         Ok(Ok(SetReply::Errors(lines))) => {
@@ -341,6 +416,7 @@ impl Session {
                         Err(_) => s.call_error = Some((format!("{}: codjd does not answer", call.name()), now)),
                     }
                     s.set_poll_now = true;
+                    s.rec_poll_now = true;
                 }
             })
         };
@@ -474,6 +550,12 @@ pub enum Command {
     SetLoad(u32),
     SetErrors,
     SetEdit,
+    /// `:cue <name> [a|b]`: capture the deck's position (None = the deck rule of `capture::pick_deck`)
+    Cue(String, Option<u8>),
+    LoopSave(String, Option<u8>),
+    GridSave(Option<u8>),
+    /// `:rec on|off`, bare `:rec` toggles
+    Record(Option<bool>),
     Nothing,
     Unknown(String),
 }
@@ -560,9 +642,12 @@ pub fn parse_command(cmd: &str) -> Command {
         }
         Some("errors") => Command::SetErrors,
         Some("edit") => Command::SetEdit,
+        Some(w @ ("cue" | "loopsave" | "gridsave" | "rec" | "record")) => {
+            capture::parse(w, &words.collect::<Vec<_>>()).unwrap_or(Command::Nothing)
+        }
         None => Command::Nothing,
         Some(other) => Command::Unknown(format!(
-            "unknown DJ command: {other} (q: back, load a|b|<track>, grid a|b x2|/2|.., set [name], arm <n|next>, disarm, auto on|off, preview <n> [bars], errors, edit)"
+            "unknown DJ command: {other} (q: back, load a|b|<track>, grid a|b x2|/2|.., set [name], arm <n|next>, disarm, auto on|off, preview <n> [bars], errors, edit, cue <name> [a|b], loopsave <name> [a|b], gridsave [a|b], rec [on|off])"
         )),
     }
 }
@@ -831,6 +916,42 @@ impl DjScreen {
         self.session.set_call(SetCall::Errors(set.name));
     }
 
+    /// the deck to capture from: the one named, else by the rule in `capture::pick_deck`
+    fn capture_deck(&mut self, named: Option<u8>) -> Option<u32> {
+        if let Some(d) = named {
+            return Some(d as u32);
+        }
+        let (decks, mixer) = {
+            let s = self.session.shared.lock().unwrap();
+            (s.decks.clone(), s.mixer.clone())
+        };
+        match capture::pick_deck(&decks, &mixer) {
+            Ok(d) => Some(d),
+            Err(e) => {
+                self.set_note(e);
+                None
+            }
+        }
+    }
+
+    fn capture(&mut self, make: impl FnOnce(u32) -> SetCall, named: Option<u8>) {
+        if self.active_set().is_none() {
+            return;
+        }
+        if let Some(deck) = self.capture_deck(named) {
+            self.session.set_call(make(deck));
+        }
+    }
+
+    /// `None` toggles by the last polled state
+    fn record(&mut self, on: Option<bool>) {
+        if self.active_set().is_none() {
+            return;
+        }
+        let recording = self.session.shared.lock().unwrap().rec.is_some_and(|r| r.0);
+        self.session.set_call(SetCall::Record(on.unwrap_or(!recording)));
+    }
+
     fn load(&mut self, deck: u8) {
         match (self.pane.selected_path(), self.pane.selected()) {
             (Some(path), Some(m)) => {
@@ -883,6 +1004,7 @@ impl DjScreen {
                     self.session.set_call(SetCall::Disarm);
                 }
             }
+            Nav::RecordToggle => self.record(None),
             Nav::LoadSmart => {
                 // the deck that is not playing; both idle: A
                 let playing = |i: usize| self.session.shared.lock().unwrap().decks[i].playing;
@@ -930,6 +1052,10 @@ impl DjScreen {
             }
             Command::SetErrors => self.set_errors(),
             Command::SetEdit => self.set_edit(),
+            Command::Cue(name, d) => self.capture(|deck| SetCall::Cue(deck, name), d),
+            Command::LoopSave(name, d) => self.capture(|deck| SetCall::LoopSave(deck, name), d),
+            Command::GridSave(d) => self.capture(SetCall::GridSave, d),
+            Command::Record(on) => self.record(on),
             Command::Nothing => {}
             Command::Unknown(msg) => self.set_note(msg),
         }
@@ -995,6 +1121,7 @@ impl DjScreen {
             lib_sel: self.pane.sel,
             release_events: self.keys.release_events(),
             set: s.set.as_ref().filter(|x| x.is_active()),
+            rec: s.rec.filter(|r| r.0).map(|r| (r.1, r.2)),
             overlay: s.overlay.as_deref(),
         };
         render::draw(frame.buffer_mut(), area, &view);
@@ -1117,6 +1244,20 @@ mod tests {
         assert_eq!(parse_command("grid a reset"), Command::Grid(0, 0.));
         assert!(matches!(parse_command("grid c x2"), Command::Unknown(_)));
         assert!(matches!(parse_command("qa!"), Command::Unknown(_)));
+    }
+
+    #[test]
+    fn capture_commands_and_replies() {
+        assert_eq!(parse_command("cue drop"), Command::Cue("drop".into(), None));
+        assert_eq!(parse_command("cue drop b"), Command::Cue("drop".into(), Some(1)));
+        assert_eq!(parse_command("loopsave brk a"), Command::LoopSave("brk".into(), Some(0)));
+        assert_eq!(parse_command("gridsave"), Command::GridSave(None));
+        assert_eq!(parse_command("rec"), Command::Record(None));
+        assert_eq!(parse_command("rec off"), Command::Record(Some(false)));
+        assert!(matches!(parse_command("cue"), Command::Unknown(_)));
+        assert_eq!(SetCall::Record(false).done_with("mix 2: aft -> smk, 16 bars, 9 items"), "recorded mix 2: aft → smk, 16 bars, 9 items");
+        assert_eq!(SetCall::Cue(0, "drop".into()).done_with("cue drop -> aft bar 33"), "cue drop → aft bar 33");
+        assert_eq!(SetCall::Cue(1, "drop".into()).name(), "SetCue");
     }
 
     #[test]

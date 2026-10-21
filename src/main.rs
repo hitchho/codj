@@ -201,6 +201,24 @@ pub trait Server {
     /// `file:line:col: message` per error of a set's latest save
     async fn set_errors(&self, name: &str) -> Result<Vec<String>>;
 
+    // set editing and sources, see "Set editing (D-Bus)" and "Set sources" in docs/dj-api.md
+    /// capture the deck's position as cue `name` into the active set
+    async fn set_cue(&self, deck: u32, name: &str) -> Result<String>;
+    /// capture the deck's active loop as loop `name`
+    async fn set_loop_capture(&self, deck: u32, name: &str) -> Result<String>;
+    /// write the deck's current grid into the set as a `grid` line
+    async fn set_grid_capture(&self, deck: u32) -> Result<String>;
+    /// start / stop recording a mix; stopping replies `ok mix 2: aft -> smk, 16 bars, 9 items`
+    async fn set_record(&self, on: bool) -> Result<String>;
+    /// (recording, elapsed beats on the outgoing deck's clock, events logged)
+    async fn set_recording(&self) -> Result<(bool, f64, u32)>;
+    /// (text, sha-256 hex hash) of a set file as on disk
+    async fn set_source(&self, name: &str) -> Result<(String, String)>;
+    /// errors of `text` as if saved, empty = valid
+    async fn set_check(&self, text: &str) -> Result<Vec<String>>;
+    /// save after checking: `ok <new hash>` or the reason; `author` is `human` or `agent:<name>`
+    async fn set_write(&self, name: &str, text: &str, base_hash: &str, author: &str) -> Result<String>;
+
     async fn get_waveform(&self, path: &str, columns: u32) -> Result<Vec<u8>>;
     /// (xruns, second output underruns, second output skips, sample rate)
     async fn audio_health(&self) -> Result<(u64, u64, u64, u32)>;

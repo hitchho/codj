@@ -67,6 +67,8 @@ pub struct View<'a> {
     pub release_events: bool,
     /// the active set (None: no set runtime, or none active)
     pub set: Option<&'a SetState>,
+    /// recording a mix: (beats, events)
+    pub rec: Option<(f64, u32)>,
     /// the set's errors, drawn over the decks
     pub overlay: Option<&'a [String]>,
 }
@@ -138,7 +140,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, v: &View) {
         draw_deck(buf, r, i, &info, v.waves[i], v.release_events, v.doubt[i]);
     }
     if let Some(set) = v.set {
-        draw_set(buf, set_area, set, v.decks);
+        draw_set(buf, set_area, set, v.decks, v.rec);
     }
     draw_mixer(buf, mixer, v);
     draw_library(buf, lib, v);
@@ -149,6 +151,9 @@ pub fn draw(buf: &mut Buffer, area: Rect, v: &View) {
 }
 
 /// beats to bars, as shown: whole bars plain, else one decimal
+/// the recording badge
+const REC_STYLE: Style = Style::new().fg(Color::Red).add_modifier(Modifier::BOLD);
+
 fn fmt_bars(beats: f64) -> String {
     let bars = beats / 4.0;
     if (bars - bars.round()).abs() < 0.05 {
@@ -181,7 +186,7 @@ fn current_and_next(set: &SetState, decks: &[DeckInfo]) -> (Option<usize>, Optio
     (on_air, None)
 }
 
-fn draw_set(buf: &mut Buffer, area: Rect, set: &SetState, decks: &[DeckInfo]) {
+fn draw_set(buf: &mut Buffer, area: Rect, set: &SetState, decks: &[DeckInfo], rec: Option<(f64, u32)>) {
     if area.height == 0 || area.width < 20 {
         return;
     }
@@ -210,6 +215,9 @@ fn draw_set(buf: &mut Buffer, area: Rect, set: &SetState, decks: &[DeckInfo]) {
         ];
         if set.auto {
             spans.push(Span::styled(if narrow { "AUTO " } else { " AUTO " }, Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)));
+        }
+        if let Some((beats, events)) = rec {
+            spans.push(Span::styled(format!(" {} ", super::capture::rec_text(beats, events, narrow)), REC_STYLE));
         }
         if let Some(m) = set.armed_mix() {
             let len = set.mixes[m].3;
@@ -244,8 +252,12 @@ fn draw_set(buf: &mut Buffer, area: Rect, set: &SetState, decks: &[DeckInfo]) {
         Span::raw("  "),
         auto,
     ];
+    if let Some((beats, events)) = rec {
+        head.push(Span::raw(" "));
+        head.push(Span::styled(format!(" {} ", super::capture::rec_text(beats, events, false)), REC_STYLE));
+    }
     let used: usize = head.iter().map(|s| s.content.chars().count()).sum();
-    let keys = "F6 arm next · F7 auto · F8 disarm";
+    let keys = "F6 arm next · F7 auto · F8 disarm · F9 rec";
     if w > used + keys.len() + 2 {
         head.push(Span::raw(" ".repeat(w - used - keys.len() - 1)));
         head.push(Span::styled(keys, dim()));
@@ -1027,6 +1039,7 @@ mod tests {
             lib_sel: 1,
             release_events: true,
             set: None,
+            rec: None,
             overlay: None,
         };
         f(&mut v);
@@ -1229,13 +1242,13 @@ mod tests {
         let mut set = demo_set();
         set.errors = 3;
         let mut buf = Buffer::empty(Rect::new(0, 0, 120, 6));
-        draw_set(&mut buf, Rect::new(0, 0, 120, 6), &set, &decks);
+        draw_set(&mut buf, Rect::new(0, 0, 120, 6), &set, &decks, None);
         let red = (0..120).any(|x| buf[(x, 0)].fg == Color::Red && buf[(x, 0)].symbol() == "✗");
         assert!(red);
         let mut ok = demo_set();
         ok.errors = 0;
         let mut buf = Buffer::empty(Rect::new(0, 0, 120, 6));
-        draw_set(&mut buf, Rect::new(0, 0, 120, 6), &ok, &decks);
+        draw_set(&mut buf, Rect::new(0, 0, 120, 6), &ok, &decks, None);
         assert!((0..120).all(|x| buf[(x, 0)].fg != Color::Red));
         let _ = mixer;
     }
@@ -1302,6 +1315,29 @@ mod tests {
         assert!(text.contains("mix 1 ▶ 9.5/32") && text.contains("bar 16 · swap low"), "{text}");
         let wide = render(100, 14, with_set(armed_midway()));
         assert!(wide.contains("mix 1 ▶ bar 9.5/32") && wide.contains("next bar 16 · swap low"), "{wide}");
+    }
+
+    #[test]
+    fn recording_state_in_the_strip() {
+        let text = render(120, 35, |v| {
+            with_set(demo_set())(v);
+            v.rec = Some((50.0, 34));
+        });
+        assert!(text.contains("● REC 12.5 bars · 34 events"), "{text}");
+        assert!(text.contains("F9 rec"));
+        // one-line strip, narrow and wide
+        let text = render(60, 14, |v| {
+            with_set(armed_midway())(v);
+            v.rec = Some((50.0, 34));
+        });
+        assert!(text.contains("● REC 12.5 · 34 ev"), "{text}");
+        let text = render(100, 14, |v| {
+            with_set(armed_midway())(v);
+            v.rec = Some((50.0, 1));
+        });
+        assert!(text.contains("● REC 12.5 bars · 1 event"), "{text}");
+        // not recording: no badge
+        assert!(!render(120, 35, with_set(demo_set())).contains("REC"));
     }
 
     #[test]
