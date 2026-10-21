@@ -220,6 +220,13 @@ pub trait Server {
     /// save after checking: `ok <new hash>` or the reason; `author` is `human` or `agent:<name>`
     async fn set_write(&self, name: &str, text: &str, base_hash: &str, author: &str) -> Result<String>;
 
+    /// transition recipes: (name, explanation, default bars)
+    async fn set_recipes(&self) -> Result<Vec<(String, String, u32)>>;
+    /// a full commented `mix` block of `recipe` for the two tracks of the active set
+    async fn set_recipe_text(&self, recipe: &str, from_id: &str, to_id: &str, bars: u32) -> Result<String>;
+    /// warnings (not errors) of the set `name`, `file:line:col: message`
+    async fn set_warnings(&self, name: &str) -> Result<Vec<String>>;
+
     async fn get_waveform(&self, path: &str, columns: u32) -> Result<Vec<u8>>;
     /// (xruns, second output underruns, second output skips, sample rate)
     async fn audio_health(&self) -> Result<(u64, u64, u64, u32)>;

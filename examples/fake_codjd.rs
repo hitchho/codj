@@ -308,6 +308,29 @@ impl Fake {
     }
 }
 
+/// (name, explanation, default bars)
+const RECIPES: [(&str, &str, u32); 3] = [
+    ("blend", "bring B in with its bass killed, swap the bass halfway, fade A out", 16),
+    ("swap", "a short handover: one bass swap, no long fade", 8),
+    ("filter-fade", "sweep A's filter away while B fades in", 16),
+];
+
+/// a plausible commented block for a recipe
+fn recipe_text(recipe: &str, from: &str, to: &str, bars: u32) -> String {
+    let Some(r) = RECIPES.iter().find(|r| r.0 == recipe) else {
+        return format!("unknown recipe {recipe:?}");
+    };
+    let half = bars / 2;
+    let body = match recipe {
+        "swap" => format!("  bar 0        {to}.low kill\n  bar {half}       swap low\n  bar {bars}       {from} stop\n"),
+        "filter-fade" => format!("  bars 0..{bars}   {from}.filter 0 -> -0.6 smooth; {to}.fader 0 -> 1\n  bar {bars}       {from} stop\n"),
+        _ => format!(
+            "  bars 0..{half}   {to}.low kill; {to}.fader 0 -> 1\n  bar {half}       swap low\n  bars {half}..{bars}  {from}.filter 0 -> -0.6 smooth; {from}.fader 1 -> 0\n  bar {bars}       {from} stop\n"
+        ),
+    };
+    format!("# {recipe}: {}\nmix {from} -> {to} at bar 3 over {bars} bars\n  {to} play from bar 1\n{body}", r.1)
+}
+
 fn library() -> Vec<OuterMusic> {
     [
         ("Aftertekno", "Pneumatix", 128.0),
@@ -742,6 +765,48 @@ impl Fake {
         } else {
             vec![]
         }
+    }
+
+    /// (name, explanation, default bars)
+    async fn set_recipes(&self) -> Vec<(String, String, u32)> {
+        self.log("SetRecipes".into());
+        RECIPES.iter().map(|r| (r.0.to_string(), r.1.to_string(), r.2)).collect()
+    }
+
+    async fn set_recipe_text(&self, recipe: String, from_id: String, to_id: String, bars: u32) -> String {
+        self.log(format!("SetRecipeText {recipe} {from_id} {to_id} {bars}"));
+        recipe_text(&recipe, &from_id, &to_id, bars)
+    }
+
+    async fn set_warnings(&self, name: String) -> Vec<String> {
+        self.log(format!("SetWarnings {name}"));
+        if name == "demo" {
+            vec![format!("/fake/sets/demo.codj:8:1: mix 2 (mid -> peak) is only 8 bars: short for a bass swap")]
+        } else {
+            vec![]
+        }
+    }
+
+    /// (bpm, first beat s, downbeat offset, beats per bar, confidence, variable, octave doubt, analyzed)
+    async fn get_grid(&self, path: String) -> (f64, f64, u32, u32, f64, bool, bool, bool) {
+        self.log(format!("GetGrid {path}"));
+        (fake_bpm(&path), 0.0, 0, 4, 0.9, false, false, true)
+    }
+
+    /// playlist indices of the n tracks closest in tempo to `path`
+    async fn similar_to(&self, path: String, n: u32) -> Vec<u32> {
+        self.log(format!("SimilarTo {path} {n}"));
+        let me = fake_bpm(&path);
+        let mut all: Vec<(u32, f64)> = library()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, m)| {
+                let p = <&std::path::Path>::from(&m.path).to_string_lossy().into_owned();
+                (p != path).then(|| (i as u32, (fake_bpm(&p) - me).abs()))
+            })
+            .collect();
+        all.sort_by(|a, b| a.1.total_cmp(&b.1));
+        all.into_iter().take(n as usize).map(|(i, _)| i).collect()
     }
 
     async fn dj_decks(&self) -> Vec<DeckInfo> {

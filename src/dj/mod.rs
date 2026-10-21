@@ -14,6 +14,7 @@ pub mod glossary;
 pub mod help;
 pub mod hints;
 pub mod keys;
+pub mod mixnew;
 pub mod prompt;
 pub mod render;
 pub mod wave;
@@ -37,6 +38,10 @@ use wave::Waveform;
 
 const POLL_EVERY: Duration = Duration::from_millis(33);
 const CALL_TIMEOUT: Duration = Duration::from_millis(1500);
+/// `:mix new` chains five calls
+const MIX_TIMEOUT: Duration = Duration::from_secs(8);
+/// warnings are refetched this often (ticks, ~3 s) while a set is active, and when the set changes
+const WARN_EVERY: u32 = 90;
 /// Columns asked from `GetWaveform`: more than the stored 50 per second, so the full resolution
 const WAVE_COLUMNS: u32 = 60_000;
 const NOTE_FOR: Duration = Duration::from_secs(6);
@@ -92,6 +97,13 @@ struct Shared {
     info: Option<(String, Instant)>,
     /// the active set's errors, drawn over the decks until Esc
     overlay: Option<Vec<String>>,
+    /// a text popup (`:help <term>`, the recipes), closed by any key
+    popup: Option<(String, Vec<String>)>,
+    /// the active set's warnings (`SetWarnings`) and what they were fetched for
+    warnings: Vec<String>,
+    warn_sig: String,
+    /// codjd has no `SetWarnings`: polling stops
+    warn_missing: bool,
 }
 
 /// Short text for a D-Bus failure; an old codjd without the deck API gets a clear hint
@@ -133,6 +145,19 @@ pub enum SetCall {
     LoopSave(u32, String),
     GridSave(u32),
     Record(bool),
+    /// `:mix new` without a recipe: list them
+    Recipes,
+    /// `:mix new <recipe> [bars]`
+    MixNew(MixNewReq),
+}
+
+/// Everything `:mix new` needs, taken from the screen when the command ran
+#[derive(Debug, Clone, PartialEq)]
+pub struct MixNewReq {
+    pub recipe: String,
+    pub bars: Option<u32>,
+    pub set: String,
+    pub pair: mixnew::Pair,
 }
 
 impl SetCall {
@@ -150,6 +175,8 @@ impl SetCall {
             SetCall::LoopSave(..) => "SetLoopCapture",
             SetCall::GridSave(_) => "SetGridCapture",
             SetCall::Record(_) => "SetRecord",
+            SetCall::Recipes => "SetRecipes",
+            SetCall::MixNew(_) => "SetRecipeText",
         }
     }
 
@@ -169,6 +196,7 @@ impl SetCall {
             SetCall::GridSave(d) => format!("grid of deck {} saved", deck_letter(*d)),
             SetCall::Record(true) => "recording: play the mix, F9 or :rec off stops".into(),
             SetCall::Record(false) => "recording stopped".into(),
+            SetCall::Recipes | SetCall::MixNew(_) => String::new(),
         }
     }
 
@@ -199,10 +227,57 @@ pub fn format_set_list(sets: &[(String, String, u32)]) -> String {
     format!("sets: {}  (:set <name>)", items.join(" · "))
 }
 
+/// The `:errors` overlay: the errors, then the warnings marked as such (drawn yellow)
+pub fn errors_with_warnings(mut errors: Vec<String>, warnings: Vec<String>) -> Vec<String> {
+    errors.extend(warnings.into_iter().map(|w| format!("warning: {w}")));
+    errors
+}
+
 enum SetReply {
     Status(String),
     List(Vec<(String, String, u32)>),
     Errors(Vec<String>),
+}
+
+/// `:mix new`: the recipe's block, merged into the set's text, checked and written. Returns the
+/// text to show, or the reason it did not happen.
+async fn run_mix_new(proxy: &ServerProxy<'_>, req: &MixNewReq) -> Result<String, String> {
+    let what = |e: zbus::Error| mixnew::describe_error("SetRecipes", &e);
+    let recipes = proxy.set_recipes().await.map_err(what)?;
+    let Some((name, _, default_bars)) = recipes.iter().find(|r| r.0.eq_ignore_ascii_case(&req.recipe)).cloned() else {
+        let names: Vec<&str> = recipes.iter().map(|r| r.0.as_str()).collect();
+        return Err(format!("no recipe {:?}; recipes: {} (:mix new lists them)", req.recipe, names.join(", ")));
+    };
+    let bars = req.bars.unwrap_or(default_bars);
+    let pair = &req.pair;
+    let block = proxy
+        .set_recipe_text(&name, &pair.from_id, &pair.to_id, bars)
+        .await
+        .map_err(|e| mixnew::describe_error("SetRecipeText", &e))?;
+    if !mixnew::looks_like_block(&block) {
+        return Err(format!("SetRecipeText: {}", block.lines().next().unwrap_or("empty reply")));
+    }
+    let (source, hash) = proxy.set_source(&req.set).await.map_err(|e| describe_set_error("SetSource", &e))?;
+    let mut merged = mixnew::merge_block(&source, &block, &pair.from_id, &pair.to_id, false);
+    let mut errors = proxy.set_check(&merged.text).await.map_err(|e| describe_set_error("SetCheck", &e))?;
+    if !errors.is_empty() && merged.existing.is_some() {
+        // the older block of the same two tracks may be what the new one clashes with
+        let replaced = mixnew::merge_block(&source, &block, &pair.from_id, &pair.to_id, true);
+        let again = proxy.set_check(&replaced.text).await.map_err(|e| describe_set_error("SetCheck", &e))?;
+        if again.is_empty() {
+            merged = replaced;
+            errors = again;
+        }
+    }
+    if let Some(first) = errors.first() {
+        return Err(format!("the {name} block has {} error{}: {first}", errors.len(), if errors.len() == 1 { "" } else { "s" }));
+    }
+    let reply = proxy.set_write(&req.set, &merged.text, &hash, "human").await.map_err(|e| describe_set_error("SetWrite", &e))?;
+    if reply == "ok" || reply.starts_with("ok ") {
+        Ok(mixnew::done_text(&name, pair, bars, &merged))
+    } else {
+        Err(format!("SetWrite: {reply}"))
+    }
 }
 
 async fn run_set_call(proxy: &ServerProxy<'_>, call: &SetCall) -> zbus::Result<SetReply> {
@@ -214,7 +289,12 @@ async fn run_set_call(proxy: &ServerProxy<'_>, call: &SetCall) -> zbus::Result<S
         SetCall::Preview(m, bars) => SetReply::Status(proxy.set_preview(*m, *bars).await?),
         SetCall::Load(t) => SetReply::Status(proxy.set_load(*t).await?),
         SetCall::List => SetReply::List(proxy.set_list().await?),
-        SetCall::Errors(n) => SetReply::Errors(proxy.set_errors(n).await?),
+        SetCall::Errors(n) => {
+            let errors = proxy.set_errors(n).await?;
+            // an old codjd without warnings just has none
+            SetReply::Errors(errors_with_warnings(errors, proxy.set_warnings(n).await.unwrap_or_default()))
+        }
+        SetCall::Recipes | SetCall::MixNew(_) => unreachable!("handled by the executor"),
         SetCall::Cue(d, n) => SetReply::Status(proxy.set_cue(*d, n).await?),
         SetCall::LoopSave(d, n) => SetReply::Status(proxy.set_loop_capture(*d, n).await?),
         SetCall::GridSave(d) => SetReply::Status(proxy.set_grid_capture(*d).await?),
@@ -290,6 +370,38 @@ async fn poll_set(proxy: &ServerProxy<'_>, shared: &Arc<Mutex<Shared>>, tick: u3
     }
 }
 
+/// Reads `SetWarnings` of the active set when it changed (name, file, errors, track and mix
+/// counts) and every [`WARN_EVERY`] ticks; an old codjd without the method ends the polling
+async fn poll_warnings(proxy: &ServerProxy<'_>, shared: &Arc<Mutex<Shared>>, tick: u32) {
+    let name = {
+        let mut s = shared.lock().unwrap();
+        let Some(set) = s.set.clone().filter(|x| x.is_active()) else {
+            s.warnings.clear();
+            s.warn_sig.clear();
+            return;
+        };
+        let sig = format!("{}|{}|{}|{}|{}", set.name, set.file, set.errors, set.tracks.len(), set.mixes.len());
+        if s.warn_missing || (sig == s.warn_sig && tick % WARN_EVERY != 0) {
+            return;
+        }
+        s.warn_sig = sig;
+        set.name
+    };
+    let reply = tokio::time::timeout(CALL_TIMEOUT, proxy.set_warnings(&name)).await;
+    let mut s = shared.lock().unwrap();
+    match reply {
+        Ok(Ok(w)) => s.warnings = w,
+        Ok(Err(e)) => {
+            let text = e.to_string();
+            if text.contains("UnknownMethod") || text.contains("Unknown method") || text.contains("No such method") {
+                s.warn_missing = true;
+                s.warnings.clear();
+            }
+        }
+        Err(_) => {}
+    }
+}
+
 /// Reads `SetRecording` when it is due: ~4 Hz while recording, once a second otherwise
 async fn poll_recording(proxy: &ServerProxy<'_>, shared: &Arc<Mutex<Shared>>, tick: u32) {
     let due = {
@@ -334,6 +446,10 @@ impl Session {
             rec_poll_now: false,
             info: None,
             overlay: None,
+            popup: None,
+            warnings: Vec::new(),
+            warn_sig: String::new(),
+            warn_missing: false,
         }));
         let (tx, mut rx) = mpsc::unbounded_channel::<DjCall>();
         let (set_tx, mut set_rx) = mpsc::unbounded_channel::<SetCall>();
@@ -349,6 +465,7 @@ impl Session {
                 loop {
                     every.tick().await;
                     poll_set(&proxy, &shared, tick).await;
+                    poll_warnings(&proxy, &shared, tick).await;
                     poll_recording(&proxy, &shared, tick).await;
                     tick = tick.wrapping_add(1);
                     let both = tokio::time::timeout(CALL_TIMEOUT, async {
@@ -402,6 +519,37 @@ impl Session {
             tokio::spawn(async move {
                 let Ok(proxy) = ServerProxy::new(&conn_for_set).await else { return };
                 while let Some(call) = set_rx.recv().await {
+                    // the recipe commands chain several calls and have their own replies
+                    if matches!(call, SetCall::Recipes | SetCall::MixNew(_)) {
+                        let result = tokio::time::timeout(MIX_TIMEOUT, async {
+                            match &call {
+                                SetCall::MixNew(req) => run_mix_new(&proxy, req).await.map(|text| (text, None)),
+                                _ => proxy
+                                    .set_recipes()
+                                    .await
+                                    .map(|r| mixnew::recipes_popup(&r))
+                                    .map(|p| (String::new(), Some(p)))
+                                    .map_err(|e| mixnew::describe_error("SetRecipes", &e)),
+                            }
+                        })
+                        .await;
+                        let mut s = shared.lock().unwrap();
+                        let now = Instant::now();
+                        match result {
+                            Ok(Ok((text, popup))) => {
+                                s.call_error = None;
+                                if let Some(p) = popup {
+                                    s.popup = Some(p);
+                                } else {
+                                    s.info = Some((text, now + NOTE_FOR * 2));
+                                }
+                            }
+                            Ok(Err(e)) => s.call_error = Some((e, now)),
+                            Err(_) => s.call_error = Some((format!("{}: codjd does not answer", call.name()), now)),
+                        }
+                        s.set_poll_now = true;
+                        continue;
+                    }
                     let reply = tokio::time::timeout(CALL_TIMEOUT, run_set_call(&proxy, &call)).await;
                     let mut s = shared.lock().unwrap();
                     let now = Instant::now();
@@ -571,6 +719,8 @@ pub enum Command {
     Ai(String),
     /// `:help [term]`: the glossary ("" lists the terms)
     Help(String),
+    /// `:mix new [recipe [bars]]`: no recipe lists them
+    MixNew { recipe: Option<String>, bars: Option<u32> },
     Nothing,
     Unknown(String),
 }
@@ -666,10 +816,11 @@ pub fn parse_command(cmd: &str) -> Command {
         Some(w @ ("cue" | "loopsave" | "gridsave" | "rec" | "record")) => {
             capture::parse(w, &words.collect::<Vec<_>>()).unwrap_or(Command::Nothing)
         }
+        Some("mix") => mixnew::parse(&words.collect::<Vec<_>>()),
         Some("e") => Command::Editor,
         None => Command::Nothing,
         Some(other) => Command::Unknown(format!(
-            "unknown DJ command: {other} (q: back, load a|b|<track>, grid a|b x2|/2|.., set [name], arm <n|next>, disarm, auto on|off, preview <n> [bars], errors, edit, e, ai <request>, cue <name> [a|b], loopsave <name> [a|b], gridsave [a|b], rec [on|off])"
+            "unknown DJ command: {other} (q: back, load a|b|<track>, grid a|b x2|/2|.., set [name], arm <n|next>, disarm, auto on|off, preview <n> [bars], errors, edit, e, ai <request>, help [term], tutor, mix new [recipe], cue <name> [a|b], loopsave <name> [a|b], gridsave [a|b], rec [on|off])"
         )),
     }
 }
@@ -844,8 +995,6 @@ pub struct DjScreen {
     knob: Option<crate::knob::Knob>,
     /// the `?` key map is up
     help: bool,
-    /// a text popup (`:help <term>`), closed by any key
-    popup: Option<(String, Vec<String>)>,
 }
 
 impl DjScreen {
@@ -868,7 +1017,6 @@ impl DjScreen {
             agent: Default::default(),
             knob: None,
             help: false,
-            popup: None,
         }
     }
 
@@ -962,9 +1110,9 @@ impl DjScreen {
             return;
         }
         if q.is_empty() {
-            self.popup = Some(glossary::index_popup());
+            self.session.shared.lock().unwrap().popup = Some(glossary::index_popup());
         } else if let Some(term) = glossary::lookup(&q) {
-            self.popup = Some(glossary::help_popup(term));
+            self.session.shared.lock().unwrap().popup = Some(glossary::help_popup(term));
         } else {
             let near = glossary::suggest(&q);
             self.set_note(if near.is_empty() {
@@ -972,6 +1120,23 @@ impl DjScreen {
             } else {
                 format!("no help for {q:?}; did you mean: {}", near.join(", "))
             });
+        }
+    }
+
+    /// `:mix new [recipe [bars]]`: the tracks come from the decks, the rest runs in the set task
+    fn mix_new(&mut self, recipe: Option<String>, bars: Option<u32>) {
+        let Some(recipe) = recipe else {
+            self.session.set_call(SetCall::Recipes);
+            return;
+        };
+        let Some((set, _)) = self.active_set() else { return };
+        let (decks, mixer) = {
+            let s = self.session.shared.lock().unwrap();
+            (s.decks.clone(), s.mixer.clone())
+        };
+        match mixnew::pick_pair(&decks, &mixer, &set) {
+            Ok(pair) => self.session.set_call(SetCall::MixNew(MixNewReq { recipe, bars, set: set.name, pair })),
+            Err(e) => self.set_note(e),
         }
     }
 
@@ -1124,10 +1289,12 @@ impl DjScreen {
             editor::KeyFocus::Deck => {}
         }
         // the key map and popups close on any key, which does nothing else
-        if key.kind != KeyEventKind::Release && (self.help || self.popup.is_some()) {
-            self.help = false;
-            self.popup = None;
-            return Outcome::Stay;
+        if key.kind != KeyEventKind::Release {
+            let popup = self.session.shared.lock().unwrap().popup.take();
+            if self.help || popup.is_some() {
+                self.help = false;
+                return Outcome::Stay;
+            }
         }
         // Esc closes the error overlay first
         if key.code == KeyCode::Esc && key.kind != KeyEventKind::Release {
@@ -1240,6 +1407,7 @@ impl DjScreen {
             Command::Editor => self.open_editor(Instant::now()),
             Command::Ai(text) => self.open_prompt(Some(text), Instant::now()),
             Command::Help(query) => self.help_command(&query),
+            Command::MixNew { recipe, bars } => self.mix_new(recipe, bars),
             Command::Nothing => {}
             Command::Unknown(msg) => self.set_note(msg),
         }
@@ -1353,10 +1521,10 @@ impl DjScreen {
             },
             learn: render::LearnView {
                 help: self.help,
-                popup: self.popup.as_ref().map(|(t, l)| (t.as_str(), l.as_slice())),
+                popup: s.popup.as_ref().map(|(t, l)| (t.as_str(), l.as_slice())),
                 marks: &[],
                 explain: explain.as_deref(),
-                warnings: 0,
+                warnings: s.warnings.len(),
             },
         };
         let spots = render::draw(frame.buffer_mut(), area, &view);
@@ -1500,6 +1668,18 @@ mod tests {
             let Command::Help(q) = parse_command(&format!("help {}", term.name)) else { panic!() };
             assert_eq!(glossary::lookup(&q).map(|t| t.name), Some(term.name));
         }
+    }
+
+    #[test]
+    fn mix_new_command_and_error_overlay_lines() {
+        assert_eq!(parse_command("mix new"), Command::MixNew { recipe: None, bars: None });
+        assert_eq!(parse_command("mix new blend 32"), Command::MixNew { recipe: Some("blend".into()), bars: Some(32) });
+        assert!(matches!(parse_command("mix"), Command::Unknown(_)));
+        assert_eq!(
+            errors_with_warnings(vec!["a.codj:1:1: bad".into()], vec!["a.codj:5:1: short".into()]),
+            vec!["a.codj:1:1: bad".to_string(), "warning: a.codj:5:1: short".to_string()]
+        );
+        assert_eq!(errors_with_warnings(vec![], vec![]), Vec::<String>::new());
     }
 
     #[test]
