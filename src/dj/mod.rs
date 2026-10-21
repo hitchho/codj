@@ -621,7 +621,7 @@ impl Session {
 
     /// The tutor's search for two tracks with close tempos: `GetGrid` on a few tracks and
     /// `SimilarTo` of the first, in a blocking task (see `tutor::find_pair` for the caps)
-    fn find_pair(&self, library: Vec<(String, String)>) {
+    fn find_pair(&self, library: Vec<(String, String)>, playlist_index: Vec<usize>) {
         self.shared.lock().unwrap().finding = tutor::Finding::Searching;
         let (shared, conn) = (self.shared.clone(), self.conn.clone());
         tokio::task::spawn_blocking(move || {
@@ -630,9 +630,10 @@ impl Session {
                 tutor::find_pair(
                     &library,
                     |p| {
+                        // SimilarTo answers playlist indices: turn them into positions in `library`
                         h.block_on(async { tokio::time::timeout(CALL_TIMEOUT, proxy.similar_to(p, 8)).await.ok().and_then(|r| r.ok()).unwrap_or_default() })
                             .into_iter()
-                            .map(|i| i as usize)
+                            .filter_map(|i| playlist_index.iter().position(|&x| x == i as usize))
                             .collect()
                     },
                     |p| {
@@ -1222,7 +1223,9 @@ impl DjScreen {
         let at_pick = self.tutor.as_ref().is_some_and(|t| t.step == tutor::Step::Pick);
         if search && at_pick {
             let library = self.pane.all.iter().map(|m| (<&std::path::Path>::from(&m.path).to_string_lossy().into_owned(), m.title.clone())).collect();
-            self.session.find_pair(library);
+            // the library hides duplicate copies, so its positions aren't playlist indices
+            let playlist_index = self.pane.all.iter().map(|m| m.index).collect();
+            self.session.find_pair(library, playlist_index);
         }
     }
 
