@@ -77,6 +77,22 @@ pub struct View<'a> {
     /// caller into [`panel_rect`]
     pub panel: Option<Panel>,
     pub hints: HintView<'a>,
+    pub learn: LearnView<'a>,
+}
+
+/// What the learning features put on the screen
+#[derive(Default)]
+pub struct LearnView<'a> {
+    /// the `?` key map is up
+    pub help: bool,
+    /// a text popup (`:help <term>`, `:mix new`): title and paragraphs, wrapped when drawn
+    pub popup: Option<(&'a str, &'a [String])>,
+    /// library tracks to mark: (path, deck letter) of the tutor's proposal
+    pub marks: &'a [(String, char)],
+    /// one line about the selected or hovered control, for the status line
+    pub explain: Option<&'a str>,
+    /// the active set's warnings
+    pub warnings: usize,
 }
 
 /// What the control hints need on screen
@@ -249,7 +265,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, v: &View) -> Vec<Spot> {
         draw_deck(buf, r, i, &info, v.waves[i], v.release_events, v.doubt[i], &v.hints, &mut spots);
     }
     if let Some(set) = v.set {
-        draw_set(buf, set_area, set, v.decks, v.rec);
+        draw_set(buf, set_area, set, v.decks, v.rec, v.learn.warnings);
     }
     draw_mixer(buf, mixer, v, &mut spots);
     if v.panel.is_none() {
@@ -257,9 +273,21 @@ pub fn draw(buf: &mut Buffer, area: Rect, v: &View) -> Vec<Spot> {
     }
     draw_status(buf, status, v);
     if let Some(lines) = v.overlay {
-        draw_overlay(buf, decks, lines);
+        draw_overlay(buf, decks, " set errors · Esc closes ", lines, false);
+    }
+    if let Some((title, lines)) = v.learn.popup {
+        draw_overlay(buf, decks, title, lines, true);
     }
     draw_hints(buf, &spots, &v.hints);
+    if v.learn.help {
+        let half = decks.width / 2;
+        let deck_rects = [
+            Rect::new(decks.x, decks.y, half, decks.height),
+            Rect::new(decks.x + half, decks.y, decks.width - half, decks.height),
+        ];
+        let lower = Rect::new(area.x, mixer.y, area.width, lib.bottom().saturating_sub(mixer.y));
+        super::help::draw(buf, deck_rects, lower);
+    }
     spots
 }
 
@@ -292,6 +320,7 @@ pub fn panel_rect(area: Rect, v: &View) -> Option<Rect> {
 
 /// beats to bars, as shown: whole bars plain, else one decimal
 /// the recording badge
+const WARN_STYLE: Style = Style::new().fg(Color::Yellow);
 const REC_STYLE: Style = Style::new().fg(Color::Red).add_modifier(Modifier::BOLD);
 
 fn fmt_bars(beats: f64) -> String {
@@ -326,7 +355,7 @@ fn current_and_next(set: &SetState, decks: &[DeckInfo]) -> (Option<usize>, Optio
     (on_air, None)
 }
 
-fn draw_set(buf: &mut Buffer, area: Rect, set: &SetState, decks: &[DeckInfo], rec: Option<(f64, u32)>) {
+fn draw_set(buf: &mut Buffer, area: Rect, set: &SetState, decks: &[DeckInfo], rec: Option<(f64, u32)>, warnings: usize) {
     if area.height == 0 || area.width < 20 {
         return;
     }
@@ -353,6 +382,9 @@ fn draw_set(buf: &mut Buffer, area: Rect, set: &SetState, decks: &[DeckInfo], re
             Span::raw(format!(" {} ", trunc(&set.name, if narrow { 6 } else { 18 }))),
             Span::styled(if set.errors > 0 { format!("✗{} ", set.errors) } else { "✓ ".into() }, err_style),
         ];
+        if warnings > 0 {
+            spans.push(Span::styled(format!("⚠{warnings} "), WARN_STYLE));
+        }
         if set.auto {
             spans.push(Span::styled(if narrow { "AUTO " } else { " AUTO " }, Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)));
         }
@@ -389,9 +421,12 @@ fn draw_set(buf: &mut Buffer, area: Rect, set: &SetState, decks: &[DeckInfo], re
         Span::styled(" SET ", Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)),
         Span::styled(format!(" {} ", trunc(&set.name, 30)), Style::default().add_modifier(Modifier::BOLD)),
         Span::styled(errs, err_style),
-        Span::raw("  "),
-        auto,
     ];
+    if warnings > 0 {
+        head.push(Span::styled(format!("  ⚠ {warnings} warning{} (:errors)", if warnings == 1 { "" } else { "s" }), WARN_STYLE));
+    }
+    head.push(Span::raw("  "));
+    head.push(auto);
     if let Some((beats, events)) = rec {
         head.push(Span::raw(" "));
         head.push(Span::styled(format!(" {} ", super::capture::rec_text(beats, events, false)), REC_STYLE));
@@ -565,29 +600,49 @@ fn progress_line(set: &SetState, m: usize, w: usize, from: &str, to: &str) -> Li
     Line::from(spans)
 }
 
-fn draw_overlay(buf: &mut Buffer, over: Rect, lines: &[String]) {
+fn draw_overlay(buf: &mut Buffer, over: Rect, title: &str, lines: &[String], wrap: bool) {
     if over.width < 24 || over.height < 3 {
         return;
     }
     let w = (over.width - 4).min(110);
-    let h = ((lines.len() as u16) + 2).min(over.height).min(12);
+    let wrapped: Vec<String>;
+    let lines = if wrap {
+        let width = (w as usize).saturating_sub(4).max(8);
+        wrapped = lines
+            .iter()
+            .flat_map(|l| if l.is_empty() { vec![String::new()] } else { crate::dj::glossary::wrap(l, width) })
+            .collect();
+        &wrapped[..]
+    } else {
+        lines
+    };
+    let h = ((lines.len() as u16) + 2).min(over.height).min(if wrap { 16 } else { 12 });
     let area = Rect::new(over.x + (over.width - w) / 2, over.y + (over.height - h) / 2, w, h);
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
             buf[(x, y)].reset();
         }
     }
-    let bad = lines.iter().any(|l| l != "no errors");
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(if bad { Color::Red } else { Color::Green }))
-        .title(" set errors · Esc closes ");
+    let is_warning = |l: &String| l.starts_with("warning:");
+    let bad = lines.iter().any(|l| l != "no errors" && !is_warning(l));
+    let warn = lines.iter().any(is_warning);
+    let color = if wrap {
+        Color::Cyan
+    } else if bad {
+        Color::Red
+    } else if warn {
+        Color::Yellow
+    } else {
+        Color::Green
+    };
+    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(color)).title(title.to_string());
     let inner = block.inner(area);
     block.render(area, buf);
     let rows = inner.height as usize;
     for (i, l) in lines.iter().take(rows).enumerate() {
         let text = if i + 1 == rows && lines.len() > rows { format!("… {} more", lines.len() - rows + 1) } else { l.clone() };
-        buf.set_stringn(inner.x + 1, inner.y + i as u16, text, inner.width.saturating_sub(2) as usize, Style::default());
+        let style = if is_warning(l) { Style::default().fg(Color::Yellow) } else { Style::default() };
+        buf.set_stringn(inner.x + 1, inner.y + i as u16, text, inner.width.saturating_sub(2) as usize, style);
     }
 }
 
@@ -609,7 +664,7 @@ fn draw_header(buf: &mut Buffer, area: Rect, v: &View) {
         None => Line::from(vec![
             Span::styled(" DJ ", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
             Span::styled(
-                "  Esc back · Tab search · < > load A/B · Enter load · Shift+; command",
+                "  Esc back · Tab search · < > load A/B · Enter load · Shift+; command · ? keys",
                 dim(),
             ),
         ]),
@@ -632,18 +687,31 @@ fn draw_status(buf: &mut Buffer, area: Rect, v: &View) {
     let chip = v.hints.chip.filter(|c| c.chars().count() + 8 < w);
     let chip_w = chip.map_or(0, |c| c.chars().count() + 1);
     let text_w = w - chip_w;
-    if v.hints.active {
+    if v.learn.help {
+        let badge = Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD);
+        buf.set_stringn(area.x, area.y, " ? KEYS ", text_w, badge);
+        buf.set_stringn(area.x + 8, area.y, " every key explained · any key closes · :help <term> for the words", text_w.saturating_sub(8), Style::default().fg(Color::Cyan));
+    } else if v.hints.active {
         let badge = Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD);
         buf.set_stringn(area.x, area.y, " HINTS ", text_w, badge);
         let typed = v.hints.typed.to_uppercase();
-        let msg = format!(" type a label{} · Esc or f cancels · keys do not play now", if typed.is_empty() { String::new() } else { format!(" ({typed}…)") });
+        let msg = match v.learn.explain {
+            Some(x) => format!(" {x}"),
+            None => format!(" type a label{} · Esc or f cancels · keys do not play now", if typed.is_empty() { String::new() } else { format!(" ({typed}…)") }),
+        };
         buf.set_stringn(area.x + 7, area.y, msg, text_w.saturating_sub(7), Style::default().fg(Color::Yellow));
     } else if let Some(e) = v.error {
         buf.set_stringn(area.x, area.y, e, text_w, Style::default().fg(Color::Red));
     } else if let Some(n) = v.note {
         buf.set_stringn(area.x, area.y, n, text_w, Style::default().fg(Color::Yellow));
+    } else if let (Some(_), Some(x)) = (chip, v.learn.explain) {
+        // the selection's one-liner sits right next to its chip
+        let len = x.chars().count().min(text_w.saturating_sub(1));
+        let at = area.x + (text_w - len) as u16;
+        buf.set_stringn(area.x, area.y, "] [ edit · \\ reset", text_w.saturating_sub(len + 1), dim());
+        buf.set_stringn(at, area.y, x, len, Style::default().fg(Color::Cyan));
     } else {
-        let hint = "f hints ] [ \\ edit ; toggle | A: z cue x play c sync v loop a/s pitch q/w nudge 1-4 cues e/r jump | B: / . , m  k/l  o/p  7-0  u/i | Alt+qwer uiop eq/filter | g b h n t y faders";
+        let hint = "? keys · f hints ] [ \\ edit · A: z cue x play c sync v loop a/s pitch q/w nudge 1-4 cues e/r jump | B: / . , m  k/l  o/p  7-0  u/i | Alt+qwer uiop eq/filter | g b h n t y faders";
         buf.set_stringn(area.x, area.y, hint, text_w, dim());
     }
     if let Some(c) = chip {
@@ -1156,11 +1224,14 @@ fn draw_library(buf: &mut Buffer, area: Rect, v: &View) {
             .collect();
         let who = if m.artist.is_empty() { m.title.clone() } else { format!("{} — {}", m.title, m.artist) };
         let len = fmt_short(m.length.as_secs_f64());
-        let right = format!("{tags:>6} {len:>5}");
+        let mark = v.learn.marks.iter().find(|(p, _)| *p == path).map(|(_, d)| format!("★{d}")).unwrap_or_default();
+        let right = format!("{mark:>2}{tags:>6} {len:>5}");
         let w = inner.width as usize;
         let left_w = w.saturating_sub(right.chars().count() + 3);
         let style = if row == sel {
             Style::default().add_modifier(Modifier::REVERSED)
+        } else if !mark.is_empty() {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
@@ -1283,6 +1354,7 @@ mod tests {
             overlay: None,
             panel: None,
             hints: HintView::default(),
+            learn: LearnView::default(),
         };
         f(&mut v);
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -1486,13 +1558,13 @@ mod tests {
         let mut set = demo_set();
         set.errors = 3;
         let mut buf = Buffer::empty(Rect::new(0, 0, 120, 6));
-        draw_set(&mut buf, Rect::new(0, 0, 120, 6), &set, &decks, None);
+        draw_set(&mut buf, Rect::new(0, 0, 120, 6), &set, &decks, None, 0);
         let red = (0..120).any(|x| buf[(x, 0)].fg == Color::Red && buf[(x, 0)].symbol() == "✗");
         assert!(red);
         let mut ok = demo_set();
         ok.errors = 0;
         let mut buf = Buffer::empty(Rect::new(0, 0, 120, 6));
-        draw_set(&mut buf, Rect::new(0, 0, 120, 6), &ok, &decks, None);
+        draw_set(&mut buf, Rect::new(0, 0, 120, 6), &ok, &decks, None, 0);
         assert!((0..120).all(|x| buf[(x, 0)].fg != Color::Red));
         let _ = mixer;
     }
@@ -1609,6 +1681,117 @@ mod tests {
         assert!(!render(120, 35, |_| {}).contains("set errors"));
     }
 
+    fn help_view(v: &mut View) {
+        v.learn.help = true;
+    }
+
+    #[test]
+    fn the_key_map_is_drawn_on_the_screen_at_120x35() {
+        let text = render(120, 35, help_view);
+        println!("{text}");
+        assert_eq!(text.lines().count(), 35);
+        for l in ["DECK A keys", "DECK B keys", "MIXER keys", "everywhere", "? KEYS"] {
+            assert!(text.contains(l), "{l}\n{text}");
+        }
+        // the examples of the task, each on its own line next to its key
+        for l in [
+            "sync: match A's tempo and beats to B",
+            "sync: match B's tempo and beats to A",
+            "cue: a saved spot; hold to hear it in headphones",
+            "low: the bass — keep only one bassline at a time",
+            "crossfader: which deck the room hears",
+            "hints: pick a control by its label",
+            "record: your playing becomes code",
+            "editor: edit the set, vim style",
+            "AI: ask an agent",
+            ":help <term>",
+        ] {
+            assert!(text.contains(l), "{l}\n{text}");
+        }
+        // deck A and deck B sit side by side: A's keys left, B's right
+        let row = text.lines().find(|l| l.contains("play / pause")).unwrap();
+        assert_eq!(row.matches("play / pause").count(), 2);
+        let (left, right) = row.split_at(60);
+        assert!(left.contains(" x ") && right.contains(" . "), "{row}");
+        // nothing is cut off at the panel edge: every deck line ends inside its panel
+        for l in crate::dj::glossary::DECK_KEYS.iter().flat_map(|e| (0..2).map(move |d| crate::dj::glossary::deck_entry(e, d).1)) {
+            assert!(text.contains(&l) , "truncated: {l}");
+        }
+    }
+
+    #[test]
+    fn the_key_map_degrades_on_small_screens() {
+        for (w, h) in [(100, 30), (80, 24), (70, 20), (60, 14)] {
+            let text = render(w, h, help_view);
+            assert_eq!(text.lines().count(), h as usize);
+            assert!(text.contains("DECK A keys") && text.contains("? KEYS"), "{w}x{h}\n{text}");
+        }
+        // a short deck panel says what it left out
+        let text = render(80, 24, help_view);
+        assert!(text.contains("more: :help keys"), "{text}");
+        // the key map does not change the control spots
+        let (_, plain) = render_full(120, 35, |_| {});
+        let (_, with) = render_full(120, 35, help_view);
+        assert_eq!(plain, with);
+    }
+
+    #[test]
+    fn explanation_next_to_the_chip_and_in_the_hint_status() {
+        let sel = Target::Slot(Slot::Ctl(Ctl::Eq(1, 0)));
+        let labels = leak_labels();
+        let text = render(120, 35, |v| {
+            v.hints = HintView { labels, selected: Some(sel), chip: Some("◆ B low -1.00"), ..HintView::default() };
+            v.learn.explain = Some(crate::dj::glossary::explain(sel));
+        });
+        let status = text.lines().last().unwrap();
+        let chip = status.find("◆ B low").unwrap();
+        let expl = status.find("low: the bass").unwrap();
+        assert!(expl < chip && status[expl..chip].trim_end().ends_with("bassline at a time"), "{status}");
+        // labels up: the explanation of what the typed letters lead to
+        let text = render(120, 35, |v| {
+            v.hints = HintView { active: true, typed: "t", labels, ..HintView::default() };
+            v.learn.explain = Some("mid: vocals, synths, snares; the body of a track");
+        });
+        let status = text.lines().last().unwrap();
+        assert!(status.contains("HINTS") && status.contains("mid: vocals"), "{status}");
+    }
+
+    #[test]
+    fn warnings_sit_next_to_errors_in_the_set_strip() {
+        let mut set = demo_set();
+        set.errors = 1;
+        let text = render(120, 35, |v| {
+            with_set(set.clone())(v);
+            v.learn.warnings = 2;
+        });
+        assert!(text.contains("✗ 1 error") && text.contains("⚠ 2 warnings (:errors)"), "{text}");
+        let text = render(60, 14, |v| {
+            with_set(set.clone())(v);
+            v.learn.warnings = 1;
+        });
+        assert!(text.contains("⚠1"), "{text}");
+        assert!(!render(120, 35, with_set(demo_set())).contains('⚠'));
+    }
+
+    #[test]
+    fn popups_and_warning_lines_in_the_overlay() {
+        let lines = vec!["one two three four five six seven eight nine ten".to_string()];
+        let popup: &'static [String] = Box::leak(lines.into_boxed_slice());
+        let text = render(60, 20, |v| v.learn.popup = Some((" bass swap · any key closes ", popup)));
+        assert!(text.contains("bass swap · any key closes") && text.contains("one two"), "{text}");
+        // errors then warnings; yellow only when there are warnings and no errors
+        let warn: &'static [String] = Box::leak(vec!["warning: mix 1 is short".to_string()].into_boxed_slice());
+        let text = render(120, 35, |v| v.overlay = Some(warn));
+        assert!(text.contains("warning: mix 1 is short"), "{text}");
+    }
+
+    #[test]
+    fn tutor_marks_in_the_library() {
+        let marks: &'static [(String, char)] = Box::leak(vec![("/m/hot.flac".to_string(), 'B')].into_boxed_slice());
+        let text = render(120, 35, |v| v.learn.marks = marks);
+        assert!(text.contains("★B"), "{text}");
+    }
+
     #[test]
     fn time_formats() {
         assert_eq!(fmt_time(83.44), "01:23.4");
@@ -1637,6 +1820,7 @@ mod tests {
             overlay: None,
             panel: None,
             hints: HintView::default(),
+            learn: LearnView::default(),
         }
     }
 

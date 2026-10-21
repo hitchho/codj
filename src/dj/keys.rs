@@ -176,6 +176,8 @@ pub enum Nav {
     Reset,
     /// an edit key with no control selected (tells the user how to select one)
     NoSelection,
+    /// `?`: the key map on the screen, every key explained
+    Help,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -306,6 +308,7 @@ pub fn bind(k: &NKey) -> Option<Binding> {
             'a' | ',' => Some(Nav(self::Nav::Load(0))),
             'b' | '.' => Some(Nav(self::Nav::Load(1))),
             ';' => Some(Nav(self::Nav::Command)),
+            '/' => Some(Nav(self::Nav::Help)),
             _ => None,
         };
     }
@@ -561,6 +564,11 @@ impl DjKeys {
 
     pub fn sync_range(&self) -> f64 {
         self.sync_range
+    }
+
+    /// The controls the last frame had room for (None until the first frame)
+    pub fn visible(&self) -> Option<&[Target]> {
+        self.visible.as_deref()
     }
 
     /// The controls the last frame had room for
@@ -1442,6 +1450,23 @@ mod tests {
             tap_key(k, c, t);
         }
         t + ms(100)
+    }
+
+    #[test]
+    fn question_mark_is_the_help_key_and_slash_stays_cue_b() {
+        // `?` is Shift + `/` however the terminal reports it
+        assert_eq!(b('?'), Some(Binding::Nav(Nav::Help)));
+        let shifted = ev(KeyCode::Char('/'), KeyModifiers::SHIFT, KeyEventKind::Press);
+        assert_eq!(bind(&normalize(&shifted)), Some(Binding::Nav(Nav::Help)));
+        let both = ev(KeyCode::Char('?'), KeyModifiers::SHIFT, KeyEventKind::Press);
+        assert_eq!(bind(&normalize(&both)), Some(Binding::Nav(Nav::Help)));
+        assert_eq!(b('/'), Some(Binding::Hold(Hold::Cue(1))));
+        let mut k = keys(true);
+        assert_eq!(k.on_key(&press('?'), Instant::now()), Some(Nav::Help));
+        // while the hint labels are up it is ignored like every other non-label key
+        k.on_key(&press('f'), Instant::now());
+        assert_eq!(k.on_key(&press('?'), Instant::now()), None);
+        assert!(k.hints().active);
     }
 
     #[test]

@@ -10,6 +10,8 @@
 
 pub mod capture;
 pub mod editor;
+pub mod glossary;
+pub mod help;
 pub mod hints;
 pub mod keys;
 pub mod prompt;
@@ -567,6 +569,8 @@ pub enum Command {
     Editor,
     /// `:ai <text>`: run the agent on a request ("" opens the prompt box)
     Ai(String),
+    /// `:help [term]`: the glossary ("" lists the terms)
+    Help(String),
     Nothing,
     Unknown(String),
 }
@@ -596,6 +600,7 @@ pub fn parse_command(cmd: &str) -> Command {
     }
     let mut words = cmd.split_whitespace();
     match words.next() {
+        Some("help" | "h" | "?") => Command::Help(words.collect::<Vec<_>>().join(" ")),
         Some("q" | "quit" | "q!" | "dj" | "normal" | "back" | "x" | "wq") => Command::Exit,
         Some("load") => match words.next() {
             Some("a" | "A") => Command::Load(0),
@@ -837,6 +842,10 @@ pub struct DjScreen {
     agent: crate::parser::AgentSettings,
     /// the hardware knob while DJ mode is open (dropping it releases the device)
     knob: Option<crate::knob::Knob>,
+    /// the `?` key map is up
+    help: bool,
+    /// a text popup (`:help <term>`), closed by any key
+    popup: Option<(String, Vec<String>)>,
 }
 
 impl DjScreen {
@@ -858,6 +867,8 @@ impl DjScreen {
             prompt: None,
             agent: Default::default(),
             knob: None,
+            help: false,
+            popup: None,
         }
     }
 
@@ -939,6 +950,28 @@ impl DjScreen {
         let full = prompt::build_prompt(&request, set.as_ref().filter(|s| s.is_active()), &decks, live);
         if let Some(p) = self.prompt.as_mut() {
             p.start(full);
+        }
+    }
+
+    /// `:help [term]`: the glossary entry in a popup, the list of terms, or the key map
+    fn help_command(&mut self, query: &str) {
+        let q = query.trim().to_lowercase();
+        if matches!(q.as_str(), "keys" | "key map" | "keymap" | "map" | "?") {
+            self.settle(Instant::now());
+            self.help = true;
+            return;
+        }
+        if q.is_empty() {
+            self.popup = Some(glossary::index_popup());
+        } else if let Some(term) = glossary::lookup(&q) {
+            self.popup = Some(glossary::help_popup(term));
+        } else {
+            let near = glossary::suggest(&q);
+            self.set_note(if near.is_empty() {
+                format!("no help for {q:?}: :help lists the terms")
+            } else {
+                format!("no help for {q:?}; did you mean: {}", near.join(", "))
+            });
         }
     }
 
@@ -1090,6 +1123,12 @@ impl DjScreen {
             }
             editor::KeyFocus::Deck => {}
         }
+        // the key map and popups close on any key, which does nothing else
+        if key.kind != KeyEventKind::Release && (self.help || self.popup.is_some()) {
+            self.help = false;
+            self.popup = None;
+            return Outcome::Stay;
+        }
         // Esc closes the error overlay first
         if key.code == KeyCode::Esc && key.kind != KeyEventKind::Release {
             if self.session.shared.lock().unwrap().overlay.take().is_some() {
@@ -1133,6 +1172,10 @@ impl DjScreen {
             }
             Nav::RecordToggle => self.record(None),
             Nav::NoSelection => self.set_note("no control selected: f shows the hints, type a label to pick one"),
+            Nav::Help => {
+                self.settle(now);
+                self.help = true;
+            }
             // handled inside DjKeys, which owns the selection
             Nav::Hints | Nav::Toggle | Nav::Step(_) | Nav::Reset => {}
             Nav::LoadSmart => self.load_smart(),
@@ -1196,6 +1239,7 @@ impl DjScreen {
             Command::Record(on) => self.record(on),
             Command::Editor => self.open_editor(Instant::now()),
             Command::Ai(text) => self.open_prompt(Some(text), Instant::now()),
+            Command::Help(query) => self.help_command(&query),
             Command::Nothing => {}
             Command::Unknown(msg) => self.set_note(msg),
         }
@@ -1261,6 +1305,12 @@ impl DjScreen {
             .hints()
             .selected
             .map(|t| format!("◆ {} {}", t.name(), t.format(self.keys.value_of(t, now))));
+        // one line about the picked control, or about what the typed hint letters lead to
+        let explain: Option<String> = if self.keys.hints().active {
+            glossary::hover(&typed, &labels, self.keys.visible()).or_else(|| self.keys.hints().selected.map(|t| glossary::explain(t).to_string()))
+        } else {
+            self.keys.hints().selected.map(|t| glossary::explain(t).to_string())
+        };
         let prompt_visible = self.prompt.as_ref().is_some_and(|p| p.visible);
         let hidden_note = self.prompt.as_ref().filter(|p| !p.visible).and_then(|p| p.hidden_note());
         let note = note.or(hidden_note.as_deref());
@@ -1300,6 +1350,13 @@ impl DjScreen {
                 jump_len: self.keys.jump_len(),
                 gain: [self.keys.gain_shown(0, now), self.keys.gain_shown(1, now)],
                 sync_range: self.keys.sync_range(),
+            },
+            learn: render::LearnView {
+                help: self.help,
+                popup: self.popup.as_ref().map(|(t, l)| (t.as_str(), l.as_slice())),
+                marks: &[],
+                explain: explain.as_deref(),
+                warnings: 0,
             },
         };
         let spots = render::draw(frame.buffer_mut(), area, &view);
@@ -1430,6 +1487,19 @@ mod tests {
         assert_eq!(parse_command("grid a reset"), Command::Grid(0, 0.));
         assert!(matches!(parse_command("grid c x2"), Command::Unknown(_)));
         assert!(matches!(parse_command("qa!"), Command::Unknown(_)));
+    }
+
+    #[test]
+    fn help_commands() {
+        assert_eq!(parse_command("help"), Command::Help(String::new()));
+        assert_eq!(parse_command("help bass swap"), Command::Help("bass swap".into()));
+        assert_eq!(parse_command("h  Hot  Cue"), Command::Help("Hot Cue".into()));
+        assert_eq!(parse_command("?"), Command::Help(String::new()));
+        // every term of the glossary is reachable through the command
+        for term in glossary::TERMS {
+            let Command::Help(q) = parse_command(&format!("help {}", term.name)) else { panic!() };
+            assert_eq!(glossary::lookup(&q).map(|t| t.name), Some(term.name));
+        }
     }
 
     #[test]
