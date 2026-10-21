@@ -233,7 +233,7 @@ keys '?'; sleep 0.3; cap help_closed                # any key closes it, and doe
 cmd help\ bass\ swap; cap help_bass_swap            # glossary popup
 keys a; sleep 0.3
 keys f; sleep 0.3; keys t; sleep 0.3; cap hints_hover   # typed letter: what it leads to
-keys a; sleep 0.3; keys f q; sleep 8; cap hint_explained   # selected: its one-liner beside the chip
+keys a; sleep 0.3; keys f q; sleep 1; cap hint_explained   # selected: its one-liner beside the chip
 keys Escape; sleep 0.3                              # clears the selection
 cmd help\ flux; cap help_unknown                     # a note, not a popup
 # the tutor

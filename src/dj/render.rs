@@ -778,14 +778,17 @@ fn draw_status(buf: &mut Buffer, area: Rect, v: &View) {
         buf.set_stringn(area.x + 7, area.y, msg, text_w.saturating_sub(7), Style::default().fg(Color::Yellow));
     } else if let Some(e) = v.error {
         buf.set_stringn(area.x, area.y, e, text_w, Style::default().fg(Color::Red));
-    } else if let Some(n) = v.note {
-        buf.set_stringn(area.x, area.y, n, text_w, Style::default().fg(Color::Yellow));
     } else if let (Some(_), Some(x)) = (chip, v.learn.explain) {
-        // the selection's one-liner sits right next to its chip
+        // the selection's one-liner sits right next to its chip; a note keeps the left side
         let len = x.chars().count().min(text_w.saturating_sub(1));
         let at = area.x + (text_w - len) as u16;
-        buf.set_stringn(area.x, area.y, "] [ edit · \\ reset", text_w.saturating_sub(len + 1), dim());
+        match v.note {
+            Some(n) => buf.set_stringn(area.x, area.y, n, text_w.saturating_sub(len + 2), Style::default().fg(Color::Yellow)),
+            None => buf.set_stringn(area.x, area.y, "] [ edit · \\ reset", text_w.saturating_sub(len + 1), dim()),
+        };
         buf.set_stringn(at, area.y, x, len, Style::default().fg(Color::Cyan));
+    } else if let Some(n) = v.note {
+        buf.set_stringn(area.x, area.y, n, text_w, Style::default().fg(Color::Yellow));
     } else {
         let hint = "? keys · f hints ] [ \\ edit · A: z cue x play c sync v loop a/s pitch q/w nudge 1-4 cues e/r jump | B: / . , m  k/l  o/p  7-0  u/i | Alt+qwer uiop eq/filter | g b h n t y faders";
         buf.set_stringn(area.x, area.y, hint, text_w, dim());
@@ -1823,6 +1826,14 @@ mod tests {
         let chip = status.find("◆ B low").unwrap();
         let expl = status.find("low: the bass").unwrap();
         assert!(expl < chip && status[expl..chip].trim_end().ends_with("bassline at a time"), "{status}");
+        // a note does not hide it: they share the line
+        let text = render(120, 35, |v| {
+            v.hints = HintView { labels, selected: Some(sel), chip: Some("◆ B low -1.00"), ..HintView::default() };
+            v.learn.explain = Some(crate::dj::glossary::explain(sel));
+            v.note = Some("loading Kaiku onto deck B");
+        });
+        let status = text.lines().last().unwrap();
+        assert!(status.starts_with("loading Kaiku") && status.contains("low: the bass") && status.contains("◆ B low"), "{status}");
         // labels up: the explanation of what the typed letters lead to
         let text = render(120, 35, |v| {
             v.hints = HintView { active: true, typed: "t", labels, ..HintView::default() };
