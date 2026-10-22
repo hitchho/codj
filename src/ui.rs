@@ -368,6 +368,8 @@ pub struct UI<'a> {
     pub command_from_soulseek: bool,
     /// Whether showing soulseek results panel
     pub soulseek_visible: bool,
+    /// the `?` key list of the normal view
+    help_open: bool,
     /// Soulseek connection state
     pub soulseek_connected: bool,
     /// Soulseek config from config file (for connect params)
@@ -716,6 +718,17 @@ impl ListMode {
 
 impl Region {
     pub async fn handle_events<'a>(ui: &mut UI<'a>, key: &KeyEvent) -> io::Result<bool> {
+        // the key list closes on any key, which does nothing else
+        if ui.help_open {
+            if key.kind == KeyEventKind::Press {
+                ui.help_open = false;
+            }
+            return Ok(false);
+        }
+        if key.code == KeyCode::Char('?') && key.kind == KeyEventKind::Press && !ui.typing() {
+            ui.help_open = true;
+            return Ok(false);
+        }
         // the settings panel sits on top and takes every key while open
         if ui.settings_view.is_some() {
             ui.handle_settings_key(key).await;
@@ -1332,6 +1345,7 @@ impl<'a> UI<'a> {
             soulseek_open_on_results: false,
             command_from_soulseek: false,
             soulseek_visible: false,
+            help_open: false,
             soulseek_connected: false,
             soulseek_config: None,
             agent_config: Default::default(),
@@ -2201,9 +2215,23 @@ impl<'a> UI<'a> {
         ])
         .right_aligned();
 
+        // the one hint a first-time user needs
+        let hint = Line::from(vec![
+            Span::from(" ? ").bold(),
+            Span::from("keys · "),
+            Span::from(":dj").bold(),
+            Span::from(" mix · "),
+            Span::from("/").bold(),
+            Span::from(" search · "),
+            Span::from(":q").bold(),
+            Span::from(" quit "),
+        ])
+        .dim()
+        .right_aligned();
         Block::bordered()
             .title(Line::from(title))
             .title(right)
+            .title_bottom(hint)
             .border_style(Style::new().fg(border))
             .render(self.geometry.bar_geo(), frame.buffer_mut());
 
@@ -2328,6 +2356,41 @@ impl<'a> UI<'a> {
         self.render_soulseek(frame);
         self.render_queue(frame);
         self.render_settings(frame);
+        self.render_help(frame);
+    }
+
+    /// `?`: the normal view's keys, vim style
+    fn render_help(&self, frame: &mut Frame) {
+        if !self.help_open {
+            return;
+        }
+        let rows: &[(&str, &str)] = &[
+            ("j k  gg G  Ctrl-d Ctrl-u", "move in the list"),
+            ("Enter", "play the track under the cursor"),
+            ("Space", "pause / continue"),
+            ("h l", "seek 5 s back / forward"),
+            ("H L", "volume down / up"),
+            ("s", "jump to the playing track"),
+            ("/", "search (regex; artist: title: genre:)"),
+            ("q  Q", "queue the track · show the queue"),
+            ("m", "queue 5 similar-sounding tracks"),
+            (":dj  or  M", "DJ mode: two decks, mixing, sets"),
+            (":slsk <query>", "search Soulseek and download"),
+            (":set", "settings"),
+            (":q  ZZ", "quit (music keeps playing in codjd)"),
+        ];
+        let area = frame.area();
+        let w = 76.min(area.width.saturating_sub(4));
+        let h = (rows.len() as u16 + 2).min(area.height.saturating_sub(2));
+        let r = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - h) / 2, w, h);
+        let lines: Vec<Line> = rows
+            .iter()
+            .map(|(k, d)| Line::from(vec![Span::from(format!(" {k:<26}")).bold().cyan(), Span::from(*d)]))
+            .collect();
+        frame.render_widget(Clear, r);
+        Paragraph::new(lines)
+            .block(Block::bordered().title(" keys · any key closes · :dj ? shows the DJ keys "))
+            .render(r, frame.buffer_mut());
     }
 
     fn render_queue(&mut self, frame: &mut Frame) {
