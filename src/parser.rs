@@ -63,9 +63,9 @@ pub struct AgentSettings {
     pub mcp_tools: Option<Vec<String>>,
 }
 
-/// `[knob]`: a hardware knob (rotary encoder sending volume keys) for DJ mode. Off unless `device`
+/// `[knob]`: a hardware knob (rotary encoder sending volume keys): volume, jog wheel. Off unless `device`
 /// is set. Only the three key codes below are ever read from the device.
-#[derive(Deserialize, Serialize, Debug, Clone, Default)]
+#[derive(Deserialize, Serialize, Debug, Clone, Default, PartialEq)]
 pub struct KnobSettings {
     /// part of the input device's name (`evtest` lists them), e.g. "AK820 Consumer Control"
     pub device: Option<String>,
@@ -73,7 +73,7 @@ pub struct KnobSettings {
     pub up: Option<u16>,
     pub down: Option<u16>,
     pub press: Option<u16>,
-    /// take the device exclusively while DJ mode is open, so the system volume stays put
+    /// take the device exclusively while codj runs, so the system volume stays put
     /// (default true; never done for a device that also types letters)
     pub grab: Option<bool>,
 }

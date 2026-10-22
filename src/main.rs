@@ -510,6 +510,7 @@ async fn main() -> Result<()> {
             std::time::Duration::from_millis(33)
         } else {
             ui.update_state().await;
+            ui.poll_knob().await;
             if last_soulseek_poll.map_or(true, |t| t.elapsed() >= soulseek_poll) {
                 ui.poll_soulseek_results().await;
                 ui.poll_queue().await;

@@ -1636,14 +1636,20 @@ impl DjScreen {
         self.agent = agent;
     }
 
-    /// Starts reading the hardware knob when the config names one (`[knob]`)
-    pub fn set_knob(&mut self, settings: &crate::parser::KnobSettings) {
-        self.knob = crate::knob::Knob::start(settings);
+    /// Takes over the hardware knob from the normal view, which gets it back with [`take_knob`]
+    pub fn set_knob(&mut self, knob: Option<crate::knob::Knob>) {
+        self.knob = knob;
     }
 
-    /// What the knob did: turning edits the selected control (else scrolls the library), pressing
-    /// resets it (else loads the highlighted track onto the free deck). Notes show in the status
-    /// line. Nothing acts while a text box or pane has the keyboard.
+    /// Hands the knob back when DJ mode closes
+    pub fn take_knob(&mut self) -> Option<crate::knob::Knob> {
+        self.knob.take()
+    }
+
+    /// What the knob did: turning edits the picked control, scrolls the library while browsing,
+    /// else is the focused deck's jog wheel (scrub when paused, bend when playing). Pressing
+    /// resets the picked control, loads the highlighted track while browsing, else cues a paused
+    /// deck. Notes show in the status line. Nothing acts while a text box or pane has the keyboard.
     fn poll_knob(&mut self) {
         use crate::knob::{KnobAction, Msg};
         let Some(knob) = self.knob.as_ref() else { return };
@@ -1651,14 +1657,29 @@ impl DjScreen {
             match msg {
                 Msg::Note(n) => self.set_note(n),
                 Msg::Action(..) if self.typing() => {}
-                Msg::Action(KnobAction::Up, t) => self.wheel(true, t),
-                Msg::Action(KnobAction::Down, t) => self.wheel(false, t),
+                Msg::Action(KnobAction::Up, t) => self.knob_turn(1, t),
+                Msg::Action(KnobAction::Down, t) => self.knob_turn(-1, t),
                 Msg::Action(KnobAction::Press, t) => {
                     if !self.keys.press(t) {
-                        self.load_smart();
+                        if self.pane.browsing() {
+                            self.load_smart();
+                        } else if !self.keys.jog_press() {
+                            self.set_note("knob press cues a paused deck (the focused one is playing or empty)");
+                        }
                     }
                 }
             }
+        }
+    }
+
+    fn knob_turn(&mut self, dir: i32, now: Instant) {
+        if self.keys.wheel(dir, now) {
+            return;
+        }
+        if self.pane.browsing() {
+            self.pane.scroll(-dir as isize);
+        } else {
+            self.keys.jog(dir, now);
         }
     }
 
@@ -1948,6 +1969,11 @@ impl DjScreen {
                 self.editor = Some(editor::Editor::new_patch(Some(self.session.conn.clone()), &name));
             }
         }
+    }
+
+    /// A note from the normal view (what the knob reader said before DJ mode opened)
+    pub fn note_from_outside(&mut self, text: String) {
+        self.set_note(text);
     }
 
     fn set_note(&mut self, text: impl Into<String>) {

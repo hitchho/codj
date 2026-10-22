@@ -29,6 +29,24 @@ pub const SEND_GAP: Duration = Duration::from_millis(30);
 const STALE: Duration = Duration::from_secs(3);
 /// Without release events: a nudge tap bends the tempo for this long
 pub const NUDGE_TAP: Duration = Duration::from_millis(300);
+/// The knob as a jog wheel: a paused deck moves this many beats a detent (x2, x4, x8 spun fast)
+pub const JOG_SCRUB_BEATS: f64 = 1.0 / 16.0;
+/// ... a playing deck bends by this nudge amount (-1..1 = -4..+4 %) while the knob turns
+pub const JOG_BEND: f64 = 0.5;
+/// detents closer than this count as spinning
+const JOG_FAST: Duration = Duration::from_millis(60);
+/// a bend ends this long after the last detent
+const JOG_RELEASE: Duration = Duration::from_millis(250);
+
+/// The jog wheel's last detent
+#[derive(Debug, Clone, Copy)]
+struct Jog {
+    deck: Deck,
+    dir: i8,
+    last: Instant,
+    streak: u8,
+    bending: bool,
+}
 /// Without release events: key events closer than this are auto-repeat of one key
 const REPEAT_GAP: Duration = Duration::from_millis(120);
 /// A just-moved control ignores polled values for this long (the poll may still be stale)
@@ -507,6 +525,7 @@ pub struct DjKeys {
     held: Vec<Held>,
     slots: Vec<SlotState>,
     out: Vec<DjCall>,
+    jog: Option<Jog>,
     /// without release events: cue preview is on for this deck
     cue_preview: [bool; 2],
     last_event: Option<(KeyCode, Instant)>,
@@ -562,6 +581,7 @@ impl DjKeys {
             focus: 0,
             count: None,
             pending: None,
+            jog: None,
             last: None,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -779,6 +799,44 @@ impl DjKeys {
             return true;
         }
         self.edit(dir, now)
+    }
+
+    /// The knob as the focused deck's jog wheel, like a record under the hand: a paused deck
+    /// scrubs (finding a spot by ear), a playing one bends its tempo while the knob turns
+    pub fn jog(&mut self, dir: i32, now: Instant) {
+        let deck = self.focus;
+        let Some(d) = self.decks.get(deck as usize).filter(|d| d.loaded) else { return };
+        let (playing, gridded, position) = (d.playing, d.has_grid(), d.position);
+        let dir = dir.signum() as i8;
+        let prev = self.jog.filter(|j| j.deck == deck && j.dir == dir);
+        let streak = prev.filter(|j| now.saturating_duration_since(j.last) < JOG_FAST).map_or(0, |j| j.streak.saturating_add(1));
+        if playing {
+            if !prev.is_some_and(|j| j.bending) {
+                self.out.push(DjCall::Nudge { deck: deck as u32, amount: dir as f64 * JOG_BEND });
+            }
+        } else {
+            let beats = dir as f64 * JOG_SCRUB_BEATS * f64::from(1u8 << streak.min(3));
+            if gridded {
+                self.out.push(DjCall::BeatJump { deck: deck as u32, beats });
+            } else {
+                // no grid: a beat counts as half a second
+                self.out.push(DjCall::Seek { deck: deck as u32, seconds: (position + beats * 0.5).max(0.0) });
+            }
+        }
+        // a bend the other way replaces the old one; the release in `tick` ends it
+        self.jog = Some(Jog { deck, dir, last: now, streak, bending: playing });
+    }
+
+    /// Knob press on the jog wheel: cues a paused deck at the spot it was scrubbed to. A
+    /// playing deck is left alone (a stray press must not stop the room); false then.
+    pub fn jog_press(&mut self) -> bool {
+        let deck = self.focus;
+        if !self.decks.get(deck as usize).is_some_and(|d| d.loaded && !d.playing) {
+            return false;
+        }
+        self.out.push(DjCall::Cue { deck: deck as u32, pressed: true });
+        self.out.push(DjCall::Cue { deck: deck as u32, pressed: false });
+        true
     }
 
     /// Knob press: resets the selection; false when there is none
@@ -1323,6 +1381,11 @@ impl DjKeys {
     /// Advances ramps and timeouts; returns the calls to send now (at most one `Set` per control
     /// per [`SEND_GAP`]).
     pub fn tick(&mut self, now: Instant) -> Vec<DjCall> {
+        // the jog bend ends once the knob stops
+        if let Some(j) = self.jog.filter(|j| j.bending && now.saturating_duration_since(j.last) > JOG_RELEASE) {
+            self.out.push(DjCall::Nudge { deck: j.deck as u32, amount: 0.0 });
+            self.jog = None;
+        }
         // lost releases / ended nudge taps
         let release = self.release;
         let mut gone = Vec::new();
@@ -2404,6 +2467,44 @@ mod tests {
         assert_eq!(k.tick(t0 + ms(200)), vec![DjCall::Nudge { deck: 0, amount: 1.0 }]);
         k.on_key(&rel(']'), t0 + ms(300));
         assert_eq!(k.tick(t0 + ms(300)), vec![DjCall::Nudge { deck: 0, amount: 0.0 }]);
+    }
+
+    #[test]
+    fn the_knob_is_a_jog_wheel() {
+        let t0 = Instant::now();
+        let mut k = keys(false);
+        let gridded = |playing| DeckInfo { track_bpm: 120.0, beat_in_bar: 1, position: 10.0, ..deck(playing) };
+        // paused: a slow turn scrubs a sixteenth of a beat a detent, spinning goes faster
+        k.set_snapshot(&[gridded(false), deck(false)], &MixerInfo::default());
+        k.jog(1, t0);
+        k.jog(1, t0 + ms(500));
+        k.jog(1, t0 + ms(520));
+        k.jog(1, t0 + ms(540));
+        k.jog(-1, t0 + ms(560));
+        let jumps: Vec<f64> = k.tick(t0 + ms(600)).iter().map(|c| match c {
+            DjCall::BeatJump { deck: 0, beats } => *beats * 16.0,
+            other => panic!("{other:?}"),
+        }).collect();
+        assert_eq!(jumps, [1.0, 1.0, 2.0, 4.0, -1.0]);
+        // the press cues the paused deck where the scrub left it
+        assert!(k.jog_press());
+        assert_eq!(k.tick(t0 + ms(700)), [DjCall::Cue { deck: 0, pressed: true }, DjCall::Cue { deck: 0, pressed: false }]);
+        // playing: the turn bends the tempo once, the bend ends when the knob stops
+        k.set_snapshot(&[gridded(true), deck(false)], &MixerInfo::default());
+        k.jog(1, t0 + ms(1000));
+        k.jog(1, t0 + ms(1100));
+        assert_eq!(k.tick(t0 + ms(1150)), [DjCall::Nudge { deck: 0, amount: JOG_BEND }]);
+        k.jog(-1, t0 + ms(1200));
+        assert_eq!(k.tick(t0 + ms(1250)), [DjCall::Nudge { deck: 0, amount: -JOG_BEND }]);
+        assert!(k.tick(t0 + ms(1400)).is_empty());
+        assert_eq!(k.tick(t0 + ms(1500)), [DjCall::Nudge { deck: 0, amount: 0.0 }]);
+        // a stray press never cues a playing deck
+        assert!(!k.jog_press());
+        assert!(k.tick(t0 + ms(1600)).is_empty());
+        // the focused deck is the one that moves
+        k.set_focus(1);
+        k.jog(1, t0 + ms(2000));
+        assert!(matches!(k.tick(t0 + ms(2000))[..], [DjCall::Seek { deck: 1, .. }]), "no grid: a seek");
     }
 
     #[test]

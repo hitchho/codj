@@ -387,8 +387,12 @@ pub struct UI<'a> {
     pub soulseek_config: Option<crate::parser::SoulseekSettings>,
     /// `[agent]` from the config file, for the DJ screen's prompt box
     pub agent_config: crate::parser::AgentSettings,
-    /// `[knob]` from the config, for DJ mode
+    /// `[knob]` from the config
     pub knob_config: crate::parser::KnobSettings,
+    /// the hardware knob while the normal view has it: volume and mute; DJ mode borrows it
+    knob: Option<crate::knob::Knob>,
+    /// what the knob reader had to say while the normal view had it, shown in DJ mode
+    knob_note: Option<String>,
     /// the terminal speaks the kitty keyboard protocol (set by main)
     pub keyboard_enhanced: bool,
     /// live DJ mode, when on; it replaces the whole normal view
@@ -1436,6 +1440,8 @@ impl<'a> UI<'a> {
             soulseek_config: None,
             agent_config: Default::default(),
             knob_config: Default::default(),
+            knob: None,
+            knob_note: None,
             keyboard_enhanced: false,
             dj: None,
             dj_kbd_pushed: false,
@@ -1465,7 +1471,10 @@ impl<'a> UI<'a> {
         let conn = self.state.proxy.inner().connection().clone();
         let mut dj = crate::dj::DjScreen::new(conn, library, self.dj_kbd_pushed);
         dj.set_agent(self.agent_config.clone());
-        dj.set_knob(&self.knob_config);
+        dj.set_knob(self.knob.take());
+        if let Some(n) = self.knob_note.take() {
+            dj.note_from_outside(n);
+        }
         self.dj = Some(Box::new(dj));
     }
 
@@ -1474,6 +1483,7 @@ impl<'a> UI<'a> {
         let Some(mut dj) = self.dj.take() else { return };
         // release held keys and send pending taps before the session goes away
         dj.settle(Instant::now());
+        self.knob = dj.take_knob();
         drop(dj);
         if self.dj_text_pushed {
             crate::kbd_pop();
@@ -1824,7 +1834,19 @@ impl<'a> UI<'a> {
         self.music_list.setp_szie = config.step_size.unwrap_or(7);
         self.geometry.configuration.lyrics = self.displayed_lyrics.displayable;
         self.agent_config = config.agent.clone().unwrap_or_default();
-        self.knob_config = config.knob.clone().unwrap_or_default();
+        let knob = config.knob.clone().unwrap_or_default();
+        // (re)open the knob when its settings change; the old reader is dropped first, which
+        // releases its grab
+        if knob != self.knob_config || (self.knob.is_none() && self.dj.is_none()) {
+            self.knob = None;
+            if let Some(dj) = self.dj.as_mut() {
+                dj.set_knob(None);
+                dj.set_knob(crate::knob::Knob::start(&knob));
+            } else {
+                self.knob = crate::knob::Knob::start(&knob);
+            }
+        }
+        self.knob_config = knob;
 
         // store soulseek config for later connection via dbus
         if let Some(slsk) = &config.soulseek {
@@ -3191,6 +3213,20 @@ impl<'a> UI<'a> {
             self.displayed_lyrics
                 .state
                 .select(Some(self.displayed_lyrics.lyrics.lines.len() - 1))
+        }
+    }
+
+    /// The knob in the normal view: turning steps the volume 2 % per detent, pressing mutes
+    pub async fn poll_knob(&mut self) {
+        use crate::knob::{KnobAction, Msg};
+        let Some(knob) = self.knob.as_ref() else { return };
+        for msg in knob.drain() {
+            match msg {
+                Msg::Note(n) => self.knob_note = Some(n),
+                Msg::Action(KnobAction::Up, _) => self.state.set_volume(self.state.volume() + 0.02).await,
+                Msg::Action(KnobAction::Down, _) => self.state.set_volume(self.state.volume() - 0.02).await,
+                Msg::Action(KnobAction::Press, _) => self.state.toggle_mute().await,
+            }
         }
     }
 

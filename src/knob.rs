@@ -1,13 +1,14 @@
-//! A hardware knob (a rotary encoder that shows up as volume keys) for DJ mode: turning it
-//! edits the selected control, pressing it resets the control.
+//! A hardware knob (a rotary encoder that shows up as volume keys): codj's volume in the normal
+//! view; in DJ mode it edits the picked control, scrolls the library or is the focused deck's
+//! jog wheel.
 //!
 //! A background thread reads one evdev device and forwards only the three configured key codes
 //! (up, down, press) to the UI loop. Every other event is dropped on the spot: nothing else is
 //! logged, stored or forwarded, because the device may well be a keyboard.
 //!
-//! The device can be grabbed (EVIOCGRAB) while DJ mode is open so the system volume does not move
-//! meanwhile. The grab belongs to the open file, so it ends when [`Knob`] is dropped (leaving DJ
-//! mode) and, should codj die, when the kernel closes the file. A device that also types letters
+//! The device can be grabbed (EVIOCGRAB) while codj runs so the system volume does not move
+//! meanwhile. The grab belongs to the open file, so it ends when [`Knob`] is dropped (quitting)
+//! and, should codj die, when the kernel closes the file. A device that also types letters
 //! is never grabbed: that would swallow the keyboard.
 
 use std::os::fd::AsRawFd;

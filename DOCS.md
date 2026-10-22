@@ -307,7 +307,7 @@ Codjd does not report a manual gain trim or the sync range, so codj shows the la
 
 ## Hardware knob
 
-A rotary encoder that sends volume keys (the knob on many keyboards' media cluster) can drive the same editing. It is off until the config names the device:
+A rotary encoder that sends volume keys (the knob on many keyboards' media cluster, e.g. the Ajazz AK820's) is codj's volume in the normal view and a jog wheel and control knob in DJ mode. It is off until the config names the device:
 
 ```toml
 [knob]
@@ -315,12 +315,16 @@ device = "AK820 Consumer Control"   # part of the input device's name (see `evte
 up = 115                            # Linux input key codes, these are the defaults:
 down = 114                          #   KEY_VOLUMEUP, KEY_VOLUMEDOWN,
 press = 113                         #   KEY_MUTE
-grab = true                         # EVIOCGRAB the device only while DJ mode is open
+grab = true                         # EVIOCGRAB the device while codj runs
 ```
 
-- Turning edits the selected control with the same acceleration (up = +); press resets it. With nothing selected, turning scrolls the library and a press loads the highlighted track onto the deck that is not playing (like `Enter`).
+- **Normal view:** turning changes codjd's volume 2 % a detent; a press mutes / unmutes.
+- **DJ mode**, first match wins:
+  - a control is picked (`f` and its label): turning edits it with the same acceleration (up = +), a press resets it;
+  - the library is browsed (`Tab`): turning scrolls it, a press loads the highlighted track onto the deck that is not playing (like `Enter`);
+  - otherwise the knob is the **jog wheel** of the focused deck, like a record under the hand. Paused, turning scrubs the position to find a spot by ear: 1/16 beat a detent, x2 / x4 / x8 when spun fast (detents under 60 ms apart); without a beat grid a beat counts as half a second. Playing, turning bends the tempo (±2 %) while the knob moves, to line up the beats; the bend ends 250 ms after the last detent. A press cues the paused deck at the spot (then `Space` plays from it, `ma` keeps it as a mark); on a playing deck a press does nothing, so a stray press never stops the room.
 - Only the three configured codes are acted on; everything else the device sends is dropped unseen (never logged or stored), because the device may also be your keyboard.
-- With `grab = true` the device is taken exclusively while DJ mode is open, so the system volume does not move; leaving DJ mode releases it again (and so does the kernel if codj dies or panics, because the grab belongs to the open file). A device that also has letter keys is never grabbed, it would swallow your typing; use the consumer-control node (`device` matches the first node whose name contains it and that has one of the configured keys).
+- With `grab = true` the device is taken exclusively while codj runs, so the system volume does not move with it; quitting codj releases it (and so does the kernel if codj dies or panics, because the grab belongs to the open file). A device that also has letter keys is never grabbed, it would swallow your typing; use the consumer-control node (`device` matches the first node whose name contains it and that has one of the configured keys).
 - It needs read access to `/dev/input/event*` (the `input` group). A missing device, no permission or an unplugged knob shows one note in the status line; DJ mode works without it.
 - The knob is read by the `evdev` crate on its own thread and handed to the screen over a channel; `cargo test` includes a test with a virtual device that is skipped when `/dev/uinput` is not writable.
 
