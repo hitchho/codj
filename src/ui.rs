@@ -288,6 +288,8 @@ pub struct UI<'a> {
     search_bufr: Input,
     /// command buffer, used to input commands
     command_bufr: Input,
+    /// vim count typed before a motion (`5j`)
+    count: Option<usize>,
     /// the last `/` search, for `n` / `N`
     last_search: Option<String>,
     /// Tab completion of `:` commands: (what was typed, index of the shown match)
@@ -627,9 +629,23 @@ impl ListMode {
                         // No `g` key pressed beforehand
                         AncitipationMode::Normal => match key.code {
                             KeyCode::Enter => ui.play_selected_music().await,
+                            // a count: digits before a motion (`0` alone is not one)
+                            KeyCode::Char(d @ '0'..='9') if d != '0' || ui.count.is_some() => {
+                                let n = ui.count.unwrap_or(0) * 10 + d.to_digit(10).unwrap() as usize;
+                                ui.count = Some(n.min(9999));
+                                return Ok(false);
+                            }
                             KeyCode::Char(c) => match c {
-                                'j' => ui.list_down(),
-                                'k' => ui.list_up(),
+                                'j' => {
+                                    for _ in 0..ui.count.take().unwrap_or(1) {
+                                        ui.list_down_clamped();
+                                    }
+                                }
+                                'k' => {
+                                    for _ in 0..ui.count.take().unwrap_or(1) {
+                                        ui.list_up_clamped();
+                                    }
+                                }
                                 '/' | 'f' => {
                                     ui.select_region(Region::Search);
                                     ui.change_list_mode(ListMode::Search)
@@ -644,8 +660,16 @@ impl ListMode {
                                 'g' => ui.anticipate('g'),
                                 'q' => ui.queue_selected(false).await,
                                 'm' => ui.queue_similar().await,
-                                'h' => ui.previous_5s().await,
-                                'l' => ui.next_5s().await,
+                                'h' => {
+                                    for _ in 0..ui.count.take().unwrap_or(1).min(60) {
+                                        ui.previous_5s().await;
+                                    }
+                                }
+                                'l' => {
+                                    for _ in 0..ui.count.take().unwrap_or(1).min(60) {
+                                        ui.next_5s().await;
+                                    }
+                                }
                                 // some terminals send shifted letters without the SHIFT flag
                                 c if c.is_ascii_uppercase() => {
                                     if ui.list_upper_key(c).await {
@@ -686,6 +710,10 @@ impl ListMode {
                 }
                 _ => {}
             }
+        }
+        // a count only applies to the next motion
+        if key.kind == event::KeyEventKind::Press {
+            ui.count = None;
         }
         Ok(false)
     }
@@ -1336,6 +1364,7 @@ impl<'a> UI<'a> {
             mode: ListMode::default(),
             search_bufr: Input::default(),
             command_bufr: Input::default(),
+            count: None,
             last_search: None,
             completion: None,
             command_error: None,
@@ -2411,7 +2440,7 @@ impl<'a> UI<'a> {
             return;
         }
         let rows: &[(&str, &str)] = &[
-            ("j k  gg G  Ctrl-d Ctrl-u", "move in the list"),
+            ("j k  5j  gg G  Ctrl-d Ctrl-u", "move (counts work: 5j, 3l)"),
             ("Enter", "play the track under the cursor"),
             ("Space", "pause / continue"),
             ("h l", "seek 5 s back / forward"),
@@ -3353,6 +3382,17 @@ impl<'a> UI<'a> {
 
     /// Closes the search and shows the full list again, keeping the cursor on the track that was
     /// highlighted in the results
+    /// `j` with a count: stops at the end instead of wrapping around like a single `j`
+    fn list_down_clamped(&mut self) {
+        if self.music_list.selected + 1 < self.music_list.musics.len() {
+            self.music_list.selected += 1;
+        }
+    }
+
+    fn list_up_clamped(&mut self) {
+        self.music_list.selected = self.music_list.selected.saturating_sub(1);
+    }
+
     /// `n` / `N`: the next / previous track matching the last `/` search, wrapping around
     fn search_next(&mut self, forward: bool) {
         let Some(query) = self.last_search.clone() else {
