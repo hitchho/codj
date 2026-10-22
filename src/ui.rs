@@ -2889,13 +2889,28 @@ impl<'a> UI<'a> {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(border_style)
-                    .title(title),
+                    .title(title)
+                    .title_bottom(
+                        Line::from(" Enter get · a album · / filter · Tab · Esc ")
+                            .dim()
+                            .right_aligned(),
+                    ),
             )
             .highlight_style(self.soulseek_highlight(true));
 
         self.soulseek_results_state
             .select((!self.soulseek_shown.is_empty()).then_some(self.soulseek_selected));
         frame.render_stateful_widget(table, area, &mut self.soulseek_results_state);
+        // nothing searched yet: say how
+        if self.soulseek_ranked.is_empty() {
+            let inner = Rect::new(area.x + 2, area.y + 3, area.width.saturating_sub(4), area.height.saturating_sub(4));
+            let lines = vec![
+                Line::from(vec![Span::from(":slsk <artist or title>").bold().cyan(), Span::from("  search the Soulseek network")]),
+                Line::from("Results stream in over a few seconds, best quality first."),
+                Line::from("Downloads land in the library and show up in the list."),
+            ];
+            Paragraph::new(lines).wrap(Wrap { trim: false }).render(inner, frame.buffer_mut());
+        }
     }
 
     /// Highlight style of the selected row, only visible in the focused list
@@ -2912,7 +2927,7 @@ impl<'a> UI<'a> {
 
     fn render_soulseek_downloads(&mut self, frame: &mut Frame, area: Rect, border_style: Style) {
         let title = format!(
-            " downloads ({}) - {} ",
+            " downloads ({}) {} ",
             self.soulseek_download_list.len(),
             self.soulseek_status
         );
@@ -2973,7 +2988,12 @@ impl<'a> UI<'a> {
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(border_style)
-                    .title(title),
+                    .title(title)
+                    .title_bottom(
+                        Line::from(" x/dd remove · J/K reorder · Tab ")
+                            .dim()
+                            .right_aligned(),
+                    ),
             )
             .highlight_style(self.soulseek_highlight(false));
 
