@@ -288,6 +288,8 @@ pub struct UI<'a> {
     search_bufr: Input,
     /// command buffer, used to input commands
     command_bufr: Input,
+    /// Tab completion of `:` commands: (what was typed, index of the shown match)
+    completion: Option<(String, usize)>,
     /// error from the last submitted command, shown in the command box title
     command_error: Option<String>,
     /// helps reading a combination of keys like `gg`
@@ -684,6 +686,26 @@ impl ListMode {
     async fn handle_command(ui: &mut UI<'_>, key: &KeyEvent) -> std::io::Result<bool> {
         if key.kind == event::KeyEventKind::Press {
             ui.run_list_script(key, ListMode::Search);
+            // Tab / Shift-Tab complete the command name, like vim's wildmenu
+            if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+                let typed = ui.command_bufr.value().to_string();
+                if !typed.contains(' ') {
+                    let (base, i) = match ui.completion.take() {
+                        Some((base, i)) if key.code == KeyCode::BackTab => (base, i.wrapping_sub(1)),
+                        Some((base, i)) => (base, i + 1),
+                        None => (typed.clone(), 0),
+                    };
+                    let matches = complete_command(&base);
+                    if !matches.is_empty() {
+                        let i = i % matches.len();
+                        ui.command_bufr = Input::new(matches[i].to_string());
+                        ui.completion = Some((base, i));
+                        ui.command_error = (matches.len() > 1).then(|| matches.join("  "));
+                    }
+                }
+                return Ok(false);
+            }
+            ui.completion = None;
             if key.modifiers == KeyModifiers::NONE {
                 match key.code {
                     KeyCode::Enter => {
@@ -1307,6 +1329,7 @@ impl<'a> UI<'a> {
             mode: ListMode::default(),
             search_bufr: Input::default(),
             command_bufr: Input::default(),
+            completion: None,
             command_error: None,
             anticipation_mode: AncitipationMode::default(),
             displayed_repeat: Repeat::default(),
@@ -4677,5 +4700,30 @@ fn sort_label(sort: &Sort) -> &'static str {
         Sort::ArtistAscending => "artist ↑",
         Sort::ArtistDescending => "artist ↓",
         Sort::Shuffle => "shuffle",
+    }
+}
+
+/// `:` commands, for completion (the main name of each; aliases still work when typed)
+const COMMANDS: &[&str] = &[
+    "dj", "slsk", "set", "dupes", "help", "q", "reload", "pause", "resume", "toggle_mute",
+    "create_playlist", "add_to_playlist", "rename_playlist", "remove_playlist", "slsk_connect",
+    "slsk_disconnect",
+];
+
+/// Commands starting with `typed`, in a stable order
+fn complete_command(typed: &str) -> Vec<&'static str> {
+    COMMANDS.iter().copied().filter(|c| c.starts_with(typed)).collect()
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+
+    #[test]
+    fn completes_command_names() {
+        assert_eq!(complete_command("d"), ["dj", "dupes"]);
+        assert_eq!(complete_command("sl"), ["slsk", "slsk_connect", "slsk_disconnect"]);
+        assert!(complete_command("zz").is_empty());
+        assert_eq!(complete_command("").len(), COMMANDS.len());
     }
 }
