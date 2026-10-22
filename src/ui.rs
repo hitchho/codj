@@ -288,6 +288,8 @@ pub struct UI<'a> {
     search_bufr: Input,
     /// command buffer, used to input commands
     command_bufr: Input,
+    /// the last `/` search, for `n` / `N`
+    last_search: Option<String>,
     /// Tab completion of `:` commands: (what was typed, index of the shown match)
     completion: Option<(String, usize)>,
     /// error from the last submitted command, shown in the command box title
@@ -550,7 +552,11 @@ impl ListMode {
                             ui.soulseek_search(&query).await;
                             return;
                         }
-                        ui.play_selected_music().await;
+                        // like vim's /: Enter puts the cursor on the match, n / N go on from there;
+                        // a second Enter plays it
+                        if !query.is_empty() {
+                            ui.last_search = Some(query);
+                        }
                         ui.leave_search();
                         return;
                     }
@@ -634,6 +640,7 @@ impl ListMode {
                                     ui.select_region(Region::Command);
                                 }
                                 's' => ui.goto_playing(),
+                                'n' => ui.search_next(true),
                                 'g' => ui.anticipate('g'),
                                 'q' => ui.queue_selected(false).await,
                                 'm' => ui.queue_similar().await,
@@ -1329,6 +1336,7 @@ impl<'a> UI<'a> {
             mode: ListMode::default(),
             search_bufr: Input::default(),
             command_bufr: Input::default(),
+            last_search: None,
             completion: None,
             command_error: None,
             anticipation_mode: AncitipationMode::default(),
@@ -2409,7 +2417,7 @@ impl<'a> UI<'a> {
             ("h l", "seek 5 s back / forward"),
             ("H L", "volume down / up"),
             ("s", "jump to the playing track"),
-            ("/", "search (regex; artist: title: genre:)"),
+            ("/  n N", "search (regex; artist: title: genre:), next / prev match"),
             ("q  Q", "queue the track · show the queue"),
             ("m", "queue 5 similar-sounding tracks"),
             (":dj  or  M", "DJ mode: two decks, mixing, sets"),
@@ -2563,6 +2571,7 @@ impl<'a> UI<'a> {
         self.anticipation_mode = AncitipationMode::Normal;
         match c {
             'G' => self.goto_bottom(),
+            'N' => self.search_next(false),
             'Q' => self.toggle_queue().await,
             // D is taken by the lyrics download
             'M' => self.enter_dj().await,
@@ -3344,6 +3353,27 @@ impl<'a> UI<'a> {
 
     /// Closes the search and shows the full list again, keeping the cursor on the track that was
     /// highlighted in the results
+    /// `n` / `N`: the next / previous track matching the last `/` search, wrapping around
+    fn search_next(&mut self, forward: bool) {
+        let Some(query) = self.last_search.clone() else {
+            self.list_note = Some(("no previous search (/ to search)".into(), Instant::now()));
+            return;
+        };
+        let hits: std::collections::HashSet<usize> = crate::search::search_musics(&query, &self.music_list.musics)
+            .into_iter()
+            .map(|m| m.index)
+            .collect();
+        let len = self.music_list.musics.len();
+        let from = self.music_list.selected;
+        let found = (1..=len)
+            .map(|step| if forward { (from + step) % len } else { (from + len - step % len) % len })
+            .find(|&i| hits.contains(&self.music_list.musics[i].index));
+        match found {
+            Some(i) => self.music_list.selected = i,
+            None => self.list_note = Some((format!("no match for /{query}"), Instant::now())),
+        }
+    }
+
     fn leave_search(&mut self) {
         let keep = self
             .music_list
