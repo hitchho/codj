@@ -918,6 +918,17 @@ pub struct Pane {
     all: Vec<Music>,
     lib: Vec<Music>,
     sel: usize,
+    /// `g` pressed once; a second `g` goes to the top
+    pending_g: bool,
+}
+
+/// What a key does while browsing the library
+#[derive(Debug, PartialEq, Eq)]
+pub enum Browse {
+    Nothing,
+    Load(u8),
+    LoadFree,
+    Help,
 }
 
 /// What a `:` command asks for
@@ -1157,11 +1168,51 @@ impl Pane {
             lib: library.clone(),
             all: library,
             sel: 0,
+            pending_g: false,
         }
     }
 
     pub fn typing(&self) -> bool {
-        self.focus != Focus::Decks
+        matches!(self.focus, Focus::Search | Focus::Command)
+    }
+
+    pub fn browsing(&self) -> bool {
+        self.focus == Focus::Library
+    }
+
+    pub fn start_browse(&mut self) {
+        self.pending_g = false;
+        self.focus = Focus::Library;
+    }
+
+    /// A key while browsing the library, vim style. The deck keys are off meanwhile.
+    pub fn browse_key(&mut self, key: &KeyEvent) -> Browse {
+        if key.kind == KeyEventKind::Release {
+            return Browse::Nothing;
+        }
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let g = std::mem::take(&mut self.pending_g);
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => self.scroll(1),
+            KeyCode::Char('k') | KeyCode::Up => self.scroll(-1),
+            KeyCode::Char('d') if ctrl => self.scroll(10),
+            KeyCode::Char('u') if ctrl => self.scroll(-10),
+            KeyCode::PageDown => self.scroll(10),
+            KeyCode::PageUp => self.scroll(-10),
+            KeyCode::Char('g') if g => self.sel = 0,
+            KeyCode::Char('g') => self.pending_g = true,
+            KeyCode::Char('G') | KeyCode::End => self.sel = self.lib.len().saturating_sub(1),
+            KeyCode::Home => self.sel = 0,
+            KeyCode::Char('/') => self.start_search(),
+            KeyCode::Char(':') => self.start_command(),
+            KeyCode::Char('a') | KeyCode::Char('<') => return Browse::Load(0),
+            KeyCode::Char('b') | KeyCode::Char('>') => return Browse::Load(1),
+            KeyCode::Enter => return Browse::LoadFree,
+            KeyCode::Char('?') => return Browse::Help,
+            KeyCode::Esc | KeyCode::Tab | KeyCode::BackTab => self.focus = Focus::Decks,
+            _ => {}
+        }
+        Browse::Nothing
     }
 
     fn refilter(&mut self) {
@@ -1218,19 +1269,24 @@ impl Pane {
         let plain = key.modifiers.difference(KeyModifiers::SHIFT).is_empty();
         let mut submitted = None;
         match key.code {
+            // a search returns to browsing the (filtered) list, like / in vim
             KeyCode::Esc => {
                 if searching {
                     self.search.clear();
                     self.refilter();
+                    self.focus = Focus::Library;
+                } else {
+                    self.focus = Focus::Decks;
                 }
-                self.focus = Focus::Decks;
             }
-            KeyCode::Tab if searching => self.focus = Focus::Decks,
+            KeyCode::Tab if searching => self.focus = Focus::Library,
             KeyCode::Enter => {
-                if !searching {
+                if searching {
+                    self.focus = Focus::Library;
+                } else {
                     submitted = Some(self.input.value().trim().to_string());
+                    self.focus = Focus::Decks;
                 }
-                self.focus = Focus::Decks;
             }
             KeyCode::Up if searching => self.scroll(-1),
             KeyCode::Down if searching => self.scroll(1),
@@ -1878,6 +1934,15 @@ impl DjScreen {
                 return outcome;
             }
         }
+        if self.pane.browsing() {
+            match self.pane.browse_key(key) {
+                Browse::Load(d) => self.load(d),
+                Browse::LoadFree => self.load_smart(),
+                Browse::Help => self.help = true,
+                Browse::Nothing => {}
+            }
+            return Outcome::Stay;
+        }
         if self.pane.typing() {
             return match self.pane.handle_typing(key) {
                 Some(cmd) => self.run_command(&cmd),
@@ -1897,7 +1962,7 @@ impl DjScreen {
             }
             Nav::Search => {
                 self.settle(now);
-                self.pane.start_search()
+                self.pane.start_browse()
             }
             Nav::LibUp => self.pane.scroll(-1),
             Nav::LibDown => self.pane.scroll(1),
@@ -2284,6 +2349,35 @@ mod tests {
         type_str(&mut p, "load a");
         p.handle_typing(&key(KeyCode::Esc));
         assert!(!p.typing());
+    }
+
+    #[test]
+    fn library_browses_with_vim_keys() {
+        let lib: Vec<Music> = (0..30).map(|i| Music { title: format!("t{i}"), ..Default::default() }).collect();
+        let mut p = Pane::new(lib);
+        p.start_browse();
+        let k = |c: KeyCode| KeyEvent::new(c, KeyModifiers::NONE);
+        p.browse_key(&k(KeyCode::Char('j')));
+        p.browse_key(&k(KeyCode::Char('j')));
+        assert_eq!(p.sel, 2);
+        p.browse_key(&k(KeyCode::Char('k')));
+        assert_eq!(p.sel, 1);
+        p.browse_key(&k(KeyCode::Char('G')));
+        assert_eq!(p.sel, 29);
+        p.browse_key(&k(KeyCode::Char('g')));
+        p.browse_key(&k(KeyCode::Char('g')));
+        assert_eq!(p.sel, 0);
+        p.browse_key(&KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert_eq!(p.sel, 10);
+        assert_eq!(p.browse_key(&k(KeyCode::Char('a'))), Browse::Load(0));
+        assert_eq!(p.browse_key(&k(KeyCode::Char('b'))), Browse::Load(1));
+        assert_eq!(p.browse_key(&k(KeyCode::Enter)), Browse::LoadFree);
+        p.browse_key(&k(KeyCode::Char('/')));
+        assert_eq!(p.focus, Focus::Search);
+        p.handle_typing(&k(KeyCode::Enter));
+        assert_eq!(p.focus, Focus::Library, "a search returns to browsing");
+        p.browse_key(&k(KeyCode::Esc));
+        assert_eq!(p.focus, Focus::Decks);
     }
 
     #[test]

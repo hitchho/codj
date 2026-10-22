@@ -31,6 +31,8 @@ pub enum Focus {
     /// performance keys are live
     #[default]
     Decks,
+    /// browsing the library with vim keys (j/k, gg/G, / search, a/b load)
+    Library,
     /// typing in the library search
     Search,
     /// typing a `:` command
@@ -768,7 +770,7 @@ fn draw_header(buf: &mut Buffer, area: Rect, v: &View) {
         None => Line::from(vec![
             Span::styled(" DJ ", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
             Span::styled(
-                "  Esc back · Tab search · < > load A/B · Enter load · Shift+; command · ? keys",
+                "  Esc back · Tab library (j/k, a/b load) · : command · ? keys",
                 dim(),
             ),
         ]),
@@ -1299,16 +1301,23 @@ fn draw_mixer(buf: &mut Buffer, area: Rect, v: &View, spots: &mut Vec<Spot>) {
 
 fn draw_library(buf: &mut Buffer, area: Rect, v: &View) {
     let searching = v.focus == Focus::Search;
+    let browsing = v.focus == Focus::Library;
+    let filter = if v.search.is_empty() { String::new() } else { format!(" /{}", v.search) };
     let title = if searching {
-        format!(" Library {}/{} — search: {}█ ", v.lib.len(), v.lib_total, v.input)
-    } else if !v.search.is_empty() {
-        format!(" Library {}/{} — /{} (Tab edits) ", v.lib.len(), v.lib_total, v.search)
+        format!(" Library {}/{} — /{}█ (Enter done · Esc clear) ", v.lib.len(), v.lib_total, v.input)
+    } else if browsing {
+        format!(
+            " LIBRARY {}/{}{} · j/k move · / search · a or b load onto deck · Enter free deck · Tab/Esc decks ",
+            v.lib.len(),
+            v.lib_total,
+            filter
+        )
     } else {
-        format!(" Library {} (Tab: regex search · artist:/title:/genre:) ", v.lib_total)
+        format!(" Library {}{} · Tab to browse ", v.lib_total, filter)
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(if searching { Color::Yellow } else { DIM }))
+        .border_style(Style::default().fg(if searching || browsing { Color::Yellow } else { DIM }))
         .title(title);
     let inner = block.inner(area);
     block.render(area, buf);
@@ -1567,7 +1576,9 @@ mod tests {
             v.focus = Focus::Search;
             v.input = "tekno";
         });
-        assert!(text.contains("search: tekno█"));
+        assert!(text.contains("/tekno█"));
+        let text = render(120, 35, |v| v.focus = Focus::Library);
+        assert!(text.contains("LIBRARY") && text.contains("j/k move"));
         let text = render(120, 35, |v| {
             v.focus = Focus::Command;
             v.input = "q";

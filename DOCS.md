@@ -111,6 +111,20 @@ The client captures the mouse, so selecting text in the terminal needs `Shift` h
 
 Soulseek integration allows searching and downloading music from the soulseek p2p network. This feature is completely optional and only activates when configured.
 
+
+### Library (vim keys)
+
+`Tab` focuses the library; the deck keys are off while it has focus (the box turns yellow and says `LIBRARY`).
+
+|Key|Does|
+|---|----|
+|`j` / `k`, `Ctrl-d` / `Ctrl-u`, `gg` / `G`|Move|
+|`/`|Search (regex, `artist:` `title:` `genre:`); `Enter` keeps the filter and goes back to the list, `Esc` clears it|
+|`a` / `b`|Load the highlighted track onto deck A / B|
+|`Enter`|Load it onto the deck that is not playing|
+|`:`|Command line|
+|`Tab` / `Esc`|Back to the deck keys|
+
 ## Registration
 
 Soulseek uses optimistic registration - if you connect with a username that doesn't exist, the server automatically creates an account with that username and password. No separate registration step is needed.
