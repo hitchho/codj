@@ -26,6 +26,7 @@ The first five minutes, all vim keys:
 | `:slsk <artist>` | search Soulseek and download (first time: `:set`, fill in a username) |
 | `:dj` | DJ mode: two decks; `Tab` then `j`/`k` and `a`/`b` loads a track onto deck A/B |
 | `:tutor` | a guided first mix with your own tracks (opens DJ mode) |
+| `:set new friday`, `F9` | in DJ mode: start a set, then record your mixing into it as code (`F10` edits it) |
 | `:q` | quit (the music keeps playing in codjd) |
 
 `:` commands complete with `Tab`. A config from before the renames (`~/.config/musa`, `~/.config/mplayer-client`) is still read.
