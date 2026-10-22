@@ -1973,8 +1973,8 @@ impl<'a> UI<'a> {
             let lines = vec![
                 Line::from("No music in the library yet.").bold(),
                 Line::from(""),
-                Line::from("codjd plays the folder set as `path` in ~/.config/codjd/config.toml;"),
-                Line::from("files copied there show up by themselves."),
+                Line::from("codjd plays ~/Music, or the folder set as `path` in ~/.config/codjd/config.toml."),
+                Line::from("Files copied there show up by themselves."),
                 Line::from(""),
                 Line::from(vec![Span::from(":slsk <artist or title>").bold().cyan(), Span::from("  search Soulseek and download")]),
                 Line::from(vec![Span::from(":set").bold().cyan(), Span::from("                     settings  ·  "), Span::from("?").bold().cyan(), Span::from(" all keys")]),
