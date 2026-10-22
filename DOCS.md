@@ -96,6 +96,8 @@ The client captures the mouse, so selecting text in the terminal needs `Shift` h
 |`:move <up/down>`|Moves the selection cursor up/down|
 |`:play`|Plays the selected playlist|
 |`:resume`|Resumes playing music|
+|`:pl <name>`|Opens the playlist|
+|`:pl new <name>` `:pl add <name>` `:pl mv <old> <new>` `:pl rm <name>`|Short forms of the four commands below|
 |`:add_to_playlist <playlist-name>`|Adds selected song to playlist|
 |`:create_playlist <playlist-name>`|Creates a new playlist|
 |`:rename_playlist <old-name> <new-name>`|Renames playlist with old name to new one (can't rename `default`) |

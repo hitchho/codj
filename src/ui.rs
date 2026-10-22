@@ -2478,7 +2478,8 @@ impl<'a> UI<'a> {
             (":set", "settings"),
             ("Ctrl-n Ctrl-p", "next / previous track"),
             ("Ctrl-w j k", "move between panels"),
-            (":lyrics :playlists :mute", "panels, mute"),
+            (":lyrics :pl :mute", "panels, mute"),
+            (":pl new|add|mv|rm NAME", "make, add the track to, rename, delete"),
             (":q  ZZ", "quit (music keeps playing in codjd)"),
         ];
         let area = frame.area();
@@ -3763,8 +3764,34 @@ impl<'a> UI<'a> {
         let command = self.command_bufr.to_string();
         let mut commands: Vec<String> = command.split_whitespace().map(|v| v.to_string()).collect();
         if !commands.is_empty() {
-            let command_name = commands.remove(0);
-            let command_args = commands;
+            let mut command_name = commands.remove(0);
+            let mut command_args = commands;
+            // short forms: `:pl new|add|mv|rm NAME`, and `:pl NAME` opens one
+            if matches!(command_name.as_str(), "pl" | "playlists") && !command_args.is_empty() {
+                let long = match command_args[0].as_str() {
+                    "new" => Some("create_playlist"),
+                    "add" => Some("add_to_playlist"),
+                    "mv" => Some("rename_playlist"),
+                    "rm" => Some("remove_playlist"),
+                    _ => None,
+                };
+                match long {
+                    Some(long) => {
+                        command_args.remove(0);
+                        command_name = long.to_string();
+                    }
+                    None => {
+                        let name = command_args.join(" ");
+                        if !self.state.playlist_names().contains(&name) {
+                            return Err(std::io::Error::other(format!(
+                                "no playlist {name} (:pl new {name} makes it)"
+                            )));
+                        }
+                        let _ = self.state.proxy.use_playlist(name).await;
+                        return Ok(false);
+                    }
+                }
+            }
             // DJ-mode commands work from here too: switch to DJ mode and run them there
             if matches!(command_name.as_str(), "tutor" | "patch") {
                 self.clear_command();
