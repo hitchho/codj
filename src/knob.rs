@@ -325,7 +325,7 @@ mod tests {
         };
         drop(probe);
         let settings =
-            KnobSettings { device: Some(NAME.into()), up: Some(191), down: Some(192), press: Some(193), grab: Some(true) };
+            KnobSettings { device: Some(NAME.into()), up: Some(191), down: Some(192), press: Some(193), grab: Some(true), jog: None };
         let knob = Knob::start(&settings).unwrap();
         // the thread has the device grabbed once a second open cannot grab it
         let mut busy = false;

@@ -29,8 +29,11 @@ pub const SEND_GAP: Duration = Duration::from_millis(30);
 const STALE: Duration = Duration::from_secs(3);
 /// Without release events: a nudge tap bends the tempo for this long
 pub const NUDGE_TAP: Duration = Duration::from_millis(300);
-/// The knob as a jog wheel: a paused deck moves this many beats a detent (x2, x4, x8 spun fast)
-pub const JOG_SCRUB_BEATS: f64 = 1.0 / 16.0;
+/// The jog step, seconds a paused deck moves per detent (x2, x4, x8 spun fast): the `JOG`
+/// control (`f` and its label, then the knob or `]` `[`) picks one of these
+pub const JOG_STEPS: [f64; 8] = [0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0];
+/// 0.1 s
+pub const DEFAULT_JOG_LEVEL: f64 = 2.0;
 /// ... a playing deck bends by this nudge amount (-1..1 = -4..+4 %) while the knob turns
 pub const JOG_BEND: f64 = 0.5;
 /// detents closer than this count as spinning
@@ -79,6 +82,8 @@ pub enum Slot {
     CueMix,
     /// how far a synced tempo may stray (0.16 = 16 %)
     SyncRange,
+    /// the jog step: an index into `JOG_STEPS` (codj's own, never sent to codjd)
+    Jog,
 }
 
 impl Slot {
@@ -91,6 +96,7 @@ impl Slot {
             Slot::Master => (0.0, 1.5),
             Slot::CueMix => (0.0, 1.0),
             Slot::SyncRange => (0.01, 1.0),
+            Slot::Jog => (0.0, (JOG_STEPS.len() - 1) as f64),
         }
     }
 
@@ -100,6 +106,7 @@ impl Slot {
             Slot::Rate(_) => RATE_STEP,
             Slot::Gain(_) => 0.5,
             Slot::SyncRange => 0.01,
+            Slot::Jog => 1.0,
             _ => 0.05,
         }
     }
@@ -108,7 +115,7 @@ impl Slot {
     fn speed(self, ramp_s: f64) -> f64 {
         match self {
             Slot::Rate(_) => 0.01 + 0.03 * (ramp_s / 2.0).min(1.0),
-            Slot::Gain(_) | Slot::Master | Slot::CueMix | Slot::SyncRange => 0.0,
+            Slot::Gain(_) | Slot::Master | Slot::CueMix | Slot::SyncRange | Slot::Jog => 0.0,
             _ => {
                 let (lo, hi) = self.range();
                 (hi - lo) / FULL_SWEEP_S * ease(ramp_s)
@@ -130,6 +137,7 @@ impl Slot {
             Slot::Master => ("master", 0),
             Slot::CueMix => ("cue_mix", 0),
             Slot::SyncRange => ("sync_range", 0),
+            Slot::Jog => ("jog", 0),
         }
     }
 }
@@ -189,6 +197,8 @@ pub enum Act {
     Pitch(i8),
     /// `=`: pitch back to 0
     PitchReset,
+    /// `R`: the deck's strip back to its defaults: EQ flat, filter off, fader up, pitch 0
+    ResetDeck,
 }
 
 /// A command that waits for one more key
@@ -391,6 +401,7 @@ pub fn bind(k: &NKey) -> Option<Binding> {
             '[' => Some(Act(A::Jump(-PHRASE_BEATS))),
             'g' | '4' => Some(Act(A::Seek(SeekTo::Outro))),
             '=' => Some(Pitch(1)),
+            'r' => Some(Act(A::ResetDeck)),
             '/' => Some(Nav(N::Help)),
             ';' => Some(Nav(N::Command)),
             _ => None,
@@ -526,6 +537,8 @@ pub struct DjKeys {
     slots: Vec<SlotState>,
     out: Vec<DjCall>,
     jog: Option<Jog>,
+    /// the `JOG` control: an index into `JOG_STEPS`
+    jog_level: f64,
     /// without release events: cue preview is on for this deck
     cue_preview: [bool; 2],
     last_event: Option<(KeyCode, Instant)>,
@@ -582,6 +595,7 @@ impl DjKeys {
             count: None,
             pending: None,
             jog: None,
+            jog_level: DEFAULT_JOG_LEVEL,
             last: None,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -690,6 +704,7 @@ impl DjKeys {
             Slot::Master => self.mixer.master,
             Slot::CueMix => self.mixer.cue_mix,
             Slot::SyncRange => self.sync_range,
+            Slot::Jog => self.jog_level,
         }
     }
 
@@ -709,6 +724,7 @@ impl DjKeys {
             Slot::Master => 1.0,
             Slot::CueMix => 0.0,
             Slot::SyncRange => hints::DEFAULT_SYNC_RANGE,
+            Slot::Jog => DEFAULT_JOG_LEVEL,
         }
     }
 
@@ -806,7 +822,7 @@ impl DjKeys {
     pub fn jog(&mut self, dir: i32, now: Instant) {
         let deck = self.focus;
         let Some(d) = self.decks.get(deck as usize).filter(|d| d.loaded) else { return };
-        let (playing, gridded, position) = (d.playing, d.has_grid(), d.position);
+        let (playing, gridded, position, bpm) = (d.playing, d.has_grid(), d.position, d.track_bpm);
         let dir = dir.signum() as i8;
         let prev = self.jog.filter(|j| j.deck == deck && j.dir == dir);
         let streak = prev.filter(|j| now.saturating_duration_since(j.last) < JOG_FAST).map_or(0, |j| j.streak.saturating_add(1));
@@ -815,16 +831,34 @@ impl DjKeys {
                 self.out.push(DjCall::Nudge { deck: deck as u32, amount: dir as f64 * JOG_BEND });
             }
         } else {
-            let beats = dir as f64 * JOG_SCRUB_BEATS * f64::from(1u8 << streak.min(3));
-            if gridded {
-                self.out.push(DjCall::BeatJump { deck: deck as u32, beats });
+            let mult = dir as f64 * f64::from(1u8 << streak.min(3));
+            // a beat jump is relative, so detents faster than the 30 Hz snapshot all count
+            let seconds = mult * self.jog_seconds();
+            if gridded && bpm > 0.0 {
+                // seconds of the track, as beats of its own grid
+                self.out.push(DjCall::BeatJump { deck: deck as u32, beats: seconds * bpm / 60.0 });
             } else {
-                // no grid: a beat counts as half a second
-                self.out.push(DjCall::Seek { deck: deck as u32, seconds: (position + beats * 0.5).max(0.0) });
+                self.out.push(DjCall::Seek { deck: deck as u32, seconds: (position + seconds).max(0.0) });
             }
         }
         // a bend the other way replaces the old one; the release in `tick` ends it
         self.jog = Some(Jog { deck, dir, last: now, streak, bending: playing });
+    }
+
+    /// `[knob] jog`: where the jog step starts, the step nearest to `seconds` (None: 0.1 s)
+    pub fn set_jog_seconds(&mut self, seconds: Option<f64>) {
+        self.jog_level = match seconds.filter(|s| s.is_finite() && *s > 0.0) {
+            Some(s) => {
+                let off = |i: usize| (JOG_STEPS[i].ln() - s.ln()).abs();
+                (0..JOG_STEPS.len()).min_by(|&a, &b| off(a).total_cmp(&off(b))).unwrap_or(2) as f64
+            }
+            None => DEFAULT_JOG_LEVEL,
+        };
+    }
+
+    /// Seconds a paused deck moves per jog detent
+    pub fn jog_seconds(&self) -> f64 {
+        JOG_STEPS[(self.jog_level as usize).min(JOG_STEPS.len() - 1)]
     }
 
     /// Knob press on the jog wheel: cues a paused deck at the spot it was scrubbed to. A
@@ -940,6 +974,7 @@ impl DjKeys {
         let changed = force || (value - before).abs() > 1e-9;
         match slot {
             Slot::SyncRange => self.sync_range = value,
+            Slot::Jog => self.jog_level = value.round(),
             Slot::Gain(d) => {
                 if let Some(deck) = self.decks.get(d as usize) {
                     self.gain_set[d as usize] = Some((deck.path.clone(), value));
@@ -1090,8 +1125,13 @@ impl DjKeys {
                 self.count = None;
                 // a picked control is edited (a held key keeps stepping and speeds up through the
                 // acceleration); with none picked the keys bend the focused deck's tempo
+                // a paused deck has no tempo to bend: the keys scrub it like the jog wheel (a held
+                // key auto-repeats, which spins it faster)
+                let paused = self.decks.get(self.focus as usize).is_some_and(|i| i.loaded && !i.playing);
                 if self.hints.selected.is_some() {
                     self.edit(dir as i32, now);
+                } else if paused {
+                    self.jog(dir as i32, now);
                 } else {
                     self.press_hold(Hold::Nudge(self.focus, dir), &nk, repeat, stream, now);
                 }
@@ -1237,6 +1277,22 @@ impl DjKeys {
             Act::PitchReset => {
                 let delta = 1.0 - self.target(Slot::Rate(d), now);
                 self.bump(Slot::Rate(d), delta, now);
+            }
+            Act::ResetDeck => {
+                let home = [
+                    (Slot::Ctl(Ctl::Eq(d, 0)), 0.0),
+                    (Slot::Ctl(Ctl::Eq(d, 1)), 0.0),
+                    (Slot::Ctl(Ctl::Eq(d, 2)), 0.0),
+                    (Slot::Ctl(Ctl::Filter(d)), 0.0),
+                    (Slot::Ctl(Ctl::Fader(d)), 1.0),
+                    (Slot::Rate(d), 1.0),
+                ];
+                for (slot, value) in home {
+                    let delta = value - self.target(slot, now);
+                    if delta.abs() > 1e-9 {
+                        self.bump(slot, delta, now);
+                    }
+                }
             }
         }
         None
@@ -1431,6 +1487,10 @@ impl DjKeys {
             for s in &mut self.slots {
                 if s.dirty {
                     s.dirty = false;
+                    // the jog step is codj's own
+                    if s.slot == Slot::Jog {
+                        continue;
+                    }
                     let (control, deck) = s.slot.control();
                     calls.push(DjCall::Set { control, deck, value: s.value });
                     sent = true;
@@ -1642,8 +1702,8 @@ mod tests {
     fn patch_hint_labels_are_two_letters_prefix_free_and_never_a_deck_label() {
         let tab = hints::table();
         let deck_labels: Vec<&str> = tab.iter().filter(|(t, _)| !matches!(t, Target::Knob(..) | Target::Slot(Slot::Ctl(Ctl::Fader(2..) | Ctl::Filter(2..) | Ctl::Eq(2.., _))))).map(|(_, l)| *l).collect();
-        assert_eq!(deck_labels.len(), 20);
-        let patch: Vec<&str> = tab.iter().skip(20).map(|(_, l)| *l).collect();
+        assert_eq!(deck_labels.len(), 21);
+        let patch: Vec<&str> = tab.iter().skip(21).map(|(_, l)| *l).collect();
         assert_eq!(patch.len(), 48);
         for l in &patch {
             assert_eq!(l.len(), 2, "{l}");
@@ -1984,7 +2044,7 @@ mod tests {
             assert_eq!(bind(&normalize(&press(c))), None, "{c}");
         }
         // capitals and shifted symbols of the old map: A B load, Shift+digit clears
-        for c in "ACDEFHIJKLMNOPQRSTUVXYZ!@#%^&*()_|".chars() {
+        for c in "ACDEFHIJKLMNOPQSTUVXYZ!@#%^&*()_|".chars() {
             assert_eq!(bind(&normalize(&press(c))), None, "{c}");
         }
         // ctrl combinations never reach the decks (Ctrl-r is redo, nothing else)
@@ -2146,7 +2206,8 @@ mod tests {
                 DjCall::Loop { deck: 1, beats: 4.0 },
             ]
         );
-        // cue, nudge and pitch too
+        // cue, nudge and pitch too (a playing deck: ] bends it, a paused one it rolls)
+        k.set_snapshot(&[deck(false), deck(true)], &MixerInfo::default());
         k.on_key(&press('c'), t0 + ms(3000));
         assert_eq!(k.tick(t0 + ms(3000)), vec![DjCall::Cue { deck: 1, pressed: true }]);
         k.on_key(&rel('c'), t0 + ms(3100));
@@ -2315,6 +2376,8 @@ mod tests {
     fn nudge_and_cue_keys_on_the_focused_deck() {
         let t0 = Instant::now();
         let mut k = keys(true);
+        // a playing deck: [ ] bend it (a paused one they roll)
+        k.set_snapshot(&[deck(true), deck(true)], &MixerInfo::default());
         k.on_key(&press(']'), t0);
         assert_eq!(k.tick(t0), vec![DjCall::Nudge { deck: 0, amount: 1.0 }]);
         k.on_key(&rel(']'), t0 + ms(300));
@@ -2458,6 +2521,8 @@ mod tests {
     fn nudge_follows_the_key_with_release_events() {
         let t0 = Instant::now();
         let mut k = keys(true);
+        // a playing deck: [ ] bend it (a paused one they roll)
+        k.set_snapshot(&[deck(true), deck(true)], &MixerInfo::default());
         k.on_key(&press(']'), t0);
         assert_eq!(k.tick(t0), vec![DjCall::Nudge { deck: 0, amount: 1.0 }]);
         // the other nudge key too: releasing one hands over to the one still down
@@ -2470,11 +2535,54 @@ mod tests {
     }
 
     #[test]
+    fn brackets_roll_a_paused_deck_and_r_resets_it() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        let gridded = DeckInfo { track_bpm: 120.0, beat_in_bar: 1, ..deck(false) };
+        k.set_snapshot(&[gridded, deck(false)], &MixerInfo::default());
+        k.on_key(&press(']'), t0);
+        assert_eq!(k.tick(t0 + ms(10)), [DjCall::BeatJump { deck: 0, beats: 0.1 * 120.0 / 60.0 }]);
+        k.on_key(&press('['), t0 + ms(500));
+        assert_eq!(k.tick(t0 + ms(510)), [DjCall::BeatJump { deck: 0, beats: -0.1 * 120.0 / 60.0 }]);
+        // R: everything moved goes home
+        k.on_key(&press('2'), t0 + ms(1000));
+        k.on_key(&press('-'), t0 + ms(1010));
+        k.tick(t0 + ms(1100));
+        assert!(k.target(Slot::Rate(0), t0 + ms(1100)) < 1.0, "2- lowered the pitch");
+        k.on_key(&KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT), t0 + ms(2000));
+        let after = k.tick(t0 + ms(2100));
+        assert!(sets(&after).is_empty() || sets(&after).iter().all(|(_, d, _)| *d == 0), "{after:?}");
+        assert!((k.target(Slot::Rate(0), t0 + ms(2100)) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_jog_step_is_a_control_of_its_own() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        assert_eq!(k.jog_seconds(), 0.1);
+        // picked and turned: coarser, never sent to codjd
+        k.hints.selected = Some(Target::Slot(Slot::Jog));
+        k.edit(1, t0);
+        k.edit(1, t0 + ms(500));
+        assert_eq!(k.jog_seconds(), 0.5);
+        assert!(k.tick(t0 + ms(600)).is_empty(), "the jog step is codj's own");
+        // the knob press puts it back, the config picks the nearest step
+        k.reset(t0 + ms(700));
+        assert_eq!(k.jog_seconds(), 0.1);
+        k.set_jog_seconds(Some(0.9));
+        assert_eq!(k.jog_seconds(), 1.0);
+        k.set_jog_seconds(Some(100.0));
+        assert_eq!(k.jog_seconds(), 5.0);
+        assert_eq!(crate::dj::hints::fmt_jog(0.1), "0.1s");
+        assert_eq!(crate::dj::hints::fmt_jog(2.0), "2s");
+    }
+
+    #[test]
     fn the_knob_is_a_jog_wheel() {
         let t0 = Instant::now();
         let mut k = keys(false);
         let gridded = |playing| DeckInfo { track_bpm: 120.0, beat_in_bar: 1, position: 10.0, ..deck(playing) };
-        // paused: a slow turn scrubs a sixteenth of a beat a detent, spinning goes faster
+        // paused: a slow turn scrubs 0.1 s a detent (0.2 beats at 120 BPM), spinning goes faster
         k.set_snapshot(&[gridded(false), deck(false)], &MixerInfo::default());
         k.jog(1, t0);
         k.jog(1, t0 + ms(500));
@@ -2482,7 +2590,7 @@ mod tests {
         k.jog(1, t0 + ms(540));
         k.jog(-1, t0 + ms(560));
         let jumps: Vec<f64> = k.tick(t0 + ms(600)).iter().map(|c| match c {
-            DjCall::BeatJump { deck: 0, beats } => *beats * 16.0,
+            DjCall::BeatJump { deck: 0, beats } => (*beats * 5.0 * 1e9).round() / 1e9,
             other => panic!("{other:?}"),
         }).collect();
         assert_eq!(jumps, [1.0, 1.0, 2.0, 4.0, -1.0]);
@@ -2511,6 +2619,8 @@ mod tests {
     fn nudge_is_a_timed_bend_without_release_events() {
         let t0 = Instant::now();
         let mut k = keys(false);
+        // a playing deck: [ ] bend it (a paused one they roll)
+        k.set_snapshot(&[deck(true), deck(true)], &MixerInfo::default());
         k.on_key(&press('l'), t0);
         k.on_key(&press(']'), t0 + ms(300));
         assert_eq!(k.tick(t0 + ms(300)), vec![DjCall::Nudge { deck: 1, amount: 1.0 }]);
@@ -2535,6 +2645,8 @@ mod tests {
     fn release_all_ends_holds_and_flushes_pending_work() {
         let t0 = Instant::now();
         let mut k = keys(true);
+        // a playing deck: [ ] bend it (a paused one they roll)
+        k.set_snapshot(&[deck(true), deck(true)], &MixerInfo::default());
         k.on_key(&press(']'), t0);
         k.on_key(&press('c'), t0);
         k.on_key(&press(' '), t0);
@@ -2543,7 +2655,7 @@ mod tests {
         let calls = k.tick(t0 + ms(5));
         assert!(calls.contains(&DjCall::Nudge { deck: 0, amount: 0.0 }));
         assert!(calls.contains(&DjCall::Cue { deck: 0, pressed: false }));
-        assert!(calls.contains(&DjCall::Play(0)));
+        assert!(calls.contains(&DjCall::Pause(0)));
         assert!(calls.contains(&DjCall::Set { control: "rate", deck: 0, value: 1.001 }));
         // nothing is left held
         assert!(k.tick(t0 + ms(100)).is_empty());
@@ -2555,6 +2667,8 @@ mod tests {
     fn stale_hold_is_released_when_events_stop() {
         let t0 = Instant::now();
         let mut k = keys(true);
+        // a playing deck: [ ] bend it (a paused one they roll)
+        k.set_snapshot(&[deck(true), deck(true)], &MixerInfo::default());
         k.on_key(&press(']'), t0);
         k.tick(t0);
         assert!(k.tick(t0 + ms(2000)).is_empty());
@@ -2604,6 +2718,8 @@ mod tests {
     fn opening_hints_ends_holds_so_no_release_is_lost() {
         let t0 = Instant::now();
         let mut k = keys(true);
+        // a playing deck: [ ] bend it (a paused one they roll)
+        k.set_snapshot(&[deck(true), deck(true)], &MixerInfo::default());
         k.on_key(&press(']'), t0);
         assert_eq!(k.tick(t0), vec![DjCall::Nudge { deck: 0, amount: 1.0 }]);
         tap_key(&mut k, 'f', t0 + ms(100));

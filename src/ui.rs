@@ -1472,6 +1472,7 @@ impl<'a> UI<'a> {
         let mut dj = crate::dj::DjScreen::new(conn, library, self.dj_kbd_pushed);
         dj.set_agent(self.agent_config.clone());
         dj.set_knob(self.knob.take());
+        dj.set_jog_seconds(self.knob_config.jog);
         if let Some(n) = self.knob_note.take() {
             dj.note_from_outside(n);
         }

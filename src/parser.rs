@@ -76,6 +76,9 @@ pub struct KnobSettings {
     /// take the device exclusively while codj runs, so the system volume stays put
     /// (default true; never done for a device that also types letters)
     pub grab: Option<bool>,
+    /// seconds a paused deck moves per detent when the knob is the jog wheel (and per `[` `]`
+    /// press); spinning fast multiplies it by up to 8. Default about 1/16 beat.
+    pub jog: Option<f64>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]

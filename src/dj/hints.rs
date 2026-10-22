@@ -82,6 +82,7 @@ impl Target {
             Target::Slot(Slot::Master) => "master".into(),
             Target::Slot(Slot::CueMix) => "cue mix".into(),
             Target::Slot(Slot::SyncRange) => "sync range".into(),
+            Target::Slot(Slot::Jog) => "jog step".into(),
             Target::LoopLen(d) => format!("{} loop", deck(d)),
         }
     }
@@ -96,6 +97,7 @@ impl Target {
             Target::Slot(Slot::Gain(_)) => format!("{v:+.1} dB"),
             Target::Slot(Slot::Rate(_)) => format!("{:+.2}%", (v - 1.0) * 100.0),
             Target::Slot(Slot::SyncRange) => format!("±{:.0}%", v * 100.0),
+            Target::Slot(Slot::Jog) => fmt_jog(crate::dj::keys::JOG_STEPS[(v.max(0.0) as usize).min(crate::dj::keys::JOG_STEPS.len() - 1)]),
             Target::LoopLen(_) => format!("{} beats", fmt_beats(v)),
             Target::Knob(..) => format!("{v:.2}"),
         }
@@ -153,6 +155,7 @@ pub fn table() -> Vec<(Target, &'static str)> {
         (s(Slot::Master), "ba"),
         (s(Slot::CueMix), "bs"),
         (s(Slot::SyncRange), "bd"),
+        (s(Slot::Jog), "bq"),
     ];
     // patch slots: knobs, then fader / filter / low (DjSet deck = 2 + slot)
     for (slot, labels) in PATCH_LABELS.iter().enumerate() {
@@ -295,7 +298,7 @@ mod tests {
     #[test]
     fn labels_are_left_hand_prefix_free_and_complete() {
         let tab = table();
-        assert_eq!(tab.len(), 20 + 48);
+        assert_eq!(tab.len(), 21 + 48);
         for (_, l) in &tab {
             assert!(matches!(l.len(), 1 | 2), "{l}");
             assert!(l.chars().all(|c| LETTERS.contains(c)), "{l}");
@@ -326,6 +329,7 @@ mod tests {
             Target::Slot(Slot::Master),
             Target::Slot(Slot::CueMix),
             Target::Slot(Slot::SyncRange),
+            Target::Slot(Slot::Jog),
         ]) {
             assert!(label_of(x).is_some(), "{x:?}");
         }
@@ -465,4 +469,9 @@ mod tests {
         assert_eq!(t("q").name(), "B low");
         assert_eq!(t("w").name(), "crossfader");
     }
+}
+
+/// A jog step: `0.1s`, `2s`
+pub fn fmt_jog(seconds: f64) -> String {
+    if seconds < 1.0 { format!("{seconds}s") } else { format!("{seconds:.0}s") }
 }

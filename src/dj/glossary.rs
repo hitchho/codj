@@ -30,6 +30,7 @@ pub fn explain(t: Target) -> &'static str {
         Target::Slot(Slot::Master) => "master: the volume of everything the room hears",
         Target::Slot(Slot::CueMix) => "cue mix: headphones blend, cued deck vs the room",
         Target::Slot(Slot::SyncRange) => "sync range: the biggest tempo change sync may do",
+        Target::Slot(Slot::Jog) => "jog step: how far a knob notch rolls",
         Target::LoopLen(_) => "loop length: beats the next v loop repeats",
         Target::Knob(..) => "patch knob: ] [ turn it, \\ back to the saved value",
     }
@@ -63,7 +64,8 @@ pub const DECK_KEYS: &[Entry] = &[
     e("v", "loop 4 beats; 8v loops 8; v again leaves"),
     e("+ -", "pitch up / down 0.1 % (hold to ramp)"),
     e("=", "pitch back to 0"),
-    e("[ ]", "nudge: bend the tempo while held"),
+    e("R", "reset deck: EQ, filter, fader, pitch"),
+    e("[ ]", "bend a playing deck, roll a paused one"),
     e(".", "repeat the last action on the focused deck"),
     e("u C-r", "undo / redo a control change"),
     e("4w 2}", "a count goes in front, like in vim"),

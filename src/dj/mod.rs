@@ -1654,6 +1654,11 @@ impl DjScreen {
         self.knob = knob;
     }
 
+    /// `[knob] jog`: seconds per scrub detent
+    pub fn set_jog_seconds(&mut self, seconds: Option<f64>) {
+        self.keys.set_jog_seconds(seconds);
+    }
+
     /// Hands the knob back when DJ mode closes
     pub fn take_knob(&mut self) -> Option<crate::knob::Knob> {
         self.knob.take()
@@ -2557,6 +2562,7 @@ impl DjScreen {
                 loop_len: self.keys.loop_len(),
                 gain: [self.keys.gain_shown(0, now), self.keys.gain_shown(1, now)],
                 sync_range: self.keys.sync_range(),
+                jog: self.keys.jog_seconds(),
             },
             patch: Some(&patch_view),
             learn: render::LearnView {

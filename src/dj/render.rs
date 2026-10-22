@@ -124,6 +124,8 @@ pub struct HintView<'a> {
     /// trim in dB, per deck
     pub gain: [f64; 2],
     pub sync_range: f64,
+    /// the jog step in seconds
+    pub jog: f64,
 }
 
 impl Default for HintView<'_> {
@@ -137,6 +139,7 @@ impl Default for HintView<'_> {
             loop_len: [hints::DEFAULT_BEATS; 2],
             gain: [0.0; 2],
             sync_range: hints::DEFAULT_SYNC_RANGE,
+            jog: 0.1,
         }
     }
 }
@@ -1313,6 +1316,7 @@ fn draw_mixer(buf: &mut Buffer, area: Rect, v: &View, spots: &mut Vec<Spot>) {
             (Slot::Master, format!("MST {:.2}", m.master)),
             (Slot::CueMix, format!("CUE {:.2}", m.cue_mix)),
             (Slot::SyncRange, format!("RNG ±{:.0}%", v.hints.sync_range * 100.0)),
+            (Slot::Jog, format!("JOG {}", hints::fmt_jog(v.hints.jog))),
         ]
     } else {
         Vec::new()
@@ -2297,7 +2301,7 @@ mod tests {
         for (t, _) in hints::table().into_iter().filter(|(t, _)| !patchy(t)) {
             assert!(spots.iter().any(|s| s.target == t), "no spot for {t:?}");
         }
-        assert_eq!(spots.len(), 20);
+        assert_eq!(spots.len(), 21);
         let (with, _) = render_full(120, 35, |v| {
             v.hints = HintView { active: true, labels: leak_labels(), ..HintView::default() };
         });
