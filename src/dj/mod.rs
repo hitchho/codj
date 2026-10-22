@@ -98,7 +98,8 @@ struct Shared {
     /// codjd has no `SetRecording`: polling stops
     rec_missing: bool,
     /// feedback of a set command (list, "armed mix 2"), shown like a note
-    info: Option<(String, Instant)>,
+    /// (text, shown until, made at)
+    info: Option<(String, Instant, Instant)>,
     /// the active set's errors, drawn over the decks until Esc
     overlay: Option<Vec<String>>,
     /// a text popup (`:help <term>`, the recipes), closed by any key
@@ -157,6 +158,8 @@ pub fn describe_set_error(what: &str, e: &zbus::Error) -> String {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SetCall {
     Use(String),
+    /// `:set new <name>`: write a starter set, then use it
+    New(String),
     Arm(u32),
     Disarm,
     Auto(bool),
@@ -248,6 +251,16 @@ pub fn format_patch_list(files: &[(String, String)]) -> String {
     format!("patches: {}  (:patch load <slot> <name>)", items.join(" · "))
 }
 
+/// The file `:set new` writes: the name and where to go next
+pub fn new_set_text(name: &str) -> String {
+    format!(
+        "# {name}: made in codj with :set new. F10 edits it here, :edit in $EDITOR.\n\
+         # :mix new writes a transition between the two decks, F9 records what you play.\n\
+         # The language: docs/set-language.md in codjd.\n\
+         set \"{name}\"\n"
+    )
+}
+
 fn is_ok(reply: &str) -> bool {
     reply == "ok" || reply.starts_with("ok ") || reply.is_empty()
 }
@@ -310,6 +323,7 @@ impl SetCall {
     fn name(&self) -> &'static str {
         match self {
             SetCall::Use(_) => "SetUse",
+            SetCall::New(_) => "SetWrite",
             SetCall::Arm(_) => "SetArm",
             SetCall::Disarm => "SetDisarm",
             SetCall::Auto(_) => "SetAuto",
@@ -331,6 +345,7 @@ impl SetCall {
         match self {
             SetCall::Use(n) if n.is_empty() => "no set active".into(),
             SetCall::Use(n) => format!("set {n} active"),
+            SetCall::New(n) => format!("set {n} made and active: :mix new writes a mix, F9 records, F10 edits"),
             SetCall::Arm(m) => format!("armed mix {}", m + 1),
             SetCall::Disarm => "disarmed".into(),
             SetCall::Auto(on) => format!("auto {}", if *on { "on" } else { "off" }),
@@ -429,6 +444,14 @@ async fn run_mix_new(proxy: &ServerProxy<'_>, req: &MixNewReq) -> Result<String,
 async fn run_set_call(proxy: &ServerProxy<'_>, call: &SetCall) -> zbus::Result<SetReply> {
     Ok(match call {
         SetCall::Use(n) => SetReply::Status(proxy.set_use(n).await?),
+        SetCall::New(n) => {
+            // an empty base hash creates the file; an existing set of that name is refused
+            let r = proxy.set_write(n, &new_set_text(n), "", editor::AUTHOR).await?;
+            if !is_ok(&r) {
+                return Ok(SetReply::Status(if r.contains("exists") { format!("{n} exists: :set {n} uses it, or pick another name") } else { r }));
+            }
+            SetReply::Status(proxy.set_use(n).await?)
+        }
         SetCall::Arm(m) => SetReply::Status(proxy.set_arm(*m).await?),
         SetCall::Disarm => SetReply::Status(proxy.set_disarm().await?),
         SetCall::Auto(on) => SetReply::Status(proxy.set_auto(*on).await?),
@@ -731,7 +754,7 @@ impl Session {
                                 if let Some(p) = popup {
                                     s.popup = Some(p);
                                 } else {
-                                    s.info = Some((text, now + NOTE_FOR * 2));
+                                    s.info = Some((text, now + NOTE_FOR * 2, now));
                                 }
                             }
                             Ok(Err(e)) => s.call_error = Some((e, now)),
@@ -749,13 +772,13 @@ impl Session {
                     }
                     match reply {
                         Ok(Ok(SetReply::Status(r))) if r == "ok" || r.is_empty() => {
-                            s.info = Some((call.done(), now + NOTE_FOR));
+                            s.info = Some((call.done(), now + NOTE_FOR, now));
                         }
                         Ok(Ok(SetReply::Status(r))) if r.starts_with("ok ") => {
-                            s.info = Some((call.done_with(&r[3..]), now + NOTE_FOR));
+                            s.info = Some((call.done_with(&r[3..]), now + NOTE_FOR, now));
                         }
                         Ok(Ok(SetReply::Status(r))) => s.call_error = Some((format!("{}: {r}", call.name()), now)),
-                        Ok(Ok(SetReply::List(sets))) => s.info = Some((format_set_list(&sets), now + NOTE_FOR * 2)),
+                        Ok(Ok(SetReply::List(sets))) => s.info = Some((format_set_list(&sets), now + NOTE_FOR * 2, now)),
                         Ok(Ok(SetReply::Errors(lines))) => {
                             s.overlay = Some(if lines.is_empty() { vec!["no errors".to_string()] } else { lines });
                         }
@@ -781,7 +804,7 @@ impl Session {
                         Ok(Ok(text)) => {
                             s.call_error = None;
                             if !text.is_empty() {
-                                s.info = Some((text, now + NOTE_FOR * 2));
+                                s.info = Some((text, now + NOTE_FOR * 2, now));
                             }
                         }
                         Ok(Err(e)) => s.call_error = Some((e, now)),
@@ -957,6 +980,8 @@ pub enum Command {
     SetList,
     /// `:set <name>`, "" = none
     SetUse(String),
+    /// `:set new <name>`
+    SetNew(String),
     SetArm(ArmTarget),
     SetDisarm,
     /// `:auto on|off`, bare `:auto` toggles
@@ -1237,6 +1262,10 @@ pub fn parse_command(cmd: &str) -> Command {
             match name.as_str() {
                 "" => Command::SetList,
                 "none" | "off" | "-" => Command::SetUse(String::new()),
+                n if n.starts_with("new ") || n == "new" => match n.strip_prefix("new").map(str::trim) {
+                    Some(name) if patchdef::valid_name(name) => Command::SetNew(name.to_string()),
+                    _ => Command::Unknown("usage: set new <name> (letters, digits, - and _)".into()),
+                },
                 _ => Command::SetUse(name),
             }
         }
@@ -1486,7 +1515,7 @@ impl Pane {
 /// first mix whose outgoing track is on a deck (preferring a playing one)
 pub fn next_mix(set: &SetState, decks: &[DeckInfo]) -> Result<u32, String> {
     if !set.is_active() {
-        return Err("no active set (:set <name>)".into());
+        return Err("no active set: :set new <name> makes one, :set <name> uses one".into());
     }
     if let Some(armed) = set.armed_mix() {
         if !set.running {
@@ -1543,7 +1572,8 @@ pub struct DjScreen {
     session: Session,
     keys: DjKeys,
     pane: Pane,
-    note: Option<(String, Instant)>,
+    /// (text, shown until, made at)
+    note: Option<(String, Instant, Instant)>,
     /// `:edit` asked for the editor on this file; main suspends the terminal and runs it
     edit_request: Option<std::path::PathBuf>,
     /// the in-TUI set editor, while open
@@ -1575,6 +1605,7 @@ impl DjScreen {
                 "No key-release events in this terminal: cue toggles, nudge is a short bend, holds step per key repeat. Use kitty/foot/WezTerm/Ghostty for hold."
                     .to_string(),
                 Instant::now() + Duration::from_secs(12),
+                Instant::now(),
             )
         });
         DjScreen {
@@ -1920,7 +1951,8 @@ impl DjScreen {
     }
 
     fn set_note(&mut self, text: impl Into<String>) {
-        self.note = Some((text.into(), Instant::now() + NOTE_FOR));
+        let now = Instant::now();
+        self.note = Some((text.into(), now + NOTE_FOR, now));
     }
 
     /// The file `:edit` wants opened, once
@@ -1948,7 +1980,7 @@ impl DjScreen {
                 self.set_note(if missing {
                     "codjd has no set runtime: update codjd"
                 } else {
-                    "no active set (:set lists them, :set <name> activates one)"
+                    "no active set: :set new <name> makes one, :set lists them"
                 });
                 None
             }
@@ -2087,10 +2119,11 @@ impl DjScreen {
             }
             return Outcome::Stay;
         }
-        // popups close on any key, which does nothing else
+        // popups close on any key, which does nothing else, except `:`: it also opens the
+        // command line, so the command a popup suggests can be typed straight away
         if key.kind != KeyEventKind::Release {
             let popup = self.session.shared.lock().unwrap().popup.take();
-            if popup.is_some() {
+            if popup.is_some() && key.code != KeyCode::Char(':') {
                 return Outcome::Stay;
             }
         }
@@ -2209,6 +2242,7 @@ impl DjScreen {
             Command::Grid(d, f) => self.session.grid_scale(d, f),
             Command::SetList => self.session.set_call(SetCall::List),
             Command::SetUse(name) => self.session.set_call(SetCall::Use(name)),
+            Command::SetNew(name) => self.session.set_call(SetCall::New(name)),
             Command::SetArm(t) => self.set_arm(t),
             Command::SetDisarm => {
                 if self.active_set().is_some() {
@@ -2350,19 +2384,27 @@ impl DjScreen {
             _ => WaveView::None,
         };
         let link_ok = s.poll_error.is_none();
+        // the newer of the screen's note and a set command's feedback
+        let now = Instant::now();
+        let newest = [self.note.as_ref(), s.info.as_ref()]
+            .into_iter()
+            .flatten()
+            .filter(|(_, until, _)| now < *until)
+            .max_by_key(|(_, _, at)| *at);
+        let note = newest.map(|(n, _, _)| n.as_str());
+        // a failed call shows until a newer note replaces it (a typo's usage line after an
+        // error must not stay hidden); a broken link always shows
+        let noted_at = newest.map(|(_, _, at)| *at);
         let error = s
             .poll_error
             .clone()
             .or_else(|| s.set_poll_error.clone())
-            .or_else(|| s.call_error.as_ref().filter(|(_, t)| t.elapsed() < NOTE_FOR).map(|(e, _)| e.clone()));
-        // the newer of the screen's note and a set command's feedback
-        let now = Instant::now();
-        let note = [self.note.as_ref(), s.info.as_ref()]
-            .into_iter()
-            .flatten()
-            .filter(|(_, until)| now < *until)
-            .max_by_key(|(_, until)| *until)
-            .map(|(n, _)| n.as_str());
+            .or_else(|| {
+                s.call_error
+                    .as_ref()
+                    .filter(|(_, t)| t.elapsed() < NOTE_FOR && noted_at.is_none_or(|n| n < *t))
+                    .map(|(e, _)| e.clone())
+            });
         let labels = hints::table();
         let showcmd = self.keys.showcmd();
         let typed = self.keys.hints().typed.clone();
@@ -2796,6 +2838,11 @@ mod tests {
         assert_eq!(parse_command("tutor"), Command::Tutor { reset: false });
         assert_eq!(parse_command("tutor reset"), Command::Tutor { reset: true });
         assert_eq!(parse_command("tutor next"), Command::TutorNext);
+        assert_eq!(parse_command("set new friday"), Command::SetNew("friday".into()));
+        assert!(matches!(parse_command("set new"), Command::Unknown(m) if m.contains("usage: set new")));
+        assert!(matches!(parse_command("set new two words"), Command::Unknown(_)));
+        assert_eq!(parse_command("set newer"), Command::SetUse("newer".into()));
+        assert!(new_set_text("friday").contains("set \"friday\""));
         assert_eq!(parse_command("tutor skip"), Command::TutorNext);
         assert!(matches!(parse_command("tutor now"), Command::Unknown(_)));
         assert!(matches!(parse_command("tutor reset now"), Command::Unknown(_)));

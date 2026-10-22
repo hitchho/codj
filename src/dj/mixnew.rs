@@ -41,7 +41,7 @@ pub const NOT_IN_SET: &str = "add the track to the set first: :cue on it or edit
 /// other deck; both must be tracks of the active set
 pub fn pick_pair(decks: &[DeckInfo], mixer: &MixerInfo, set: &SetState) -> Result<Pair, String> {
     if !set.is_active() {
-        return Err("no active set (:set <name>)".into());
+        return Err("no active set: :set new <name> makes one, :set <name> uses one".into());
     }
     let loaded = |i: usize| decks.get(i).filter(|d| d.loaded);
     let (Some(_), Some(_)) = (loaded(0), loaded(1)) else {

@@ -334,6 +334,7 @@ Mixes and tracks are numbered from 1 on screen (the bus counts from 0).
 |-------|----|
 |`:set`|List the sets with their error counts in the status line|
 |`:set <name>`|Make a set active (name, file name or stem); `:set none` deactivates|
+|`:set new <name>`|Make a set: writes `<name>.codj` with a header and pointers (`:mix new`, `F9`, `F10`) into the set folder and makes it active. An existing name is refused; the status line says `:set <name>` uses it|
 |`:arm <n>` / `:arm next`|Arm mix `n`: its outgoing track must be on a deck, the incoming one is loaded on the other deck, synced; the mix runs by itself when the outgoing deck reaches the mix start. `next` picks the mix after a running one, else the first whose outgoing track is on a deck (a playing one first)|
 |`:disarm`|Cancel the armed or running mix's remaining automation; controls stay where they are|
 |`:auto on` / `:auto off`|Auto mode: after a mix ends, the next one whose outgoing track is on air is armed (`:auto` alone toggles)|
