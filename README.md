@@ -4,7 +4,31 @@
 
 *codj* reads two ways: **co-DJ** (agents can plan and mix with you over MCP) and **code + DJ** (sets are written as code, in your own vim). It is growing into a keyboard-driven DJ system; see the [DJ mode design](https://github.com/yassinebenarbia/mplayer-server/blob/main/docs/dj-mode.md). It was called *musa* before.
 
-Configs in `~/.config/musa` and `~/.config/mplayer-client` from before the renames are still read.
+# Quick start
+
+```sh
+cargo install --path .                    # codj, this repo
+cargo install --path ../mplayer-server    # codjd, the daemon (github.com/yassinebenarbia/mplayer-server)
+codjd fetch-models                        # once: the beat-detection model (83 MB)
+codj                                      # starts codjd if it isn't running; plays ~/Music
+```
+
+No config is needed. To use another folder, put `path = "~/Music/dj"` in `~/.config/codjd/config.toml`.
+
+The first five minutes, all vim keys:
+
+| | |
+|---|---|
+| `?` | every key on the screen, `:help` the same |
+| `j` `k` `5j` `gg` `G` | move |
+| `/` then `Enter`, `n` `N` | search (regex), next / previous match |
+| `Enter`, `Space` | play, pause |
+| `:slsk <artist>` | search Soulseek and download (first time: `:set`, fill in a username) |
+| `:dj` | DJ mode: two decks; `Tab` then `j`/`k` and `a`/`b` loads a track onto deck A/B |
+| `:tutor` (in DJ mode) | a guided first mix with your own tracks |
+| `:q` | quit (the music keeps playing in codjd) |
+
+`:` commands complete with `Tab`. A config from before the renames (`~/.config/musa`, `~/.config/mplayer-client`) is still read.
 
 # Showcase
 ||||
@@ -16,7 +40,7 @@ ___
 
 # Features
 - vim-style keys: `j`/`k`, `gg`/`G`, `h`/`l` seek, `H`/`L` volume, `ZZ` / `:q` to quit
-- regex search over title, artist and file name (`f` or `/`); no match? `Enter` searches Soulseek
+- regex search over title, artist and file name (`/`, then `n`/`N`); no match? `Enter` searches Soulseek
 - play queue (`q` to queue, `Shift+Q` to open it)
 - live DJ mode (`:dj`, `Shift + m`): two decks with waveforms, beat phase meter, sync, loops, hot cues, EQ, filter, faders and crossfader, all from the keyboard (hold/release with the kitty keyboard protocol); needs a codjd with the deck API, see [DOCS.md](./DOCS.md#dj-mode)
 - learn it as you go: `?` draws the key map on the screen with a one-line musical explanation for every key, `:help bass swap` explains the words, `:tutor` walks you through a first mix with your own library (it notices each step as you do it), `:mix new blend` writes the transition as set code; see [Learning](./DOCS.md#learning)
@@ -25,14 +49,6 @@ ___
 - Soulseek search, filtering, downloads with a concurrency limit and reorderable queue; finished downloads show up in the library
 - `:settings` panel, saved straight to your config file
 - lyrics, playlists and Lua scripting
-
-# Usage
-- Install and run `codjd`.
-- Install codj from this repo: `cargo install --path .` (the binary is called `codj`).
-- Copy the [config file](./config.example.toml) to `$HOME/.config/codj/config.toml` and adjust it (optional).
-- Run `codj`.
->[!NOTE]
-> You can also pass the config file as the first argument. A config at the old `$HOME/.config/mplayer-client/config.toml` is still read if the new one doesn't exist.
 
 # Keybinds and Configurations
 [docs](./DOCS.md)
