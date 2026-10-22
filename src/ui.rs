@@ -1874,7 +1874,7 @@ impl<'a> UI<'a> {
             let artist = music.artist.to_owned();
             let time = UI::duration_to_string(music.length.as_secs());
             let genre = music.genre.to_owned();
-            if playing_index == music.index {
+            if playing_index == music.index && !matches!(self.state.status(), PlayingStatus::Stopped) {
                 title.insert_str(0, self.style.list_style.playing_selector.as_str());
                 rows.push(
                     Row::new(vec![title, artist, genre, time])
@@ -1940,7 +1940,7 @@ impl<'a> UI<'a> {
             let mut title = music.title.to_owned();
             let artist = music.artist.to_owned();
             let time = UI::duration_to_string(music.length.as_secs());
-            if playing_index == music.index {
+            if playing_index == music.index && !matches!(self.state.status(), PlayingStatus::Stopped) {
                 title.insert_str(0, self.style.list_style.playing_selector.as_str());
                 rows.push(
                     Row::new(vec![title, artist, time])
