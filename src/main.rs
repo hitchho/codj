@@ -496,6 +496,10 @@ async fn main() -> Result<()> {
 
     ui.update_from_config(&config);
     ui.restore_state().await;
+    ui.pending_select = env::var(REEXEC_SELECTED).ok().and_then(|v| v.parse().ok());
+    env::remove_var(REEXEC_SELECTED);
+    let mut upgrade_check = std::time::Instant::now();
+    let mut upgrade_failed = false;
     ui.set_frame(&mut terminal.get_frame());
     let mut should_quit = false;
     // soulseek results trickle in from peers, twice a second is plenty
@@ -522,6 +526,32 @@ async fn main() -> Result<()> {
             ui.fps_controller.frame_duration()
         };
         should_quit = handle_events(&mut ui, frame).await?;
+        ui.apply_pending_select();
+        // a newer codj was installed: swap to it once nothing on screen would be lost
+        if !upgrade_failed && upgrade_check.elapsed() >= std::time::Duration::from_secs(2) {
+            upgrade_check = std::time::Instant::now();
+            if let Some(new) = replaced_binary().filter(|_| ui.idle_for_restart(UPGRADE_QUIET)) {
+                kbd_pop_all();
+                let _ = stdout().execute(DisableMouseCapture);
+                let _ = disable_raw_mode();
+                let _ = stdout().execute(LeaveAlternateScreen);
+                use std::os::unix::process::CommandExt;
+                let err = std::process::Command::new(&new)
+                    .args(env::args_os().skip(1))
+                    .env(REEXEC_SELECTED, ui.list_position().to_string())
+                    .exec();
+                // exec only returns on failure: take the terminal back and keep going
+                eprintln!("codj: can't start the newer build: {err}");
+                upgrade_failed = true;
+                let _ = enable_raw_mode();
+                let _ = stdout().execute(EnterAlternateScreen);
+                let _ = stdout().execute(EnableMouseCapture);
+                if enhanced {
+                    kbd_push(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES);
+                }
+                terminal.clear()?;
+            }
+        }
         if let Some(path) = ui.dj_take_edit() {
             let text = edit_in_terminal(&mut ui, &mut terminal, &path);
             ui.dj_edited(text);
@@ -573,10 +603,26 @@ fn edit_in_terminal<B: ratatui::backend::Backend>(
 
 /// Waits up to one frame for input, then handles every queued key before the next draw. Handling
 /// only one key per frame let held keys (key repeat) pile up and keep scrolling after release.
+/// The list position a replaced codj hands to its newer build
+const REEXEC_SELECTED: &str = "CODJ_REEXEC_SELECTED";
+/// No key for this long before codj swaps itself for a newer build
+const UPGRADE_QUIET: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The newer build installed over the running binary (`/proc/self/exe` reads `... (deleted)`)
+fn replaced_binary() -> Option<std::path::PathBuf> {
+    let link = std::fs::read_link("/proc/self/exe").ok()?;
+    let path = std::path::PathBuf::from(link.to_string_lossy().strip_suffix(" (deleted)")?);
+    path.is_file().then_some(path)
+}
+
 async fn handle_events<'a>(ui: &mut ui::UI<'a>, frame: std::time::Duration) -> io::Result<bool> {
     let mut wait = frame;
     while event::poll(wait)? {
-        match event::read()? {
+        let ev = event::read()?;
+        if matches!(ev, Event::Key(_) | Event::Mouse(_)) {
+            ui.last_input = std::time::Instant::now();
+        }
+        match ev {
             Event::Key(key) if ui.dj_active() => ui.dj_key(&key),
             // the normal view's geometry is stale behind the DJ screen: a click must not seek or
             // play anything. Only the wheel is used: it edits the selected control.

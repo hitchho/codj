@@ -381,6 +381,10 @@ pub struct UI<'a> {
     pub soulseek_visible: bool,
     /// the `?` key list of the normal view
     help_open: bool,
+    /// the last key or mouse event: codj only swaps to a newer build after a quiet spell
+    pub last_input: std::time::Instant,
+    /// list position handed over by the codj this one replaced, applied once the list is in
+    pub pending_select: Option<usize>,
     /// Soulseek connection state
     pub soulseek_connected: bool,
     /// Soulseek config from config file (for connect params)
@@ -1436,6 +1440,8 @@ impl<'a> UI<'a> {
             focus_playlists: false,
             soulseek_visible: false,
             help_open: false,
+            last_input: std::time::Instant::now(),
+            pending_select: None,
             soulseek_connected: false,
             soulseek_config: None,
             agent_config: Default::default(),
@@ -1451,6 +1457,32 @@ impl<'a> UI<'a> {
 
     pub fn dj_active(&self) -> bool {
         self.dj.is_some()
+    }
+
+    /// Nothing on screen would be lost by swapping codj for a newer build: the plain list, no
+    /// typing, no panel or DJ mode, and no key for a while
+    pub fn idle_for_restart(&self, quiet: std::time::Duration) -> bool {
+        !self.dj_active()
+            && matches!(self.mode, ListMode::Select)
+            && matches!(self.region, Region::List)
+            && self.settings_view.is_none()
+            && self.queue_view.is_none()
+            && !self.help_open
+            && !self.soulseek_visible
+            && self.last_input.elapsed() >= quiet
+    }
+
+    /// Where the cursor is in the list (handed to a newer codj)
+    pub fn list_position(&self) -> usize {
+        self.music_list.selected
+    }
+
+    /// Puts the cursor where the replaced codj had it, once the list has loaded
+    pub fn apply_pending_select(&mut self) {
+        if let Some(n) = self.pending_select.filter(|_| !self.music_list.musics.is_empty()) {
+            self.music_list.selected = n.min(self.music_list.musics.len() - 1);
+            self.pending_select = None;
+        }
     }
 
     /// `:dj` / `M`: switches to the live DJ screen. With a kitty-protocol terminal this also asks
