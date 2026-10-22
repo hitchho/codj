@@ -102,14 +102,14 @@ impl Step {
     /// The exact keys
     pub fn keys(self) -> &'static [&'static str] {
         match self {
-            Step::Pick => &["< loads the highlighted track on A, > on B", "Shift+Tab searches the library"],
-            Step::PlayA => &["x  play A (x again pauses)"],
-            Step::HearB => &["F2  headphones on B (F1 for A)", "hold t  crossfader to A: only A in the room"],
-            Step::SyncB => &[",  sync B to A (c syncs A to B)"],
-            Step::Phrase => &[".  play B on the phrase line (bar 1, 17, 33 ...)"],
-            Step::BringIn => &["f q  pick B's low · [ down to -1 (wheel, knob)", "h  B fader up · y  crossfader to the middle"],
-            Step::BassSwap => &["f d  pick A's low · [ to -1", "f q  pick B's low · \\ puts it back to 0"],
-            Step::FadeOut => &["hold y  crossfader to B  (or hold b: A's fader down)", "x  stop A"],
+            Step::Pick => &["Shift+Tab  browse the library: j k move, a loads on A, b on B", "/  searches it"],
+            Step::PlayA => &["Space  play A (A has the focus; Space again pauses)"],
+            Step::HearB => &["F2  headphones on B (F1 for A)", ":xfade a  crossfader to A: only A in the room"],
+            Step::SyncB => &["l s  focus B and sync it to A (h s syncs A to B)"],
+            Step::Phrase => &["Space  play B (it has the focus) on the phrase line (bar 1, 17, 33 ...)"],
+            Step::BringIn => &["f q  pick B's low · [ down to -1 (wheel, knob), or :low b kill", ":xfade 0  crossfader to the middle"],
+            Step::BassSwap => &[":low a kill  A's low down", ":low b flat  B's low back (or f q then \\ puts it back to 0)"],
+            Step::FadeOut => &[":xfade b  crossfader to B  (or :fader a 0: A's fader down)", "h Space  stop A (h focuses A)"],
             Step::Done => &["F9  record your next one · :mix new blend · :help bass swap"],
         }
     }
@@ -409,8 +409,8 @@ pub fn live_lines(step: Step, decks: &[DeckInfo], mixer: &MixerInfo, grids: [Opt
                         PhraseCue::Wait { bars_left, next_bar } => {
                             format!("A is on bar {bar}, beat {beat}: the phrase line is bar {next_bar}, in {bars_left} bar{}", if bars_left == 1 { "" } else { "s" })
                         }
-                        PhraseCue::Ready { next_bar } => format!("A: bar {bar}, beat {beat}  ► press . now: bar {next_bar} starts a phrase"),
-                        PhraseCue::Now { next_bar } => format!("A: bar {bar}, beat {beat}  ► this is the phrase line: press . now (next: bar {next_bar})"),
+                        PhraseCue::Ready { next_bar } => format!("A: bar {bar}, beat {beat}  ► press Space now: bar {next_bar} starts a phrase"),
+                        PhraseCue::Now { next_bar } => format!("A: bar {bar}, beat {beat}  ► this is the phrase line: press Space now (next: bar {next_bar})"),
                     });
                 }
                 None => lines.push("A has no beat grid: count bars yourself, 4 beats each".into()),
@@ -423,10 +423,10 @@ pub fn live_lines(step: Step, decks: &[DeckInfo], mixer: &MixerInfo, grids: [Opt
         Step::BringIn => {
             let mut lines = vec![format!("{} B low {:+.2} (needs -1)", tick(b.eq.0 <= KILLED), b.eq.0)];
             if b.fader < 0.3 {
-                lines.push("B's fader is down: h raises it".into());
+                lines.push("B's fader is down: :fader b full raises it".into());
             }
             if mixer.crossfader <= -0.9 {
-                lines.push("the crossfader is on A, the room cannot hear B: hold y a little".into());
+                lines.push("the crossfader is on A, the room cannot hear B: :xfade 0 or :xfade b".into());
             }
             lines
         }
@@ -494,6 +494,99 @@ mod tests {
     }
 
     const SHORT: Duration = Duration::from_secs(2);
+
+    /// the new keys really do what each step asks: typed into the key machinery they produce
+    /// the calls that make the step's condition true
+    #[test]
+    fn every_step_can_be_done_with_the_keys_it_names() {
+        use crate::dj::keys::{DjCall, DjKeys};
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+        let press = |c: KeyCode| KeyEvent { code: c, modifiers: KeyModifiers::NONE, kind: KeyEventKind::Press, state: KeyEventState::NONE };
+        let t0 = Instant::now();
+        let at = std::cell::Cell::new(0u64);
+        let mut keys = DjKeys::new(true);
+        let mut decks = vec![deck(|d| d.path = "/m/a.flac".into()), deck(|d| d.path = "/m/b.flac".into())];
+        let mut m = mixer(0.0);
+        let type_keys = |keys: &mut DjKeys, text: &str| -> Vec<DjCall> {
+            for c in text.chars() {
+                at.set(at.get() + 150);
+                keys.on_key(&press(KeyCode::Char(c)), t0 + Duration::from_millis(at.get()));
+            }
+            at.set(at.get() + 150);
+            keys.tick(t0 + Duration::from_millis(at.get()))
+        };
+        let apply = |calls: &[DjCall], decks: &mut Vec<DeckInfo>, m: &mut MixerInfo| {
+            for c in calls {
+                match c {
+                    DjCall::Play(d) => decks[*d as usize].playing = true,
+                    DjCall::Pause(d) => decks[*d as usize].playing = false,
+                    DjCall::Sync(d) => decks[*d as usize].synced = true,
+                    DjCall::Set { control: "cue", deck, value } => decks[*deck as usize].headphones = *value > 0.5,
+                    DjCall::Set { control: "low", deck, value } => decks[*deck as usize].eq.0 = *value,
+                    DjCall::Set { control: "crossfader", value, .. } => m.crossfader = *value,
+                    DjCall::Set { control: "fader", deck, value } => decks[*deck as usize].fader = *value,
+                    _ => {}
+                }
+            }
+        };
+        let long = Duration::from_secs(60);
+        // 2: play A (A has the focus)
+        let calls = type_keys(&mut keys, " ");
+        assert_eq!(calls, vec![DjCall::Play(0)]);
+        apply(&calls, &mut decks, &mut m);
+        assert!(is_done(Step::PlayA, &decks, &m, long));
+        // 3: F2 for headphones on B
+        keys.on_key(&press(KeyCode::F(2)), t0 + Duration::from_millis(at.get() + 150));
+        let calls = keys.tick(t0 + Duration::from_millis(at.get() + 300));
+        at.set(at.get() + 300);
+        apply(&calls, &mut decks, &mut m);
+        assert!(is_done(Step::HearB, &decks, &m, long) && decks[1].headphones);
+        // 4: l s syncs B to A
+        keys.set_snapshot(&decks, &m);
+        let calls = type_keys(&mut keys, "ls");
+        assert_eq!(calls, vec![DjCall::Sync(1)]);
+        apply(&calls, &mut decks, &mut m);
+        assert!(is_done(Step::SyncB, &decks, &m, long));
+        // 5: Space plays B, which has the focus
+        keys.set_snapshot(&decks, &m);
+        let calls = type_keys(&mut keys, " ");
+        assert_eq!(calls, vec![DjCall::Play(1)]);
+        apply(&calls, &mut decks, &mut m);
+        assert!(is_done(Step::Phrase, &decks, &m, long));
+        // 6: f q picks B's low, [ takes it down to -1
+        keys.set_snapshot(&decks, &m);
+        let calls = type_keys(&mut keys, "fq");
+        assert!(calls.is_empty());
+        let mut last = Vec::new();
+        for _ in 0..22 {
+            last = type_keys(&mut keys, "[");
+            apply(&last, &mut decks, &mut m);
+            keys.set_snapshot(&decks, &m);
+        }
+        assert!(!last.is_empty() || decks[1].eq.0 <= KILLED);
+        assert!(is_done(Step::BringIn, &decks, &m, long), "{:?}", decks[1].eq);
+        // 7: f d picks A's low and takes it down; B's low goes back with \ after f q
+        type_keys(&mut keys, "fd");
+        for _ in 0..22 {
+            let calls = type_keys(&mut keys, "[");
+            apply(&calls, &mut decks, &mut m);
+            keys.set_snapshot(&decks, &m);
+        }
+        type_keys(&mut keys, "fq");
+        let calls = type_keys(&mut keys, "\\");
+        apply(&calls, &mut decks, &mut m);
+        keys.set_snapshot(&decks, &m);
+        assert!(is_done(Step::BassSwap, &decks, &m, long), "{:?} {:?}", decks[0].eq, decks[1].eq);
+        // 8: the crossfader to B (as :xfade b does), then h and Space stop A
+        keys.set_control(crate::dj::keys::Slot::Ctl(crate::dj::keys::Ctl::Crossfader), 1.0, t0 + Duration::from_millis(at.get() + 400));
+        let calls = keys.tick(t0 + Duration::from_millis(at.get() + 600));
+        at.set(at.get() + 600);
+        apply(&calls, &mut decks, &mut m);
+        let calls = type_keys(&mut keys, "h ");
+        assert_eq!(calls, vec![DjCall::Pause(0)]);
+        apply(&calls, &mut decks, &mut m);
+        assert!(is_done(Step::FadeOut, &decks, &m, long));
+    }
 
     #[test]
     fn step_one_needs_two_different_loaded_tracks() {
@@ -763,14 +856,21 @@ mod tests {
         }
         // the exact keys of the task
         let keys = |s: Step| s.keys().join(" ");
-        assert!(keys(Step::Pick).contains('<') && keys(Step::Pick).contains('>'));
-        assert!(keys(Step::PlayA).contains('x'));
-        assert!(keys(Step::HearB).contains("F2"));
-        assert!(keys(Step::SyncB).contains(','));
-        assert!(keys(Step::Phrase).contains('.'));
-        assert!(keys(Step::BringIn).contains("f q") && keys(Step::BringIn).contains('['));
-        assert!(keys(Step::BassSwap).contains("f d") && keys(Step::BassSwap).contains("\\"));
-        assert!(keys(Step::FadeOut).contains("y") && keys(Step::FadeOut).contains('b') && keys(Step::FadeOut).contains('x'));
+        assert!(keys(Step::Pick).contains("Shift+Tab") && keys(Step::Pick).contains("j k") && keys(Step::Pick).contains("a loads"));
+        assert!(keys(Step::PlayA).contains("Space"));
+        assert!(keys(Step::HearB).contains("F2") && keys(Step::HearB).contains(":xfade a"));
+        assert!(keys(Step::SyncB).contains("l s"));
+        assert!(keys(Step::Phrase).contains("Space"));
+        assert!(keys(Step::BringIn).contains("f q") && keys(Step::BringIn).contains('[') && keys(Step::BringIn).contains(":low b kill"));
+        assert!(keys(Step::BassSwap).contains(":low a kill") && keys(Step::BassSwap).contains(":low b flat") && keys(Step::BassSwap).contains("\\"));
+        assert!(keys(Step::FadeOut).contains(":xfade b") && keys(Step::FadeOut).contains("h Space"));
+        // no step teaches a key that is gone
+        for step in Step::ALL {
+            let text = step.keys().join(" ");
+            for gone in ["< loads", "hold t", "hold y", "x  play", "c syncs"] {
+                assert!(!text.contains(gone), "{step:?}: {gone}");
+            }
+        }
         assert!(keys(Step::Done).contains("F9") && keys(Step::Done).contains(":mix new blend") && keys(Step::Done).contains(":help"));
     }
 
@@ -791,11 +891,11 @@ mod tests {
         assert!(lines.iter().any(|l| l.contains("bar 29, beat 1") && l.contains("bar 33") && l.contains("in 4 bars")), "{lines:?}");
         let late = DeckInfo { position: 31.0 * 2.0 + 1.6, ..a.clone() };
         let lines = live_lines(Step::Phrase, &[late, b.clone()], &m, [Some(g), None], &Finding::Nothing);
-        assert!(lines.iter().any(|l| l.contains("press . now") && l.contains("bar 33")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("press Space now") && l.contains("bar 33")), "{lines:?}");
         // B's fader down and the crossfader on A are called out in step 6
         let down = deck(|d| d.fader = 0.0);
         let lines = live_lines(Step::BringIn, &[a, down], &m, [None, None], &Finding::Nothing);
-        assert!(lines.iter().any(|l| l.contains("h raises it")) && lines.iter().any(|l| l.contains("hold y")), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains(":fader b full")) && lines.iter().any(|l| l.contains(":xfade 0")), "{lines:?}");
         // sync too far apart
         let (fast, slow) = (deck(|d| { d.track_bpm = 128.0; d.beat_in_bar = 1; d.bpm = 128.0 }), deck(|d| { d.track_bpm = 100.0; d.beat_in_bar = 1; d.bpm = 100.0 }));
         let lines = live_lines(Step::SyncB, &[fast, slow], &m, [None, None], &Finding::Nothing);

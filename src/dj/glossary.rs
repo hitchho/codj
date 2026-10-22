@@ -30,73 +30,75 @@ pub fn explain(t: Target) -> &'static str {
         Target::Slot(Slot::Master) => "master: the volume of everything the room hears",
         Target::Slot(Slot::CueMix) => "cue mix: headphones blend, cued deck vs the room",
         Target::Slot(Slot::SyncRange) => "sync range: the biggest tempo change sync may do",
-        Target::LoopLen(_) => "loop length: beats the next loop repeats",
-        Target::Jump(_) => "jump size: beats that the jump keys skip",
+        Target::LoopLen(_) => "loop length: beats the next v loop repeats",
         Target::Knob(..) => "patch knob: ] [ turn it, \\ back to the saved value",
     }
 }
 
-/// A line of the `?` overlay: keys for deck A, keys for deck B (the same for mixer and global
-/// entries), the explanation
+/// A line of the `?` overlay: the keys and what they do
 #[derive(Debug, Clone, Copy)]
 pub struct Entry {
-    pub a: &'static str,
-    pub b: &'static str,
+    pub keys: &'static str,
     pub text: &'static str,
 }
 
-const fn e(a: &'static str, b: &'static str, text: &'static str) -> Entry {
-    Entry { a, b, text }
+const fn e(keys: &'static str, text: &'static str) -> Entry {
+    Entry { keys, text }
 }
 
-const fn g(keys: &'static str, text: &'static str) -> Entry {
-    Entry { a: keys, b: keys, text }
-}
-
-/// Deck panel entries: `{other}` in a text is the other deck's letter
+/// The focused deck's keys (`{self}` in a text is its letter, `{other}` the other deck's). The
+/// one panel of the overlay: every key acts on the focused deck.
 pub const DECK_KEYS: &[Entry] = &[
-    e("x", ".", "play / pause this deck"),
-    e("z", "/", "cue: a saved spot; hold to hear it in headphones"),
-    e("c", ",", "sync: match {self}'s tempo and beats to {other}"),
-    e("v", "m", "loop: repeat a few beats; again to leave it"),
-    e("e r", "u i", "jump: skip back / forward along the track"),
-    e("a s", "k l", "pitch: slower / faster; tempo follows"),
-    e("q w", "o p", "nudge: bend tempo while held to line beats up"),
-    e("1-4", "7-0", "hot cues: first press saves, then jumps"),
-    e("⇧1-4", "⇧7-0", "Shift + the hot cue key clears it"),
-    e("<", ">", "load the highlighted library track here"),
-    e("F1", "F2", "headphones: hear this deck privately"),
+    e("h l", "focus deck A / B: every key acts on it"),
+    e("Space", "play / pause the focused deck"),
+    e("c", "cue: a saved spot; hold to hear it in headphones"),
+    e("s", "sync: match {self}'s tempo and beats to {other}"),
+    e("w b", "jump 1 beat forward / back (4w: 4 beats)"),
+    e("W B", "jump a bar forward / back (2W: 2 bars)"),
+    e("} {", "jump a phrase (16 bars) forward / back"),
+    e("0 gg", "back to the start of the track"),
+    e("G $", "to the outro: 32 bars before the end"),
+    e("m{a-h}", "mark: save a hot cue here (eight of them)"),
+    e("'{a-h}", "jump to a mark (` works too)"),
+    e("v", "loop 4 beats; 8v loops 8; v again leaves"),
+    e("+ -", "pitch up / down 0.1 % (hold to ramp)"),
+    e("=", "pitch back to 0"),
+    e("[ ]", "nudge: bend the tempo while held"),
+    e(".", "repeat the last action on the focused deck"),
+    e("u C-r", "undo / redo a control change"),
+    e("4w 2}", "a count goes in front, like in vim"),
 ];
 
-/// Mixer entries: keys are written `deck A · deck B`
+/// Mixer entries: the mixer is edited through the hints and `:` commands
 pub const MIXER_KEYS: &[Entry] = &[
-    g("Alt q/a · u/j", "low: the bass — keep only one bassline at a time"),
-    g("Alt w/s · i/k", "mid: vocals, synths, snares; the body of a track"),
-    g("Alt e/d · o/l", "high: hats and shine; lower it to soften a deck"),
-    g("Alt r/f · p/;", "filter: below 0 muffles, above 0 thins the bass"),
-    g("g/b · h/n", "faders: how loud each deck is in the room"),
-    g("t y", "crossfader: which deck the room hears"),
-    g("F5", "quantize: presses snap to the beat"),
+    e("f", "hints: label every control, type one to pick it"),
+    e("] [ \\", "step the picked control up / down / reset"),
+    e(":fader .5", "fader of the focused deck (0 to 1)"),
+    e(":low kill", "low: the bass — keep only one bassline at a time"),
+    e(":mid :high", "mid: the body of a track · high: hats and shine"),
+    e(":filter -.3", "filter: below 0 muffles, above 0 thins the bass"),
+    e(":xfade a", "crossfader: which deck the room hears"),
+    e("F1 F2", "headphones: hear deck A / B privately"),
+    e("F5", "quantize: presses snap to the beat"),
+    e(":delm a", "delete a mark (:delm! all of them)"),
 ];
 
 pub const GLOBAL_KEYS: &[Entry] = &[
-    g("f", "hints: pick a control by its label"),
-    g("] [ \\", "edit the picked control (wheel too)"),
-    g("F9", "record: your playing becomes code"),
-    g("F12", "patch decks: synths, drums, a grid"),
-    g("F10", "editor: edit the set, vim style"),
-    g("F11", "AI: ask an agent to write the set"),
-    g("F6 F7 F8", "arm next mix / auto / disarm"),
-    g(":", ":help <term> · :tutor · :mix new"),
-    g("Tab", "search the library"),
-    g("Esc", "close this / clear pick / leave"),
+    e("Tab", "library: j k move, a b load"),
+    e("/", "search the library"),
+    e(":", ":help :tutor :mix new · :q leaves"),
+    e("F9", "record: your playing becomes code"),
+    e("F12", "patch decks: synths, drums, a grid"),
+    e("F10 F11", "set editor · AI agent"),
+    e("F6 F7 F8", "arm next mix / auto / disarm"),
+    e("Esc", "cancel count / pick (never leaves)"),
+    e("?", "this key map"),
 ];
 
-/// A deck entry with the deck letters filled in
-pub fn deck_entry(entry: &Entry, deck: usize) -> (&'static str, String) {
-    let (me, other) = if deck == 0 { ("A", "B") } else { ("B", "A") };
-    let keys = if deck == 0 { entry.a } else { entry.b };
-    (keys, entry.text.replace("{self}", me).replace("{other}", other))
+/// An entry with the focused deck's letters filled in
+pub fn deck_entry(entry: &Entry, focus: usize) -> (&'static str, String) {
+    let (me, other) = if focus == 0 { ("A", "B") } else { ("B", "A") };
+    (entry.keys, entry.text.replace("{self}", me).replace("{other}", other))
 }
 
 /// A glossary entry for `:help <term>`
@@ -154,25 +156,25 @@ pub const TERMS: &[Term] = &[
         "phase",
         &["phase meter", "phase delta"],
         "where in the beat a track is",
-        "Phase is where in the beat a deck is. Two tracks with the same BPM still clash if their beats are offset; the phase meter on each deck and the phase delta in the mixer title show it. Sync fixes it for you; q w / o p nudge it by hand.",
+        "Phase is where in the beat a deck is. Two tracks with the same BPM still clash if their beats are offset; the phase meter on each deck and the phase delta in the mixer title show it. Sync fixes it for you; [ ] nudge it by hand.",
     ),
     t(
         "cue",
         &["cue point", "cue button"],
         "a saved spot; hold to hear it in headphones",
-        "A cue is a saved spot in a track. On a paused deck z sets it at the playhead and, while held, plays from it so you can listen; releasing jumps back. On a playing deck z returns to it and pauses.",
+        "A cue is a saved spot in a track. On a paused deck c sets it at the playhead and, while held, plays from it so you can listen; releasing jumps back. On a playing deck c returns to it and pauses.",
     ),
     t(
         "hot cue",
         &["hot cues", "hotcue", "hotcues"],
-        "up to four saved spots to jump to",
-        "Hot cues are up to four saved spots per deck (1-4 on deck A, 7-0 on B). The first press on an empty one saves the spot, later presses jump to it; Shift plus the key clears it. Use them for the drop or the intro.",
+        "eight saved spots to jump to, vim's marks",
+        "Hot cues are eight saved spots per deck, and they are the marks of vim: m then a to h saves one at the playhead, ' then the letter jumps to it (a backtick works too), :delm a deletes it and :delm! all of them. Use them for the drop or the intro.",
     ),
     t(
         "loop",
         &["loops", "looping"],
         "repeat a few beats until you leave the loop",
-        "A loop repeats a few beats (4 by default, change it with f then the loop label) until you press the key again. Use it to stretch an intro or to wait for the next phrase without the track running out.",
+        "A loop repeats a few beats until you press v again: v loops 4 (or the length set with f then the loop label), 8v loops 8, a count while looping resizes it. Use it to stretch an intro or to wait for the next phrase without the track running out.",
     ),
     t(
         "eq",
@@ -208,13 +210,13 @@ pub const TERMS: &[Term] = &[
         "fader",
         &["faders", "channel fader", "volume"],
         "a deck's own volume, 0 to 1",
-        "The channel fader is a deck's volume slider, from 0 (silent) to 1 (full). The room hears the deck's fader multiplied by the crossfader's share. g b are A's, h n are B's.",
+        "The channel fader is a deck's volume slider, from 0 (silent) to 1 (full). The room hears the deck's fader multiplied by the crossfader's share. :fader 0.5 sets the focused deck's; f e or f r picks it for ] [.",
     ),
     t(
         "crossfader",
         &["xf", "xfade", "crossfade"],
         "which deck the room hears: A, B or both",
-        "The crossfader blends between the decks: far left is only A, far right only B, the middle both. t moves it to A, y to B. Many DJs park it in the middle and mix with the faders.",
+        "The crossfader blends between the decks: far left is only A, far right only B, the middle both. f w picks it for ] [, or :xfade a, :xfade b, :xfade 0. Many DJs park it in the middle and mix with the faders.",
     ),
     t(
         "headphones/cue",
@@ -262,13 +264,13 @@ pub const TERMS: &[Term] = &[
         "nudge",
         &["bend"],
         "bend the tempo briefly to line beats up",
-        "Nudge speeds a deck up or down by up to 4 % while you hold the key (q w on A, o p on B) and then returns. Use it to slide the beats into line when the phase delta drifts.",
+        "Nudge speeds a deck up or down by up to 4 % while you hold [ or ] (with no control picked) and then returns. Use it to slide the beats into line when the phase delta drifts.",
     ),
     t(
         "pitch",
         &["rate", "speed"],
         "play faster or slower; the tempo follows",
-        "Pitch changes a deck's speed by a hair per press (a s on A, k l on B). It changes the BPM and breaks sync. To match two tempos by hand, make the BPMs equal, then fix the beats with nudge.",
+        "Pitch changes a deck's speed by a hair per press (- and + move it 0.1 %, 4+ moves 0.4 %, = resets it). It changes the BPM and breaks sync. To match two tempos by hand, make the BPMs equal, then fix the beats with nudge.",
     ),
     t(
         "grid",
@@ -280,7 +282,7 @@ pub const TERMS: &[Term] = &[
         "jump",
         &["beat jump", "beatjump"],
         "skip forward or back by whole beats",
-        "Beat jump skips along the track by the jump size (4 beats by default; f then va / vs changes it), keeping the beat phase. Jump back to repeat a bar, forward to skip ahead.",
+        "Beat jump skips along the track keeping the beat phase: w and b move one beat, W and B a bar, } and { a phrase of 16 bars, and a count multiplies (8w is eight beats). Jump back to repeat a bar, forward to skip ahead.",
     ),
     t(
         "patch",
@@ -507,36 +509,36 @@ mod tests {
             }
             assert!(!entry.text.is_empty());
         }
-        // a deck panel at 120 columns has 56 usable columns: keys column (8) + 48 of text
-        // the global panel is 40 % of it: 35 columns of text
+        // the global panel is 40 % of a 120 column screen: 35 columns of text
         for entry in GLOBAL_KEYS {
             assert!(entry.text.chars().count() <= 35, "{:?}", entry.text);
         }
         for entry in DECK_KEYS {
-            assert!(entry.a.chars().count() <= 6 && entry.b.chars().count() <= 6, "{}", entry.a);
-            for deck in 0..2 {
-                let text = deck_entry(entry, deck).1;
-                assert!(text.chars().count() <= 48, "{text:?} is {}", text.chars().count());
-            }
+            assert!(entry.keys.chars().count() <= 6, "{}", entry.keys);
         }
     }
 
     #[test]
-    fn the_overlay_names_the_keys_of_the_task() {
-        let keys = |deck: usize| DECK_KEYS.iter().map(|x| deck_entry(x, deck).0).collect::<Vec<_>>();
-        for k in ["x", "z", "c", "v", "e r", "a s", "q w", "1-4"] {
-            assert!(keys(0).contains(&k), "{k}");
+    fn the_overlay_names_the_keys_of_the_focused_deck() {
+        let keys = |entries: &[Entry]| entries.iter().map(|x| x.keys).collect::<Vec<_>>();
+        let deck = keys(DECK_KEYS);
+        for k in ["h l", "Space", "c", "s", "w b", "W B", "} {", "0 gg", "G $", "m{a-h}", "'{a-h}", "v", "+ -", "=", "[ ]", ".", "u C-r"] {
+            assert!(deck.contains(&k), "{k}");
         }
-        for k in [".", "/", ",", "m", "u i", "k l", "o p", "7-0"] {
-            assert!(keys(1).contains(&k), "{k}");
+        let sync = DECK_KEYS.iter().find(|e| e.keys == "s").unwrap();
+        assert_eq!(deck_entry(sync, 1).1, "sync: match B's tempo and beats to A");
+        assert_eq!(deck_entry(sync, 0).1, "sync: match A's tempo and beats to B");
+        let mixer = keys(MIXER_KEYS);
+        for k in ["f", ":fader .5", ":low kill", ":filter -.3", ":xfade a", "F1 F2", "F5", ":delm a"] {
+            assert!(mixer.contains(&k), "{k}");
         }
-        let sync_a = deck_entry(&DECK_KEYS[2], 0).1;
-        let sync_b = deck_entry(&DECK_KEYS[2], 1).1;
-        assert_eq!(sync_b, "sync: match B's tempo and beats to A");
-        assert_eq!(sync_a, "sync: match A's tempo and beats to B");
-        let global: Vec<&str> = GLOBAL_KEYS.iter().map(|x| x.a).collect();
-        for k in ["f", "F9", "F10", "F11", ":", "Esc"] {
+        let global = keys(GLOBAL_KEYS);
+        for k in ["Tab", "/", ":", "F9", "F10 F11", "F12", "F6 F7 F8", "Esc", "?"] {
             assert!(global.contains(&k), "{k}");
+        }
+        // no key of the old map is listed any more
+        for old in ["x", "z", "e r", "a s", "q w", "1-4", "Alt q/a · u/j", "g/b · h/n", "t y"] {
+            assert!(!deck.contains(&old) && !mixer.contains(&old), "{old}");
         }
     }
 

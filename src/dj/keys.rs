@@ -126,18 +126,76 @@ pub enum Hold {
     Cue(Deck),
     Nudge(Deck, i8),
     Rate(Deck, i8),
-    Ctl(Ctl, i8),
+}
+
+/// Beats in a bar (codjd reports no time signature)
+pub const BEATS_PER_BAR: f64 = 4.0;
+/// Beats in a phrase: 16 bars
+pub const PHRASE_BEATS: f64 = 16.0 * BEATS_PER_BAR;
+/// `G` jumps to this many bars before the end (the outro)
+pub const OUTRO_BARS: f64 = 32.0;
+/// Without a beat grid `G` goes this many seconds before the end
+const OUTRO_FALLBACK_S: f64 = 60.0;
+/// Hot cue slots (marks `a` to `h`)
+pub const MARKS: u8 = 8;
+/// A count never grows past this
+const COUNT_MAX: u32 = 9999;
+/// Edits of one control closer than this are one undo step (a held ramp is one edit)
+const EDIT_MERGE: Duration = Duration::from_millis(600);
+/// Undo steps kept
+const UNDO_MAX: usize = 50;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SeekTo {
+    /// the first downbeat (the start of the track without a grid)
+    Start,
+    /// 32 bars before the end
+    Outro,
+}
+
+/// An action on the focused deck. These are what `.` repeats (with the count they had).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Act {
+    PlayPause,
+    Sync,
+    /// beats per count: `w` 1, `W` 4 (a bar), `}` 64 (a phrase); negative goes back
+    Jump(f64),
+    Seek(SeekTo),
+    /// `v`: start a loop (count beats, else the loop length), resize it with a count, or leave it
+    Loop,
+    /// `m{a-h}`: save a hot cue at the playhead
+    Mark(u8),
+    /// `'{a-h}`: jump to a hot cue
+    GoMark(u8),
+    /// `+` / `-`: pitch by 0.1 % per count
+    Pitch(i8),
+    /// `=`: pitch back to 0
+    PitchReset,
+}
+
+/// A command that waits for one more key
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Pending {
+    /// `m`
+    Mark,
+    /// `'` or `` ` ``
+    GoMark,
+    /// `g`
+    G,
+}
+
+impl Pending {
+    fn key(self) -> char {
+        match self {
+            Pending::Mark => 'm',
+            Pending::GoMark => '\'',
+            Pending::G => 'g',
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Tap {
-    PlayPause(Deck),
-    Sync(Deck),
-    Loop(Deck),
-    Hotcue(Deck, u8),
-    HotcueClear(Deck, u8),
-    /// back (-1) or forward (+1) by the deck's jump size
-    BeatJump(Deck, i8),
     Headphones(Deck),
     Quantize,
 }
@@ -145,15 +203,15 @@ pub enum Tap {
 /// Keys the screen itself handles
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Nav {
-    Exit,
     Command,
+    /// `Tab`: the library, browsed with vim keys
     Search,
+    /// `/`: straight into the library search
+    SearchNow,
     LibUp,
     LibDown,
     LibPageUp,
     LibPageDown,
-    /// load the highlighted track onto this deck
-    Load(Deck),
     /// load the highlighted track onto the deck that is not playing
     LoadSmart,
     /// arm the next mix of the active set (F6)
@@ -174,25 +232,41 @@ pub enum Nav {
     Hints,
     /// `;`: back to the previously selected control
     Toggle,
-    /// `]` / `[`: edit the selected control by one step up / down
-    Step(i8),
     /// `\`: reset the selected control
     Reset,
     /// an edit key with no control selected (tells the user how to select one)
     NoSelection,
     /// `?`: the key map on the screen, every key explained
     Help,
+    /// a one-line message for the status line
+    Note(&'static str),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Binding {
+    /// an action on the focused deck
+    Act(Act),
+    /// `c`: cue, hold to preview
+    Cue,
+    /// `]` / `[`: step the selected control, else nudge the focused deck
+    Bracket(i8),
+    /// `+` / `-`: pitch of the focused deck (a hold ramps)
+    Pitch(i8),
+    /// `h` / `l`
+    Focus(Deck),
+    /// a digit of a count (`0` only after another digit; alone it is the start motion)
+    Digit(u8),
+    Pend(Pending),
+    /// `.`
+    Repeat,
+    Undo,
+    Redo,
     Tap(Tap),
-    Hold(Hold),
     Nav(Nav),
 }
 
 /// A key with the terminal's shift quirks removed: letters are lowercase and `shift` is set for
-/// capitals and shifted US symbols (`<` is `,` + shift), so every protocol mode looks the same
+/// capitals and shifted US symbols (`}` is `]` + shift), so every protocol mode looks the same
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NKey {
     pub code: KeyCode,
@@ -241,18 +315,33 @@ fn unshift(c: char) -> (char, bool) {
         '>' => ('.', true),
         ':' => (';', true),
         '?' => ('/', true),
+        '+' => ('=', true),
+        '{' => ('[', true),
+        '}' => (']', true),
+        '_' => ('-', true),
+        '"' => ('\'', true),
+        '~' => ('`', true),
+        '|' => ('\\', true),
         c => (c, false),
     }
 }
 
-/// The key map. Deck A on the left hand, deck B on the right, the mixer on Alt and `g b h n t y`.
+/// The key map, vim first: one deck has the focus (`h` / `l`), counts go in front of motions,
+/// marks are hot cues, `v` is a loop. Mixer values are edited through the hints (`f`) and `:`
+/// commands.
 pub fn bind(k: &NKey) -> Option<Binding> {
     use Binding::*;
-    if k.ctrl {
+    if k.alt {
         return None;
     }
-    let KeyCode::Char(_) = k.code else {
-        return match (k.code, k.alt) {
+    if k.ctrl {
+        return match (k.code, k.shift) {
+            (KeyCode::Char('r'), false) => Some(Redo),
+            _ => None,
+        };
+    }
+    let KeyCode::Char(c) = k.code else {
+        return match (k.code, k.shift) {
             (KeyCode::F(1), false) => Some(Tap(self::Tap::Headphones(0))),
             (KeyCode::F(2), false) => Some(Tap(self::Tap::Headphones(1))),
             (KeyCode::F(5), false) => Some(Tap(self::Tap::Quantize)),
@@ -263,8 +352,9 @@ pub fn bind(k: &NKey) -> Option<Binding> {
             (KeyCode::F(10), false) => Some(Nav(self::Nav::Editor)),
             (KeyCode::F(11), false) => Some(Nav(self::Nav::Prompt)),
             (KeyCode::F(12), false) => Some(Nav(self::Nav::Patch)),
-            (KeyCode::Esc, false) => Some(Nav(self::Nav::Exit)),
-            (KeyCode::Tab, false) => Some(Nav(self::Nav::Search)),
+            (KeyCode::Tab, _) => Some(Nav(self::Nav::Search)),
+            (KeyCode::Left, false) => Some(Focus(0)),
+            (KeyCode::Right, false) => Some(Focus(1)),
             (KeyCode::Up, false) => Some(Nav(self::Nav::LibUp)),
             (KeyCode::Down, false) => Some(Nav(self::Nav::LibDown)),
             (KeyCode::PageUp, false) => Some(Nav(self::Nav::LibPageUp)),
@@ -273,92 +363,45 @@ pub fn bind(k: &NKey) -> Option<Binding> {
             _ => None,
         };
     };
-    let KeyCode::Char(c) = k.code else { return None };
-    if k.alt {
-        if k.shift {
-            return None;
-        }
-        let (deck, rest) = match c {
-            'q' | 'a' | 'w' | 's' | 'e' | 'd' | 'r' | 'f' => (0, c),
-            // the right hand mirrors: u i o p on top, j k l ; below
-            'u' => (1, 'q'),
-            'j' => (1, 'a'),
-            'i' => (1, 'w'),
-            'k' => (1, 's'),
-            'o' => (1, 'e'),
-            'l' => (1, 'd'),
-            'p' => (1, 'r'),
-            ';' => (1, 'f'),
-            _ => return None,
-        };
-        let (ctl, dir) = match rest {
-            'q' => (Ctl::Eq(deck, 0), 1),
-            'a' => (Ctl::Eq(deck, 0), -1),
-            'w' => (Ctl::Eq(deck, 1), 1),
-            's' => (Ctl::Eq(deck, 1), -1),
-            'e' => (Ctl::Eq(deck, 2), 1),
-            'd' => (Ctl::Eq(deck, 2), -1),
-            'r' => (Ctl::Filter(deck), 1),
-            _ => (Ctl::Filter(deck), -1),
-        };
-        return Some(Hold(self::Hold::Ctl(ctl, dir)));
-    }
+    use self::{Act as A, Nav as N};
     if k.shift {
         return match c {
-            '1'..='4' => Some(Tap(self::Tap::HotcueClear(0, c as u8 - b'1'))),
-            '7' => Some(Tap(self::Tap::HotcueClear(1, 0))),
-            '8' => Some(Tap(self::Tap::HotcueClear(1, 1))),
-            '9' => Some(Tap(self::Tap::HotcueClear(1, 2))),
-            '0' => Some(Tap(self::Tap::HotcueClear(1, 3))),
-            'a' | ',' => Some(Nav(self::Nav::Load(0))),
-            'b' | '.' => Some(Nav(self::Nav::Load(1))),
-            ';' => Some(Nav(self::Nav::Command)),
-            '/' => Some(Nav(self::Nav::Help)),
+            // vim's WORD is the bigger word: a bar; G the end; } a paragraph: a phrase
+            'w' => Some(Act(A::Jump(BEATS_PER_BAR))),
+            'b' => Some(Act(A::Jump(-BEATS_PER_BAR))),
+            ']' => Some(Act(A::Jump(PHRASE_BEATS))),
+            '[' => Some(Act(A::Jump(-PHRASE_BEATS))),
+            'g' | '4' => Some(Act(A::Seek(SeekTo::Outro))),
+            '=' => Some(Pitch(1)),
+            '/' => Some(Nav(N::Help)),
+            ';' => Some(Nav(N::Command)),
             _ => None,
         };
     }
-    use self::{Hold as H, Tap as T};
     Some(match c {
-        // deck A
-        'z' => Hold(H::Cue(0)),
-        'x' => Tap(T::PlayPause(0)),
-        'c' => Tap(T::Sync(0)),
-        'v' => Tap(T::Loop(0)),
-        'a' => Hold(H::Rate(0, -1)),
-        's' => Hold(H::Rate(0, 1)),
-        'q' => Hold(H::Nudge(0, -1)),
-        'w' => Hold(H::Nudge(0, 1)),
-        '1'..='4' => Tap(T::Hotcue(0, c as u8 - b'1')),
-        'e' => Tap(T::BeatJump(0, -1)),
-        'r' => Tap(T::BeatJump(0, 1)),
-        // deck B
-        '/' => Hold(H::Cue(1)),
-        '.' => Tap(T::PlayPause(1)),
-        ',' => Tap(T::Sync(1)),
-        'm' => Tap(T::Loop(1)),
-        'k' => Hold(H::Rate(1, -1)),
-        'l' => Hold(H::Rate(1, 1)),
-        'o' => Hold(H::Nudge(1, -1)),
-        'p' => Hold(H::Nudge(1, 1)),
-        '7' => Tap(T::Hotcue(1, 0)),
-        '8' => Tap(T::Hotcue(1, 1)),
-        '9' => Tap(T::Hotcue(1, 2)),
-        '0' => Tap(T::Hotcue(1, 3)),
-        'u' => Tap(T::BeatJump(1, -1)),
-        'i' => Tap(T::BeatJump(1, 1)),
+        'h' => Focus(0),
+        'l' => Focus(1),
+        ' ' => Act(A::PlayPause),
+        'c' => Cue,
+        's' => Act(A::Sync),
+        'w' => Act(A::Jump(1.0)),
+        'b' => Act(A::Jump(-1.0)),
+        'v' => Act(A::Loop),
+        '0'..='9' => Digit(c as u8 - b'0'),
+        'g' => Pend(Pending::G),
+        'm' => Pend(Pending::Mark),
+        '\'' | '`' => Pend(Pending::GoMark),
+        '-' => Pitch(-1),
+        '=' => Act(A::PitchReset),
+        '.' => Repeat,
+        'u' => Undo,
+        '/' => Nav(N::SearchNow),
         // control hints: `f` shows labels, a label selects, `]` `[` `\` edit, `;` toggles
-        'f' => Nav(self::Nav::Hints),
-        ';' => Nav(self::Nav::Toggle),
-        ']' => Nav(self::Nav::Step(1)),
-        '[' => Nav(self::Nav::Step(-1)),
-        '\\' => Nav(self::Nav::Reset),
-        // mixer
-        'g' => Hold(H::Ctl(Ctl::Fader(0), 1)),
-        'b' => Hold(H::Ctl(Ctl::Fader(0), -1)),
-        'h' => Hold(H::Ctl(Ctl::Fader(1), 1)),
-        'n' => Hold(H::Ctl(Ctl::Fader(1), -1)),
-        't' => Hold(H::Ctl(Ctl::Crossfader, -1)),
-        'y' => Hold(H::Ctl(Ctl::Crossfader, 1)),
+        'f' => Nav(N::Hints),
+        ';' => Nav(N::Toggle),
+        ']' => Bracket(1),
+        '[' => Bracket(-1),
+        '\\' => Nav(N::Reset),
         _ => return None,
     })
 }
@@ -371,6 +414,8 @@ pub enum DjCall {
     Pause(u32),
     Cue { deck: u32, pressed: bool },
     Sync(u32),
+    /// `DjSeek`: jump to a time (not beat-phase preserving, unlike a beat jump)
+    Seek { deck: u32, seconds: f64 },
     Nudge { deck: u32, amount: f64 },
     BeatJump { deck: u32, beats: f64 },
     Loop { deck: u32, beats: f64 },
@@ -388,6 +433,7 @@ impl DjCall {
             DjCall::Pause(_) => "DjPause",
             DjCall::Cue { .. } => "DjCue",
             DjCall::Sync(_) => "DjSync",
+            DjCall::Seek { .. } => "DjSeek",
             DjCall::Nudge { .. } => "DjNudge",
             DjCall::BeatJump { .. } => "DjBeatJump",
             DjCall::Loop { .. } => "DjLoop",
@@ -429,6 +475,15 @@ struct Held {
     last_tick: Instant,
 }
 
+/// One undoable change of a control: it went from `before` to `after`
+#[derive(Debug, Clone, Copy)]
+struct Edit {
+    slot: Slot,
+    before: f64,
+    after: f64,
+    at: Instant,
+}
+
 struct SlotState {
     slot: Slot,
     value: f64,
@@ -461,9 +516,19 @@ pub struct DjKeys {
     accel: Accel,
     /// controls the screen shows (None until the first frame: all of them)
     visible: Option<Vec<Target>>,
-    /// beats of the next loop (`v` / `m`) and of a beat jump, per deck
+    /// the deck every key acts on (`h` / `l`)
+    focus: Deck,
+    /// the count typed before a motion (`4w`)
+    count: Option<u32>,
+    pending: Option<Pending>,
+    /// what `.` repeats, with its count
+    last: Option<(Act, Option<u32>)>,
+    undo: Vec<Edit>,
+    redo: Vec<Edit>,
+    /// seconds of the first downbeat per deck, when the grid is known (`0` goes there)
+    starts: [Option<f64>; 2],
+    /// beats of the next loop (`v` without a count), per deck
     loop_len: [f64; 2],
-    jump_len: [f64; 2],
     sync_range: f64,
     /// the last trim sent per deck with the path it was sent for (codjd reports the auto-gain
     /// only, not a manual trim)
@@ -494,8 +559,14 @@ impl DjKeys {
             hints: Hints::default(),
             accel: Accel::default(),
             visible: None,
+            focus: 0,
+            count: None,
+            pending: None,
+            last: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            starts: [None; 2],
             loop_len: [hints::DEFAULT_BEATS; 2],
-            jump_len: [hints::DEFAULT_BEATS; 2],
             sync_range: hints::DEFAULT_SYNC_RANGE,
             gain_set: [None, None],
             auto_gain: [None, None],
@@ -626,7 +697,6 @@ impl DjKeys {
         match t {
             Target::Slot(s) => self.target(s, now),
             Target::LoopLen(d) => self.loop_len[d as usize],
-            Target::Jump(d) => self.jump_len[d as usize],
             Target::Knob(s, i) => self.knob_target(s, i, now),
         }
     }
@@ -642,10 +712,6 @@ impl DjKeys {
 
     pub fn loop_len(&self) -> [f64; 2] {
         self.loop_len
-    }
-
-    pub fn jump_len(&self) -> [f64; 2] {
-        self.jump_len
     }
 
     pub fn sync_range(&self) -> f64 {
@@ -675,7 +741,6 @@ impl DjKeys {
         match target {
             Target::Slot(slot) => self.bump(slot, n as f64 * slot.tap_step(), now),
             Target::LoopLen(d) => self.loop_len[d as usize] = hints::ladder_step(self.loop_len[d as usize], n),
-            Target::Jump(d) => self.jump_len[d as usize] = hints::ladder_step(self.jump_len[d as usize], n),
             Target::Knob(s, i) => {
                 let (lo, hi) = self.knob_info(s, i).map_or((0.0, 1.0), |k| (k.2, k.3));
                 self.bump_knob(s, i, n as f64 * (hi - lo) / KNOB_STEPS, now);
@@ -693,7 +758,6 @@ impl DjKeys {
                 self.bump(slot, delta, now);
             }
             Target::LoopLen(d) => self.loop_len[d as usize] = hints::DEFAULT_BEATS,
-            Target::Jump(d) => self.jump_len[d as usize] = hints::DEFAULT_BEATS,
             Target::Knob(s, i) => {
                 // the value the patch file has; a knob the file does not list goes to its minimum
                 let home = self.knob_info(s, i).map(|(name, _, lo, _)| {
@@ -757,11 +821,65 @@ impl DjKeys {
         }
     }
 
+    /// Moves a control by `delta` and remembers the change for `u`
     fn bump(&mut self, slot: Slot, delta: f64, now: Instant) {
+        let (before, after) = self.apply(slot, delta, now, false);
+        if (after - before).abs() > 1e-9 {
+            self.record(Edit { slot, before, after, at: now });
+        }
+    }
+
+    /// A change by hand: edits of one control that follow each other are one undo step
+    fn record(&mut self, e: Edit) {
+        self.redo.clear();
+        if let Some(top) = self.undo.last_mut() {
+            if top.slot == e.slot && (top.after - e.before).abs() < 1e-9 && e.at.saturating_duration_since(top.at) < EDIT_MERGE {
+                top.after = e.after;
+                top.at = e.at;
+                return;
+            }
+        }
+        self.undo.push(e);
+        if self.undo.len() > UNDO_MAX {
+            self.undo.remove(0);
+        }
+    }
+
+    /// `u`: the last change of a control goes back
+    fn undo(&mut self, now: Instant) -> Option<Nav> {
+        let Some(e) = self.undo.pop() else { return Some(Nav::Note("nothing to undo")) };
+        self.restore(e.slot, e.before, now);
+        self.redo.push(Edit { at: now, ..e });
+        None
+    }
+
+    /// `Ctrl-r`: what `u` took back is done again
+    fn redo(&mut self, now: Instant) -> Option<Nav> {
+        let Some(e) = self.redo.pop() else { return Some(Nav::Note("nothing to redo")) };
+        self.restore(e.slot, e.after, now);
+        self.undo.push(Edit { at: now, ..e });
+        None
+    }
+
+    /// Sets a control to `value` (a `:` command); undoable
+    pub fn set_control(&mut self, slot: Slot, value: f64, now: Instant) {
+        let delta = value - self.target(slot, now);
+        self.bump(slot, delta, now);
+    }
+
+    /// Puts a control at a value it had, and sends it even when the last poll still shows it
+    fn restore(&mut self, slot: Slot, value: f64, now: Instant) {
+        let delta = value - self.target(slot, now);
+        self.apply(slot, delta, now, true);
+    }
+
+    /// Moves a control and returns its value before and after (clamped to its range). `force`
+    /// sends the value even if it did not change.
+    fn apply(&mut self, slot: Slot, delta: f64, now: Instant, force: bool) -> (f64, f64) {
         let (lo, hi) = slot.range();
         let before = self.target(slot, now);
         let value = ((before + delta).clamp(lo, hi) * 1e4).round() / 1e4;
-        let changed = (value - before).abs() > 1e-9;
+        let changed = force || (value - before).abs() > 1e-9;
         match slot {
             Slot::SyncRange => self.sync_range = value,
             Slot::Gain(d) => {
@@ -784,6 +902,7 @@ impl DjKeys {
             None if changed => self.slots.push(SlotState { slot, value, touched: now, dirty: true }),
             None => {}
         }
+        (before, value)
     }
 
     /// Handles a key event. Performance keys queue calls (collected by [`tick`]); keys for the
@@ -805,80 +924,269 @@ impl DjKeys {
             self.hint_key(&nk, key.kind);
             return None;
         }
-        // Esc steps back: first the selection goes, then the screen
-        if nk.code == KeyCode::Esc && !repeat && !stream && self.hints.selected.is_some() {
-            self.hints.clear();
+        let again = repeat || stream;
+        // Esc steps back and never leaves: a half-typed command, the count, then the selection
+        if nk.code == KeyCode::Esc && !nk.alt && !nk.ctrl {
+            if !again && (self.pending.take().is_some() | self.count.take().is_some()) {
+                return None;
+            }
+            if !again && self.hints.selected.is_some() {
+                self.hints.clear();
+            }
             return None;
         }
-        match bind(&nk)? {
+        // the second key of `m` `'` `g`
+        if let Some(p) = self.pending {
+            if again {
+                return None;
+            }
+            self.pending = None;
+            let count = self.count.take();
+            return self.pending_key(p, &nk, count, now);
+        }
+        let Some(b) = bind(&nk) else {
+            // a key that means nothing cancels the count, like in vim
+            self.count = None;
+            return None;
+        };
+        match b {
+            Binding::Digit(d) => {
+                if again {
+                    return None;
+                }
+                if d == 0 && self.count.is_none() {
+                    // `0` alone: the start of the track
+                    return self.run(Act::Seek(SeekTo::Start), None, now, true);
+                }
+                self.count = Some((self.count.unwrap_or(0) * 10 + d as u32).min(COUNT_MAX));
+                None
+            }
+            Binding::Pend(p) => {
+                if !again {
+                    self.pending = Some(p);
+                }
+                None
+            }
+            Binding::Focus(d) => {
+                if !again {
+                    self.focus = d;
+                }
+                self.count = None;
+                None
+            }
+            Binding::Act(a) => {
+                let count = self.count.take();
+                if again {
+                    return None;
+                }
+                self.run(a, count, now, true)
+            }
+            Binding::Repeat => {
+                let count = self.count.take();
+                if again {
+                    return None;
+                }
+                match self.last {
+                    // a count replaces the old one for good, like in vim
+                    Some((a, c)) => {
+                        let count = count.or(c);
+                        self.last = Some((a, count));
+                        self.run(a, count, now, false)
+                    }
+                    None => Some(Nav::Note("nothing to repeat")),
+                }
+            }
+            Binding::Undo => {
+                self.count = None;
+                if again {
+                    return None;
+                }
+                self.undo(now)
+            }
+            Binding::Redo => {
+                self.count = None;
+                if again {
+                    return None;
+                }
+                self.redo(now)
+            }
+            Binding::Cue => {
+                self.count = None;
+                self.press_hold(Hold::Cue(self.focus), &nk, repeat, stream, now);
+                None
+            }
+            Binding::Pitch(dir) => {
+                let count = self.count.take();
+                if !again {
+                    self.last = Some((Act::Pitch(dir), count));
+                }
+                match count {
+                    // a hold ramps the pitch
+                    None => self.press_hold(Hold::Rate(self.focus, dir), &nk, repeat, stream, now),
+                    Some(n) if !again => self.step_n(Slot::Rate(self.focus), dir, n, now),
+                    Some(_) => {}
+                }
+                None
+            }
+            Binding::Bracket(dir) => {
+                self.count = None;
+                // a picked control is edited (a held key keeps stepping and speeds up through the
+                // acceleration); with none picked the keys bend the focused deck's tempo
+                if self.hints.selected.is_some() {
+                    self.edit(dir as i32, now);
+                } else {
+                    self.press_hold(Hold::Nudge(self.focus, dir), &nk, repeat, stream, now);
+                }
+                None
+            }
             Binding::Nav(Nav::Hints) => {
-                if !(repeat || stream) {
+                self.count = None;
+                if !again {
                     self.open_hints();
                 }
                 None
             }
             Binding::Nav(Nav::Toggle) => {
-                if !(repeat || stream) {
+                self.count = None;
+                if !again {
                     self.hints.toggle();
                 }
                 None
             }
-            // a held `]` keeps stepping (and speeds up through the acceleration)
-            Binding::Nav(Nav::Step(dir)) => {
-                if self.edit(dir as i32, now) {
-                    None
-                } else {
-                    (!(repeat || stream)).then_some(Nav::NoSelection)
-                }
-            }
             Binding::Nav(Nav::Reset) => {
-                if repeat || stream || self.reset(now) {
+                self.count = None;
+                if again || self.reset(now) {
                     None
                 } else {
                     Some(Nav::NoSelection)
                 }
             }
             Binding::Nav(n) => {
+                self.count = None;
                 let scrolls = matches!(n, Nav::LibUp | Nav::LibDown | Nav::LibPageUp | Nav::LibPageDown);
-                (scrolls || !(repeat || stream)).then_some(n)
+                (scrolls || !again).then_some(n)
             }
             Binding::Tap(t) => {
-                if !(repeat || stream) {
+                self.count = None;
+                if !again {
                     self.tap(t);
                 }
-                None
-            }
-            Binding::Hold(h) => {
-                self.press_hold(h, &nk, repeat, stream, now);
                 None
             }
         }
     }
 
+    /// The key after `m`, `'` or `g`
+    fn pending_key(&mut self, p: Pending, nk: &NKey, count: Option<u32>, now: Instant) -> Option<Nav> {
+        let KeyCode::Char(c) = nk.code else { return None };
+        if nk.alt || nk.ctrl || nk.shift {
+            return None;
+        }
+        match p {
+            Pending::Mark | Pending::GoMark => {
+                if !('a'..='h').contains(&c) {
+                    return Some(Nav::Note("marks are a to h (eight hot cues)"));
+                }
+                let slot = c as u8 - b'a';
+                self.run(if p == Pending::Mark { Act::Mark(slot) } else { Act::GoMark(slot) }, None, now, true)
+            }
+            Pending::G => match c {
+                'g' => self.run(Act::Seek(SeekTo::Start), count, now, true),
+                _ => None,
+            },
+        }
+    }
+
+    /// What is typed so far, like vim's showcmd: the count and the half-typed command
+    pub fn showcmd(&self) -> String {
+        let mut s = self.count.map(|n| n.to_string()).unwrap_or_default();
+        if let Some(p) = self.pending {
+            s.push(p.key());
+        }
+        s
+    }
+
+    /// The deck every key acts on
+    pub fn focus(&self) -> Deck {
+        self.focus
+    }
+
+    /// Focuses a deck (the `:focus` command)
+    pub fn set_focus(&mut self, deck: Deck) {
+        self.focus = deck.min(1);
+        self.count = None;
+        self.pending = None;
+    }
+
+    /// The first downbeats of the loaded tracks (seconds), for `0`
+    pub fn set_starts(&mut self, starts: [Option<f64>; 2]) {
+        self.starts = starts;
+    }
+
+    /// Something half-typed that Esc would cancel
+    pub fn has_pending(&self) -> bool {
+        self.count.is_some() || self.pending.is_some()
+    }
+
+    fn step_n(&mut self, slot: Slot, dir: i8, n: u32, now: Instant) {
+        self.bump(slot, dir as f64 * n as f64 * slot.tap_step(), now);
+    }
+
+    /// Runs an action on the focused deck. `remember`: `.` repeats it.
+    fn run(&mut self, act: Act, count: Option<u32>, now: Instant, remember: bool) -> Option<Nav> {
+        if remember {
+            self.last = Some((act, count));
+        }
+        let d = self.focus;
+        let deck = d as u32;
+        let info = self.decks.get(d as usize);
+        let n = count.unwrap_or(1) as f64;
+        match act {
+            Act::PlayPause => {
+                let playing = info.is_some_and(|i| i.playing);
+                self.out.push(if playing { DjCall::Pause(deck) } else { DjCall::Play(deck) });
+            }
+            Act::Sync => self.out.push(DjCall::Sync(deck)),
+            Act::Jump(unit) => self.out.push(DjCall::BeatJump { deck, beats: unit * n }),
+            Act::Seek(to) => {
+                let Some(i) = info.filter(|i| i.loaded) else { return Some(Nav::Note("no track on this deck")) };
+                let seconds = match to {
+                    SeekTo::Start => self.starts[d as usize].unwrap_or(0.0),
+                    SeekTo::Outro => {
+                        let back = if i.track_bpm > 0.0 { OUTRO_BARS * BEATS_PER_BAR * 60.0 / i.track_bpm } else { OUTRO_FALLBACK_S };
+                        (i.duration - back).max(0.0)
+                    }
+                };
+                self.out.push(DjCall::Seek { deck, seconds });
+            }
+            Act::Loop => {
+                let looping = info.is_some_and(|i| i.loop_beats > 0.0);
+                let beats = match (looping, count) {
+                    (false, None) => self.loop_len[d as usize],
+                    (_, Some(c)) => c as f64,
+                    (true, None) => 0.0,
+                };
+                self.out.push(DjCall::Loop { deck, beats });
+            }
+            Act::Mark(slot) => self.out.push(DjCall::Hotcue { deck, slot: slot as u32, action: "set" }),
+            Act::GoMark(slot) => {
+                if info.is_some_and(|i| i.loaded && i.hotcue(slot as usize).is_none()) {
+                    return Some(Nav::Note("that mark is not set: m then a to h saves one"));
+                }
+                self.out.push(DjCall::Hotcue { deck, slot: slot as u32, action: "jump" });
+            }
+            Act::Pitch(dir) => self.step_n(Slot::Rate(d), dir, count.unwrap_or(1), now),
+            Act::PitchReset => {
+                let delta = 1.0 - self.target(Slot::Rate(d), now);
+                self.bump(Slot::Rate(d), delta, now);
+            }
+        }
+        None
+    }
+
     fn tap(&mut self, t: Tap) {
         let calls = &mut self.out;
         match t {
-            Tap::PlayPause(d) => {
-                let playing = self.decks.get(d as usize).is_some_and(|i| i.playing);
-                calls.push(if playing { DjCall::Pause(d as u32) } else { DjCall::Play(d as u32) });
-            }
-            Tap::Sync(d) => calls.push(DjCall::Sync(d as u32)),
-            Tap::Loop(d) => {
-                let looping = self.decks.get(d as usize).is_some_and(|i| i.loop_beats > 0.0);
-                let beats = if looping { 0.0 } else { self.loop_len[d as usize] };
-                calls.push(DjCall::Loop { deck: d as u32, beats });
-            }
-            Tap::Hotcue(d, slot) => {
-                let set = self.decks.get(d as usize).is_some_and(|i| i.hotcue(slot as usize).is_some());
-                let action = if set { "jump" } else { "set" };
-                calls.push(DjCall::Hotcue { deck: d as u32, slot: slot as u32, action });
-            }
-            Tap::HotcueClear(d, slot) => {
-                calls.push(DjCall::Hotcue { deck: d as u32, slot: slot as u32, action: "clear" })
-            }
-            Tap::BeatJump(d, dir) => {
-                calls.push(DjCall::BeatJump { deck: d as u32, beats: dir as f64 * self.jump_len[d as usize] })
-            }
             Tap::Headphones(d) => {
                 let on = self.decks.get(d as usize).is_some_and(|i| i.headphones);
                 calls.push(DjCall::Set {
@@ -917,7 +1225,6 @@ impl DjKeys {
                 Hold::Cue(d) => self.out.push(DjCall::Cue { deck: d as u32, pressed: true }),
                 Hold::Nudge(d, s) => self.out.push(DjCall::Nudge { deck: d as u32, amount: s as f64 }),
                 Hold::Rate(d, s) => self.step(Slot::Rate(d), s, now),
-                Hold::Ctl(c, s) => self.step(Slot::Ctl(c), s, now),
             }
             return;
         }
@@ -960,7 +1267,6 @@ impl DjKeys {
                 }
             }
             Hold::Rate(d, s) => self.step(Slot::Rate(d), s, now),
-            Hold::Ctl(c, s) => self.step(Slot::Ctl(c), s, now),
         }
     }
 
@@ -999,7 +1305,7 @@ impl DjKeys {
                     .unwrap_or(0.0);
                 self.out.push(DjCall::Nudge { deck: d as u32, amount });
             }
-            Hold::Rate(..) | Hold::Ctl(..) => {}
+            Hold::Rate(..) => {}
         }
     }
 
@@ -1049,7 +1355,6 @@ impl DjKeys {
                 let ramp_s = now.saturating_duration_since(ramp_from).as_secs_f64();
                 match h.hold {
                     Hold::Rate(d, s) => moves.push((Slot::Rate(d), s, ramp_s, dt)),
-                    Hold::Ctl(c, s) => moves.push((Slot::Ctl(c), s, ramp_s, dt)),
                     _ => {}
                 }
             }
@@ -1083,6 +1388,7 @@ impl DjKeys {
     }
 }
 
+#[cfg(test)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1123,393 +1429,21 @@ mod tests {
             })
             .collect()
     }
+    // ---- control hints, selection and editing
 
-    #[test]
-    fn key_map_deck_a_and_b() {
-        assert_eq!(b('z'), Some(Binding::Hold(Hold::Cue(0))));
-        assert_eq!(b('x'), Some(Binding::Tap(Tap::PlayPause(0))));
-        assert_eq!(b('c'), Some(Binding::Tap(Tap::Sync(0))));
-        assert_eq!(b('v'), Some(Binding::Tap(Tap::Loop(0))));
-        assert_eq!(b('a'), Some(Binding::Hold(Hold::Rate(0, -1))));
-        assert_eq!(b('s'), Some(Binding::Hold(Hold::Rate(0, 1))));
-        assert_eq!(b('q'), Some(Binding::Hold(Hold::Nudge(0, -1))));
-        assert_eq!(b('3'), Some(Binding::Tap(Tap::Hotcue(0, 2))));
-        assert_eq!(b('e'), Some(Binding::Tap(Tap::BeatJump(0, -1))));
-        assert_eq!(b('r'), Some(Binding::Tap(Tap::BeatJump(0, 1))));
-        assert_eq!(b('/'), Some(Binding::Hold(Hold::Cue(1))));
-        assert_eq!(b('.'), Some(Binding::Tap(Tap::PlayPause(1))));
-        assert_eq!(b(','), Some(Binding::Tap(Tap::Sync(1))));
-        assert_eq!(b('m'), Some(Binding::Tap(Tap::Loop(1))));
-        assert_eq!(b('k'), Some(Binding::Hold(Hold::Rate(1, -1))));
-        assert_eq!(b('p'), Some(Binding::Hold(Hold::Nudge(1, 1))));
-        assert_eq!(b('0'), Some(Binding::Tap(Tap::Hotcue(1, 3))));
-        assert_eq!(b('7'), Some(Binding::Tap(Tap::Hotcue(1, 0))));
-        assert_eq!(b('u'), Some(Binding::Tap(Tap::BeatJump(1, -1))));
-        assert_eq!(b('i'), Some(Binding::Tap(Tap::BeatJump(1, 1))));
-        assert_eq!(b('5'), None);
-        // the old jump keys are free now (f, ; and j are taken by the control hints later on)
-        assert_eq!(b('d'), None);
-        assert_eq!(b('j'), None);
+    fn tap_key(k: &mut DjKeys, c: char, t: Instant) {
+        k.on_key(&press(c), t);
     }
 
-    #[test]
-    fn key_map_mixer() {
-        let a = |c| bind(&normalize(&alt(c, KeyEventKind::Press)));
-        assert_eq!(a('q'), Some(Binding::Hold(Hold::Ctl(Ctl::Eq(0, 0), 1))));
-        assert_eq!(a('a'), Some(Binding::Hold(Hold::Ctl(Ctl::Eq(0, 0), -1))));
-        assert_eq!(a('s'), Some(Binding::Hold(Hold::Ctl(Ctl::Eq(0, 1), -1))));
-        assert_eq!(a('e'), Some(Binding::Hold(Hold::Ctl(Ctl::Eq(0, 2), 1))));
-        assert_eq!(a('f'), Some(Binding::Hold(Hold::Ctl(Ctl::Filter(0), -1))));
-        assert_eq!(a('u'), Some(Binding::Hold(Hold::Ctl(Ctl::Eq(1, 0), 1))));
-        assert_eq!(a('j'), Some(Binding::Hold(Hold::Ctl(Ctl::Eq(1, 0), -1))));
-        assert_eq!(a('i'), Some(Binding::Hold(Hold::Ctl(Ctl::Eq(1, 1), 1))));
-        assert_eq!(a('l'), Some(Binding::Hold(Hold::Ctl(Ctl::Eq(1, 2), -1))));
-        assert_eq!(a('p'), Some(Binding::Hold(Hold::Ctl(Ctl::Filter(1), 1))));
-        assert_eq!(a(';'), Some(Binding::Hold(Hold::Ctl(Ctl::Filter(1), -1))));
-        assert_eq!(a('z'), None);
-        assert_eq!(b('g'), Some(Binding::Hold(Hold::Ctl(Ctl::Fader(0), 1))));
-        assert_eq!(b('b'), Some(Binding::Hold(Hold::Ctl(Ctl::Fader(0), -1))));
-        assert_eq!(b('h'), Some(Binding::Hold(Hold::Ctl(Ctl::Fader(1), 1))));
-        assert_eq!(b('n'), Some(Binding::Hold(Hold::Ctl(Ctl::Fader(1), -1))));
-        assert_eq!(b('t'), Some(Binding::Hold(Hold::Ctl(Ctl::Crossfader, -1))));
-        assert_eq!(b('y'), Some(Binding::Hold(Hold::Ctl(Ctl::Crossfader, 1))));
-        let f = |n| bind(&normalize(&ev(KeyCode::F(n), KeyModifiers::NONE, KeyEventKind::Press)));
-        assert_eq!(f(1), Some(Binding::Tap(Tap::Headphones(0))));
-        assert_eq!(f(2), Some(Binding::Tap(Tap::Headphones(1))));
-        assert_eq!(f(5), Some(Binding::Tap(Tap::Quantize)));
-        assert_eq!(f(6), Some(Binding::Nav(Nav::SetArmNext)));
-        assert_eq!(f(7), Some(Binding::Nav(Nav::SetAuto)));
-        assert_eq!(f(8), Some(Binding::Nav(Nav::SetDisarm)));
-        assert_eq!(f(9), Some(Binding::Nav(Nav::RecordToggle)));
-        assert_eq!(f(10), Some(Binding::Nav(Nav::Editor)));
-        assert_eq!(f(11), Some(Binding::Nav(Nav::Prompt)));
-    }
-
-    #[test]
-    fn shifted_keys_in_every_protocol_mode() {
-        // shift + digit: the digit with SHIFT (kitty), or the US symbol (legacy)
-        for ev in [
-            ev(KeyCode::Char('2'), KeyModifiers::SHIFT, KeyEventKind::Press),
-            press('@'),
-        ] {
-            assert_eq!(bind(&normalize(&ev)), Some(Binding::Tap(Tap::HotcueClear(0, 1))));
+    /// presses `f` and the letters of a label, with 100 ms between keys
+    fn select(k: &mut DjKeys, label: &str, t: Instant) -> Instant {
+        let mut t = t;
+        tap_key(k, 'f', t);
+        for c in label.chars() {
+            t += ms(100);
+            tap_key(k, c, t);
         }
-        assert_eq!(
-            bind(&normalize(&ev(KeyCode::Char('0'), KeyModifiers::SHIFT, KeyEventKind::Press))),
-            Some(Binding::Tap(Tap::HotcueClear(1, 3)))
-        );
-        // loading: < > and shift+a / shift+b, with or without the SHIFT flag
-        assert_eq!(b('<'), Some(Binding::Nav(Nav::Load(0))));
-        assert_eq!(b('>'), Some(Binding::Nav(Nav::Load(1))));
-        assert_eq!(b('A'), Some(Binding::Nav(Nav::Load(0))));
-        assert_eq!(
-            bind(&normalize(&ev(KeyCode::Char('b'), KeyModifiers::SHIFT, KeyEventKind::Press))),
-            Some(Binding::Nav(Nav::Load(1)))
-        );
-        assert_eq!(b(':'), Some(Binding::Nav(Nav::Command)));
-        assert_eq!(
-            bind(&normalize(&ev(KeyCode::Char(';'), KeyModifiers::SHIFT, KeyEventKind::Press))),
-            Some(Binding::Nav(Nav::Command))
-        );
-        // a capital performance letter is not a performance key
-        assert_eq!(b('Z'), None);
-        // ctrl combos never reach the decks
-        assert_eq!(
-            bind(&normalize(&ev(KeyCode::Char('x'), KeyModifiers::CONTROL, KeyEventKind::Press))),
-            None
-        );
-    }
-
-    #[test]
-    fn nav_keys() {
-        let n = |c| bind(&normalize(&ev(c, KeyModifiers::NONE, KeyEventKind::Press)));
-        assert_eq!(n(KeyCode::Esc), Some(Binding::Nav(Nav::Exit)));
-        assert_eq!(n(KeyCode::Tab), Some(Binding::Nav(Nav::Search)));
-        assert_eq!(n(KeyCode::Down), Some(Binding::Nav(Nav::LibDown)));
-        assert_eq!(n(KeyCode::Enter), Some(Binding::Nav(Nav::LoadSmart)));
-        assert_eq!(
-            bind(&normalize(&ev(KeyCode::BackTab, KeyModifiers::SHIFT, KeyEventKind::Press))),
-            Some(Binding::Nav(Nav::Search))
-        );
-    }
-
-    #[test]
-    fn taps_resolve_against_the_polled_state() {
-        let t0 = Instant::now();
-        let mut k = DjKeys::new(true);
-        let mut a = deck(true);
-        a.hotcues = vec![12.0, -1.0, -1.0, -1.0];
-        a.loop_beats = 4.0;
-        let mut bb = deck(false);
-        bb.headphones = true;
-        k.set_snapshot(&[a, bb], &MixerInfo { quantize: true, ..Default::default() });
-        for c in ['x', '.', '1', '2', 'v', 'm', 'c', 'e'] {
-            k.on_key(&press(c), t0);
-        }
-        k.on_key(&ev(KeyCode::Char('2'), KeyModifiers::SHIFT, KeyEventKind::Press), t0);
-        k.on_key(&ev(KeyCode::F(2), KeyModifiers::NONE, KeyEventKind::Press), t0);
-        k.on_key(&ev(KeyCode::F(5), KeyModifiers::NONE, KeyEventKind::Press), t0);
-        let hc = |slot, action| DjCall::Hotcue { deck: 0, slot, action };
-        assert_eq!(
-            k.tick(t0),
-            vec![
-                DjCall::Pause(0),
-                DjCall::Play(1),
-                hc(0, "jump"),
-                hc(1, "set"),
-                DjCall::Loop { deck: 0, beats: 0.0 },
-                DjCall::Loop { deck: 1, beats: 4.0 },
-                DjCall::Sync(0),
-                DjCall::BeatJump { deck: 0, beats: -4.0 },
-                hc(1, "clear"),
-                DjCall::Set { control: "cue", deck: 1, value: 0.0 },
-                DjCall::Set { control: "quantize", deck: 0, value: 0.0 },
-            ]
-        );
-    }
-
-    #[test]
-    fn repeat_events_do_not_retrigger_taps() {
-        let t0 = Instant::now();
-        let mut k = keys(true);
-        k.on_key(&press('x'), t0);
-        k.on_key(&ev(KeyCode::Char('x'), KeyModifiers::NONE, KeyEventKind::Repeat), t0 + ms(500));
-        k.on_key(&rel('x'), t0 + ms(600));
-        assert_eq!(k.tick(t0 + ms(600)), vec![DjCall::Play(0)]);
-    }
-
-    #[test]
-    fn cue_hold_previews_until_release() {
-        let t0 = Instant::now();
-        let mut k = keys(true);
-        k.on_key(&press('z'), t0);
-        assert_eq!(k.tick(t0), vec![DjCall::Cue { deck: 0, pressed: true }]);
-        k.on_key(&ev(KeyCode::Char('z'), KeyModifiers::NONE, KeyEventKind::Repeat), t0 + ms(400));
-        assert!(k.tick(t0 + ms(400)).is_empty());
-        k.on_key(&rel('z'), t0 + ms(800));
-        assert_eq!(k.tick(t0 + ms(800)), vec![DjCall::Cue { deck: 0, pressed: false }]);
-        // a stray release does nothing
-        k.on_key(&rel('z'), t0 + ms(900));
-        assert!(k.tick(t0 + ms(900)).is_empty());
-    }
-
-    #[test]
-    fn cue_without_release_events_toggles() {
-        let t0 = Instant::now();
-        let mut k = keys(false);
-        k.on_key(&press('/'), t0);
-        assert_eq!(k.tick(t0), vec![DjCall::Cue { deck: 1, pressed: true }]);
-        // auto-repeat of the held key is ignored
-        k.on_key(&press('/'), t0 + ms(40));
-        assert!(k.tick(t0 + ms(40)).is_empty());
-        k.on_key(&press('/'), t0 + ms(900));
-        assert_eq!(k.tick(t0 + ms(900)), vec![DjCall::Cue { deck: 1, pressed: false }]);
-        // on a playing deck the press is stop-at-cue: nothing is left to toggle off
-        k.set_snapshot(&[deck(true), deck(true)], &MixerInfo::default());
-        k.on_key(&press('/'), t0 + ms(2000));
-        assert_eq!(
-            k.tick(t0 + ms(2000)),
-            vec![DjCall::Cue { deck: 1, pressed: true }, DjCall::Cue { deck: 1, pressed: false }]
-        );
-    }
-
-    #[test]
-    fn nudge_follows_the_key_with_release_events() {
-        let t0 = Instant::now();
-        let mut k = keys(true);
-        k.on_key(&press('w'), t0);
-        assert_eq!(k.tick(t0), vec![DjCall::Nudge { deck: 0, amount: 1.0 }]);
-        // the other nudge key too: releasing one hands over to the one still down
-        k.on_key(&press('q'), t0 + ms(100));
-        k.tick(t0 + ms(100));
-        k.on_key(&rel('q'), t0 + ms(200));
-        assert_eq!(k.tick(t0 + ms(200)), vec![DjCall::Nudge { deck: 0, amount: 1.0 }]);
-        k.on_key(&rel('w'), t0 + ms(300));
-        assert_eq!(k.tick(t0 + ms(300)), vec![DjCall::Nudge { deck: 0, amount: 0.0 }]);
-    }
-
-    #[test]
-    fn nudge_is_a_timed_bend_without_release_events() {
-        let t0 = Instant::now();
-        let mut k = keys(false);
-        k.on_key(&press('p'), t0);
-        assert_eq!(k.tick(t0), vec![DjCall::Nudge { deck: 1, amount: 1.0 }]);
-        // auto-repeat keeps the bend alive without resending it
-        k.on_key(&press('p'), t0 + ms(250));
-        assert!(k.tick(t0 + ms(250)).is_empty());
-        assert!(k.tick(t0 + ms(500)).is_empty());
-        assert_eq!(k.tick(t0 + ms(600)), vec![DjCall::Nudge { deck: 1, amount: 0.0 }]);
-        assert!(k.tick(t0 + ms(700)).is_empty());
-    }
-
-    #[test]
-    fn lost_cue_release_does_not_stick() {
-        let t0 = Instant::now();
-        let mut k = keys(true);
-        k.on_key(&press('z'), t0);
-        assert_eq!(k.tick(t0), vec![DjCall::Cue { deck: 0, pressed: true }]);
-        assert_eq!(k.tick(t0 + ms(3100)), vec![DjCall::Cue { deck: 0, pressed: false }]);
-    }
-
-    #[test]
-    fn release_all_ends_holds_and_flushes_pending_work() {
-        let t0 = Instant::now();
-        let mut k = keys(true);
-        k.on_key(&press('w'), t0);
-        k.on_key(&press('/'), t0);
-        k.on_key(&press('x'), t0);
-        k.on_key(&alt('q', KeyEventKind::Press), t0);
-        k.release_all();
-        let calls = k.tick(t0 + ms(5));
-        assert!(calls.contains(&DjCall::Nudge { deck: 0, amount: 0.0 }));
-        assert!(calls.contains(&DjCall::Cue { deck: 1, pressed: false }));
-        assert!(calls.contains(&DjCall::Play(0)));
-        assert!(calls.contains(&DjCall::Set { control: "low", deck: 0, value: 0.05 }));
-        // nothing is left held
-        assert!(k.tick(t0 + ms(100)).is_empty());
-        k.on_key(&rel('w'), t0 + ms(120));
-        assert!(k.tick(t0 + ms(130)).is_empty());
-    }
-
-    #[test]
-    fn stale_hold_is_released_when_events_stop() {
-        let t0 = Instant::now();
-        let mut k = keys(true);
-        k.on_key(&press('w'), t0);
-        k.tick(t0);
-        assert!(k.tick(t0 + ms(2000)).is_empty());
-        assert_eq!(k.tick(t0 + ms(3100)), vec![DjCall::Nudge { deck: 0, amount: 0.0 }]);
-    }
-
-    #[test]
-    fn eq_tap_steps_once_and_hold_ramps_to_a_full_sweep() {
-        let t0 = Instant::now();
-        let mut k = keys(true);
-        // tap
-        k.on_key(&alt('q', KeyEventKind::Press), t0);
-        assert_eq!(sets(&k.tick(t0)), vec![("low", 0, 0.05)]);
-        k.on_key(&alt('q', KeyEventKind::Release), t0 + ms(80));
-        for i in 1..30 {
-            assert!(k.tick(t0 + ms(80 + i * 33)).is_empty());
-        }
-        // hold from the start: decrease the high band of deck B (Alt+l)
-        let mut k = keys(true);
-        let mut now = t0;
-        k.on_key(&alt('l', KeyEventKind::Press), now);
-        let mut last = 0.0;
-        let mut sent = 0;
-        let mut reached = None;
-        for i in 0..200 {
-            now = t0 + ms(i * 10);
-            for (c, d, v) in sets(&k.tick(now)) {
-                assert_eq!((c, d), ("high", 1));
-                assert!(v <= last + 1e-9, "monotonic");
-                last = v;
-                sent += 1;
-            }
-            if last <= -1.0 && reached.is_none() {
-                reached = Some(now - t0);
-            }
-        }
-        let t = reached.expect("sweeps to the end").as_secs_f64();
-        assert!(t > 1.0 && t < 2.2, "full sweep took {t}s");
-        // about 30 Hz at most: 2 s of ticks every 10 ms must not send more than ~70 values
-        assert!(sent <= 70 && sent > 20, "sent {sent}");
-        assert_eq!(last, -1.0);
-    }
-
-    #[test]
-    fn ramp_stops_on_release_and_keeps_the_value() {
-        let t0 = Instant::now();
-        let mut k = keys(true);
-        k.on_key(&press('g'), t0);
-        let mut v = 0.0;
-        for i in 0..40 {
-            for (_, _, x) in sets(&k.tick(t0 + ms(i * 10))) {
-                v = x;
-            }
-        }
-        k.on_key(&rel('g'), t0 + ms(400));
-        assert!(v > 0.05);
-        // whatever the ramp moved since the last send goes out once, then it is quiet
-        let last = sets(&k.tick(t0 + ms(450)));
-        assert!(last.len() <= 1);
-        if let Some((_, _, x)) = last.first() {
-            v = *x;
-        }
-        assert!(k.tick(t0 + ms(480)).is_empty());
-        // a stale poll right after must not pull the value back: the next step starts from ours
-        k.set_snapshot(&[deck(false), deck(false)], &MixerInfo::default());
-        k.on_key(&press('g'), t0 + ms(500));
-        let next = sets(&k.tick(t0 + ms(500)))[0].2;
-        assert!((next - (v + 0.05).min(1.0)).abs() < 1e-3, "{next} vs {v}");
-        // much later the daemon's value is authoritative again
-        let mut polled = deck(false);
-        polled.fader = 0.2;
-        k.set_snapshot(&[polled, deck(false)], &MixerInfo::default());
-        k.on_key(&rel('g'), t0 + ms(600));
-        assert_eq!(k.target(Slot::Ctl(Ctl::Fader(0)), t0 + ms(5000)), 0.2);
-    }
-
-    #[test]
-    fn fader_and_crossfader_are_clamped() {
-        let t0 = Instant::now();
-        let mut k = DjKeys::new(false);
-        k.set_snapshot(&[DeckInfo { fader: 0.1, ..deck(false) }, deck(false)], &MixerInfo::default());
-        for i in 0..50 {
-            k.on_key(&press('b'), t0 + ms(i * 20));
-            k.on_key(&press('y'), t0 + ms(i * 20));
-        }
-        let all = k.tick(t0 + ms(1000));
-        assert_eq!(sets(&all), vec![("fader", 0, 0.0), ("crossfader", 0, 1.0)]);
-    }
-
-    #[test]
-    fn pitch_tap_is_a_tenth_of_a_percent() {
-        let t0 = Instant::now();
-        let mut k = keys(true);
-        k.on_key(&press('s'), t0);
-        assert_eq!(sets(&k.tick(t0)), vec![("rate", 0, 1.001)]);
-        k.on_key(&rel('s'), t0 + ms(60));
-        k.on_key(&press('k'), t0 + ms(500));
-        assert_eq!(sets(&k.tick(t0 + ms(500))), vec![("rate", 1, 0.999)]);
-    }
-
-    #[test]
-    fn pitch_hold_is_slow() {
-        let t0 = Instant::now();
-        let mut k = keys(true);
-        k.on_key(&press('s'), t0);
-        let mut v = 1.0;
-        for i in 0..100 {
-            for (_, _, x) in sets(&k.tick(t0 + ms(i * 10))) {
-                v = x;
-            }
-        }
-        // one second of holding: well under 2 %
-        assert!(v > 1.003 && v < 1.02, "{v}");
-    }
-
-    #[test]
-    fn without_release_events_every_event_is_one_step() {
-        let t0 = Instant::now();
-        let mut k = keys(false);
-        for i in 0..10 {
-            k.on_key(&alt('r', KeyEventKind::Press), t0 + ms(i * 33));
-        }
-        assert_eq!(sets(&k.tick(t0 + ms(400))), vec![("filter", 0, 0.5)]);
-    }
-
-    #[test]
-    fn alt_released_before_the_letter_still_ends_the_hold() {
-        let t0 = Instant::now();
-        let mut k = keys(true);
-        k.on_key(&alt('u', KeyEventKind::Press), t0);
-        k.tick(t0);
-        // the release arrives without the Alt flag
-        k.on_key(&rel('u'), t0 + ms(400));
-        k.tick(t0 + ms(400));
-        assert!(k.tick(t0 + ms(800)).is_empty());
+        t + ms(100)
     }
 
     #[test]
@@ -1533,117 +1467,6 @@ mod tests {
                 s(0.3),
             ]
         );
-    }
-
-    #[test]
-    fn nav_keys_do_not_repeat_except_scrolling() {
-        let t0 = Instant::now();
-        let mut k = keys(true);
-        let e = |c, kind| ev(c, KeyModifiers::NONE, kind);
-        assert_eq!(k.on_key(&e(KeyCode::Esc, KeyEventKind::Press), t0), Some(Nav::Exit));
-        assert_eq!(k.on_key(&e(KeyCode::Esc, KeyEventKind::Repeat), t0), None);
-        assert_eq!(k.on_key(&e(KeyCode::Down, KeyEventKind::Repeat), t0), Some(Nav::LibDown));
-        assert_eq!(k.on_key(&e(KeyCode::Esc, KeyEventKind::Release), t0), None);
-    }
-
-    // ---- control hints, selection and editing
-
-    fn tap_key(k: &mut DjKeys, c: char, t: Instant) {
-        k.on_key(&press(c), t);
-    }
-
-    /// presses `f` and the letters of a label, with 100 ms between keys
-    fn select(k: &mut DjKeys, label: &str, t: Instant) -> Instant {
-        let mut t = t;
-        tap_key(k, 'f', t);
-        for c in label.chars() {
-            t += ms(100);
-            tap_key(k, c, t);
-        }
-        t + ms(100)
-    }
-
-    #[test]
-    fn question_mark_is_the_help_key_and_slash_stays_cue_b() {
-        // `?` is Shift + `/` however the terminal reports it
-        assert_eq!(b('?'), Some(Binding::Nav(Nav::Help)));
-        let shifted = ev(KeyCode::Char('/'), KeyModifiers::SHIFT, KeyEventKind::Press);
-        assert_eq!(bind(&normalize(&shifted)), Some(Binding::Nav(Nav::Help)));
-        let both = ev(KeyCode::Char('?'), KeyModifiers::SHIFT, KeyEventKind::Press);
-        assert_eq!(bind(&normalize(&both)), Some(Binding::Nav(Nav::Help)));
-        assert_eq!(b('/'), Some(Binding::Hold(Hold::Cue(1))));
-        let mut k = keys(true);
-        assert_eq!(k.on_key(&press('?'), Instant::now()), Some(Nav::Help));
-        // while the hint labels are up it is ignored like every other non-label key
-        k.on_key(&press('f'), Instant::now());
-        assert_eq!(k.on_key(&press('?'), Instant::now()), None);
-        assert!(k.hints().active);
-    }
-
-    #[test]
-    fn hint_keys_in_the_key_map() {
-        assert_eq!(b('f'), Some(Binding::Nav(Nav::Hints)));
-        assert_eq!(b(';'), Some(Binding::Nav(Nav::Toggle)));
-        assert_eq!(b(']'), Some(Binding::Nav(Nav::Step(1))));
-        assert_eq!(b('['), Some(Binding::Nav(Nav::Step(-1))));
-        assert_eq!(b('\\'), Some(Binding::Nav(Nav::Reset)));
-        // `:` is still the command line, Alt+f / Alt+; still the filters
-        assert_eq!(b(':'), Some(Binding::Nav(Nav::Command)));
-        let a = |c| bind(&normalize(&alt(c, KeyEventKind::Press)));
-        assert_eq!(a('f'), Some(Binding::Hold(Hold::Ctl(Ctl::Filter(0), -1))));
-        assert_eq!(a(';'), Some(Binding::Hold(Hold::Ctl(Ctl::Filter(1), -1))));
-        assert_eq!(a('e'), Some(Binding::Hold(Hold::Ctl(Ctl::Eq(0, 2), 1))));
-        assert_eq!(a('r'), Some(Binding::Hold(Hold::Ctl(Ctl::Filter(0), 1))));
-        // every plain key is bound at most once: the old jump keys d and j, and ; and f are not
-        // jumps any more
-        for c in ['d', 'j'] {
-            assert_eq!(b(c), None);
-        }
-        for c in ['e', 'r', 'u', 'i'] {
-            assert!(matches!(b(c), Some(Binding::Tap(Tap::BeatJump(..)))), "{c}");
-        }
-    }
-
-    #[test]
-    fn f_then_a_label_selects_and_the_keys_do_not_play_meanwhile() {
-        let t0 = Instant::now();
-        let mut k = keys(true);
-        tap_key(&mut k, 'f', t0);
-        assert!(k.hints().active);
-        // while the labels are up a deck key does nothing: `x` is no label, it is ignored
-        // (and `z` would be a prefix of nothing)
-        tap_key(&mut k, 'x', t0 + ms(50));
-        assert!(k.hints().active, "x starts the label xa / xs");
-        tap_key(&mut k, 'f', t0 + ms(80));
-        assert!(!k.hints().active, "f again cancels");
-        tap_key(&mut k, 'f', t0 + ms(100));
-        tap_key(&mut k, '1', t0 + ms(120));
-        tap_key(&mut k, 'v', t0 + ms(140));
-        tap_key(&mut k, 'c', t0 + ms(160));
-        assert!(k.tick(t0 + ms(200)).is_empty(), "no deck action while hinting");
-        // Esc cancels the hints, and only the hints
-        assert_eq!(k.on_key(&ev(KeyCode::Esc, KeyModifiers::NONE, KeyEventKind::Press), t0 + ms(300)), None);
-        assert!(!k.hints().active);
-        assert_eq!(k.hints().selected, None);
-        // a complete label selects and hides
-        let t = select(&mut k, "a", t0 + ms(400));
-        assert!(!k.hints().active);
-        assert_eq!(k.hints().selected, Some(Target::Slot(Slot::Ctl(Ctl::Filter(0)))));
-        // deck keys act again
-        tap_key(&mut k, 'x', t);
-        assert_eq!(k.tick(t), vec![DjCall::Play(0)]);
-    }
-
-    #[test]
-    fn esc_goes_hints_then_selection_then_exit() {
-        let t0 = Instant::now();
-        let mut k = keys(true);
-        let esc = |k: &mut DjKeys, t| k.on_key(&ev(KeyCode::Esc, KeyModifiers::NONE, KeyEventKind::Press), t);
-        let t = select(&mut k, "w", t0);
-        assert!(k.hints().selected.is_some());
-        assert_eq!(esc(&mut k, t), None);
-        assert!(k.hints().selected.is_none());
-        assert_eq!(esc(&mut k, t + ms(100)), Some(Nav::Exit));
     }
 
     #[test]
@@ -1756,8 +1579,8 @@ mod tests {
     fn patch_hint_labels_are_two_letters_prefix_free_and_never_a_deck_label() {
         let tab = hints::table();
         let deck_labels: Vec<&str> = tab.iter().filter(|(t, _)| !matches!(t, Target::Knob(..) | Target::Slot(Slot::Ctl(Ctl::Fader(2..) | Ctl::Filter(2..) | Ctl::Eq(2.., _))))).map(|(_, l)| *l).collect();
-        assert_eq!(deck_labels.len(), 22);
-        let patch: Vec<&str> = tab.iter().skip(22).map(|(_, l)| *l).collect();
+        assert_eq!(deck_labels.len(), 20);
+        let patch: Vec<&str> = tab.iter().skip(20).map(|(_, l)| *l).collect();
         assert_eq!(patch.len(), 48);
         for l in &patch {
             assert_eq!(l.len(), 2, "{l}");
@@ -1785,17 +1608,6 @@ mod tests {
     fn the_patch_pane_key_is_f12() {
         let f12 = ev(KeyCode::F(12), KeyModifiers::NONE, KeyEventKind::Press);
         assert_eq!(bind(&normalize(&f12)), Some(Binding::Nav(Nav::Patch)));
-    }
-
-    #[test]
-    fn nothing_selected_says_so_instead_of_editing() {
-        let t0 = Instant::now();
-        let mut k = keys(true);
-        assert_eq!(k.on_key(&press(']'), t0), Some(Nav::NoSelection));
-        assert_eq!(k.on_key(&press('\\'), t0), Some(Nav::NoSelection));
-        assert!(k.tick(t0).is_empty());
-        assert!(!k.wheel(1, t0));
-        assert!(!k.press(t0));
     }
 
     #[test]
@@ -1883,44 +1695,6 @@ mod tests {
     }
 
     #[test]
-    fn loop_and_jump_sizes_walk_the_ladder_and_feed_the_keys() {
-        let t0 = Instant::now();
-        let mut k = keys(true);
-        // loop length of A: 4 -> 8 -> 16, then v loops 16 beats
-        let mut t = select(&mut k, "ca", t0);
-        tap_key(&mut k, ']', t);
-        t += ms(200);
-        tap_key(&mut k, ']', t);
-        t += ms(200);
-        assert_eq!(k.loop_len(), [16.0, 4.0]);
-        tap_key(&mut k, 'v', t);
-        assert_eq!(k.tick(t), vec![DjCall::Loop { deck: 0, beats: 16.0 }]);
-        // halve three times: 1/2; and never below 1/4
-        for _ in 0..8 {
-            t += ms(200);
-            tap_key(&mut k, '[', t);
-        }
-        assert_eq!(k.loop_len()[0], 0.25);
-        // deck B's jump size 2: u goes back 2, i forward 2
-        let t = select(&mut k, "vs", t + ms(500));
-        tap_key(&mut k, '[', t);
-        tap_key(&mut k, 'u', t + ms(100));
-        tap_key(&mut k, 'i', t + ms(200));
-        tap_key(&mut k, 'e', t + ms(300));
-        assert_eq!(
-            k.tick(t + ms(400)),
-            vec![
-                DjCall::BeatJump { deck: 1, beats: -2.0 },
-                DjCall::BeatJump { deck: 1, beats: 2.0 },
-                DjCall::BeatJump { deck: 0, beats: -4.0 },
-            ]
-        );
-        // reset: 4 beats again
-        tap_key(&mut k, '\\', t + ms(500));
-        assert_eq!(k.jump_len(), [4.0, 4.0]);
-    }
-
-    #[test]
     fn semicolon_toggles_between_the_last_two_selected() {
         let t0 = Instant::now();
         let mut k = keys(true);
@@ -1985,19 +1759,6 @@ mod tests {
     }
 
     #[test]
-    fn opening_hints_ends_holds_so_no_release_is_lost() {
-        let t0 = Instant::now();
-        let mut k = keys(true);
-        k.on_key(&press('w'), t0);
-        assert_eq!(k.tick(t0), vec![DjCall::Nudge { deck: 0, amount: 1.0 }]);
-        tap_key(&mut k, 'f', t0 + ms(100));
-        assert_eq!(k.tick(t0 + ms(100)), vec![DjCall::Nudge { deck: 0, amount: 0.0 }]);
-        // the release arrives while the labels are up: harmless
-        k.on_key(&rel('w'), t0 + ms(200));
-        assert!(k.tick(t0 + ms(200)).is_empty());
-    }
-
-    #[test]
     fn hidden_controls_cannot_be_picked() {
         let t0 = Instant::now();
         let mut k = keys(true);
@@ -2006,5 +1767,802 @@ mod tests {
         assert!(k.hints().active, "a is not on screen: ignored");
         tap_key(&mut k, 's', t);
         assert_eq!(k.hints().selected, Some(Target::Slot(Slot::Ctl(Ctl::Filter(1)))));
+    }
+
+    #[test]
+    fn f_then_a_label_selects_and_the_keys_do_not_play_meanwhile() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        tap_key(&mut k, 'f', t0);
+        assert!(k.hints().active);
+        // while the labels are up a deck key does nothing: `x` is no label, it is ignored
+        // (and `z` would be a prefix of nothing)
+        tap_key(&mut k, 'x', t0 + ms(50));
+        assert!(k.hints().active, "x starts the label xa / xs");
+        tap_key(&mut k, 'f', t0 + ms(80));
+        assert!(!k.hints().active, "f again cancels");
+        tap_key(&mut k, 'f', t0 + ms(100));
+        tap_key(&mut k, '1', t0 + ms(120));
+        tap_key(&mut k, 'v', t0 + ms(140));
+        tap_key(&mut k, 'c', t0 + ms(160));
+        assert!(k.tick(t0 + ms(200)).is_empty(), "no deck action while hinting");
+        // Esc cancels the hints, and only the hints
+        assert_eq!(k.on_key(&ev(KeyCode::Esc, KeyModifiers::NONE, KeyEventKind::Press), t0 + ms(300)), None);
+        assert!(!k.hints().active);
+        assert_eq!(k.hints().selected, None);
+        // a complete label selects and hides
+        let t = select(&mut k, "a", t0 + ms(400));
+        assert!(!k.hints().active);
+        assert_eq!(k.hints().selected, Some(Target::Slot(Slot::Ctl(Ctl::Filter(0)))));
+        // deck keys act again
+        tap_key(&mut k, ' ', t);
+        assert_eq!(k.tick(t), vec![DjCall::Play(0)]);
+    }
+
+    // ---- the vim key map
+
+    fn shifted(c: char) -> KeyEvent {
+        ev(KeyCode::Char(c), KeyModifiers::SHIFT, KeyEventKind::Press)
+    }
+    fn ctrl(c: char) -> KeyEvent {
+        ev(KeyCode::Char(c), KeyModifiers::CONTROL, KeyEventKind::Press)
+    }
+    fn esc() -> KeyEvent {
+        ev(KeyCode::Esc, KeyModifiers::NONE, KeyEventKind::Press)
+    }
+    /// types the characters one after the other, 100 ms apart, and returns what the keys queued
+    fn typed(k: &mut DjKeys, text: &str, t: Instant) -> Vec<DjCall> {
+        let mut at = t;
+        for c in text.chars() {
+            k.on_key(&press(c), at);
+            at += ms(100);
+        }
+        k.tick(at)
+    }
+    fn loaded_a(hotcues: Vec<f64>, loop_beats: f64) -> DeckInfo {
+        DeckInfo { hotcues, loop_beats, duration: 300.0, track_bpm: 120.0, ..deck(false) }
+    }
+
+    #[test]
+    fn key_map_is_vim_first() {
+        use Binding::*;
+        let n = |c: char| bind(&normalize(&press(c)));
+        // focus
+        assert_eq!(n('h'), Some(Focus(0)));
+        assert_eq!(n('l'), Some(Focus(1)));
+        // the deck
+        assert_eq!(n(' '), Some(Act(self::Act::PlayPause)));
+        assert_eq!(n('c'), Some(Cue));
+        assert_eq!(n('s'), Some(Act(self::Act::Sync)));
+        // motions: w b beats, W B bars, } { phrases
+        assert_eq!(n('w'), Some(Act(self::Act::Jump(1.0))));
+        assert_eq!(n('b'), Some(Act(self::Act::Jump(-1.0))));
+        assert_eq!(bind(&normalize(&press('W'))), Some(Act(self::Act::Jump(4.0))));
+        assert_eq!(bind(&normalize(&press('B'))), Some(Act(self::Act::Jump(-4.0))));
+        assert_eq!(bind(&normalize(&press('}'))), Some(Act(self::Act::Jump(64.0))));
+        assert_eq!(bind(&normalize(&press('{'))), Some(Act(self::Act::Jump(-64.0))));
+        assert_eq!(n('g'), Some(Pend(Pending::G)));
+        assert_eq!(bind(&normalize(&press('G'))), Some(Act(self::Act::Seek(SeekTo::Outro))));
+        assert_eq!(bind(&normalize(&press('$'))), Some(Act(self::Act::Seek(SeekTo::Outro))));
+        // marks, loops, pitch
+        assert_eq!(n('m'), Some(Pend(Pending::Mark)));
+        assert_eq!(n('\''), Some(Pend(Pending::GoMark)));
+        assert_eq!(n('`'), Some(Pend(Pending::GoMark)));
+        assert_eq!(n('v'), Some(Act(self::Act::Loop)));
+        assert_eq!(n('-'), Some(Pitch(-1)));
+        assert_eq!(bind(&normalize(&press('+'))), Some(Pitch(1)));
+        assert_eq!(n('='), Some(Act(self::Act::PitchReset)));
+        assert_eq!(n('['), Some(Bracket(-1)));
+        assert_eq!(n(']'), Some(Bracket(1)));
+        // repeat, undo, redo
+        assert_eq!(n('.'), Some(Repeat));
+        assert_eq!(n('u'), Some(Undo));
+        assert_eq!(bind(&normalize(&ctrl('r'))), Some(Redo));
+        // digits are counts
+        for d in 0..=9u8 {
+            assert_eq!(n((b'0' + d) as char), Some(Digit(d)));
+        }
+        // the screen
+        assert_eq!(n('f'), Some(Nav(self::Nav::Hints)));
+        assert_eq!(n(';'), Some(Nav(self::Nav::Toggle)));
+        assert_eq!(n('\\'), Some(Nav(self::Nav::Reset)));
+        assert_eq!(n('/'), Some(Nav(self::Nav::SearchNow)));
+        assert_eq!(n(':'), Some(Nav(self::Nav::Command)));
+        assert_eq!(n('?'), Some(Nav(self::Nav::Help)));
+        let key = |c| bind(&normalize(&ev(c, KeyModifiers::NONE, KeyEventKind::Press)));
+        assert_eq!(key(KeyCode::Tab), Some(Nav(self::Nav::Search)));
+        assert_eq!(key(KeyCode::Left), Some(Focus(0)));
+        assert_eq!(key(KeyCode::Right), Some(Focus(1)));
+        assert_eq!(key(KeyCode::Down), Some(Nav(self::Nav::LibDown)));
+        assert_eq!(key(KeyCode::Enter), Some(Nav(self::Nav::LoadSmart)));
+        assert_eq!(key(KeyCode::F(1)), Some(Tap(self::Tap::Headphones(0))));
+        assert_eq!(key(KeyCode::F(2)), Some(Tap(self::Tap::Headphones(1))));
+        assert_eq!(key(KeyCode::F(5)), Some(Tap(self::Tap::Quantize)));
+        assert_eq!(key(KeyCode::F(6)), Some(Nav(self::Nav::SetArmNext)));
+        assert_eq!(key(KeyCode::F(7)), Some(Nav(self::Nav::SetAuto)));
+        assert_eq!(key(KeyCode::F(8)), Some(Nav(self::Nav::SetDisarm)));
+        assert_eq!(key(KeyCode::F(9)), Some(Nav(self::Nav::RecordToggle)));
+        assert_eq!(key(KeyCode::F(10)), Some(Nav(self::Nav::Editor)));
+        assert_eq!(key(KeyCode::F(11)), Some(Nav(self::Nav::Prompt)));
+        assert_eq!(key(KeyCode::F(12)), Some(Nav(self::Nav::Patch)));
+        // Shift+Tab still reaches the library search while the tutor is open
+        assert_eq!(bind(&normalize(&ev(KeyCode::BackTab, KeyModifiers::SHIFT, KeyEventKind::Press))), Some(Nav(self::Nav::Search)));
+    }
+
+    #[test]
+    fn shifted_keys_in_every_protocol_mode() {
+        use Binding::*;
+        // the kitty protocol reports the base key with SHIFT, a legacy terminal the US symbol
+        for (with_shift, symbol, want) in [
+            ('=', '+', Pitch(1)),
+            (']', '}', Act(self::Act::Jump(64.0))),
+            ('[', '{', Act(self::Act::Jump(-64.0))),
+            ('4', '$', Act(self::Act::Seek(SeekTo::Outro))),
+            ('g', 'G', Act(self::Act::Seek(SeekTo::Outro))),
+            ('w', 'W', Act(self::Act::Jump(4.0))),
+            ('/', '?', Nav(self::Nav::Help)),
+            (';', ':', Nav(self::Nav::Command)),
+        ] {
+            assert_eq!(bind(&normalize(&shifted(with_shift))), Some(want), "{with_shift} + shift");
+            assert_eq!(bind(&normalize(&press(symbol))), Some(want), "{symbol}");
+        }
+        // `?` with SHIFT and as a symbol at once
+        assert_eq!(bind(&normalize(&shifted('?'))), Some(Nav(self::Nav::Help)));
+    }
+
+    #[test]
+    fn nothing_of_the_old_map_is_reachable() {
+        // Alt combinations are gone, whatever the letter
+        for c in (b' '..=b'~').map(|c| c as char) {
+            assert_eq!(bind(&normalize(&alt(c, KeyEventKind::Press))), None, "Alt+{c}");
+        }
+        // the old deck letters that have no meaning now
+        for c in "zxaqeridjkopyntz,<>".chars() {
+            assert_eq!(bind(&normalize(&press(c))), None, "{c}");
+        }
+        // capitals and shifted symbols of the old map: A B load, Shift+digit clears
+        for c in "ACDEFHIJKLMNOPQRSTUVXYZ!@#%^&*()_|".chars() {
+            assert_eq!(bind(&normalize(&press(c))), None, "{c}");
+        }
+        // ctrl combinations never reach the decks (Ctrl-r is redo, nothing else)
+        for c in (b'a'..=b'z').map(|c| c as char).filter(|c| *c != 'r') {
+            assert_eq!(bind(&normalize(&ctrl(c))), None, "Ctrl-{c}");
+        }
+        // Esc is not a deck key: it never leaves
+        assert_eq!(bind(&normalize(&esc())), None);
+    }
+
+    #[test]
+    fn digits_are_counts_not_hot_cues() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        for c in "1234567890".chars() {
+            assert_eq!(k.on_key(&press(c), t0), None);
+        }
+        assert!(k.tick(t0).is_empty(), "digits queue nothing");
+    }
+
+    #[test]
+    fn counts_multiply_the_motions() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        assert_eq!(typed(&mut k, "w", t0), vec![DjCall::BeatJump { deck: 0, beats: 1.0 }]);
+        assert_eq!(typed(&mut k, "b", t0), vec![DjCall::BeatJump { deck: 0, beats: -1.0 }]);
+        assert_eq!(typed(&mut k, "4w", t0), vec![DjCall::BeatJump { deck: 0, beats: 4.0 }]);
+        assert_eq!(typed(&mut k, "12b", t0), vec![DjCall::BeatJump { deck: 0, beats: -12.0 }]);
+        // a zero inside a count is a digit
+        assert_eq!(typed(&mut k, "10w", t0), vec![DjCall::BeatJump { deck: 0, beats: 10.0 }]);
+        // bars and phrases
+        assert_eq!(typed(&mut k, "W", t0), vec![DjCall::BeatJump { deck: 0, beats: 4.0 }]);
+        assert_eq!(typed(&mut k, "3B", t0), vec![DjCall::BeatJump { deck: 0, beats: -12.0 }]);
+        assert_eq!(typed(&mut k, "}", t0), vec![DjCall::BeatJump { deck: 0, beats: 64.0 }]);
+        assert_eq!(typed(&mut k, "2}", t0), vec![DjCall::BeatJump { deck: 0, beats: 128.0 }]);
+        assert_eq!(typed(&mut k, "{", t0), vec![DjCall::BeatJump { deck: 0, beats: -64.0 }]);
+        // the count is used up: the next motion is a single one again
+        assert_eq!(typed(&mut k, "w", t0), vec![DjCall::BeatJump { deck: 0, beats: 1.0 }]);
+        // a count is capped
+        let calls = typed(&mut k, "99999w", t0);
+        assert_eq!(calls, vec![DjCall::BeatJump { deck: 0, beats: 9999.0 }]);
+    }
+
+    #[test]
+    fn showcmd_shows_the_count_and_the_half_typed_command() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        assert_eq!(k.showcmd(), "");
+        k.on_key(&press('4'), t0);
+        assert_eq!(k.showcmd(), "4");
+        k.on_key(&press('2'), t0 + ms(300));
+        assert_eq!(k.showcmd(), "42");
+        k.on_key(&press('m'), t0 + ms(600));
+        assert_eq!(k.showcmd(), "42m");
+        k.on_key(&press('a'), t0 + ms(900));
+        assert_eq!(k.showcmd(), "");
+        k.on_key(&press('g'), t0 + ms(1200));
+        assert_eq!(k.showcmd(), "g");
+        k.on_key(&press('\''), t0 + ms(1500));
+        // the key after `g` is not `'`: the command is dropped
+        assert_eq!(k.showcmd(), "");
+    }
+
+    #[test]
+    fn esc_and_unbound_keys_cancel_a_count() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        k.on_key(&press('4'), t0);
+        assert_eq!(k.on_key(&esc(), t0 + ms(300)), None);
+        assert_eq!(k.showcmd(), "");
+        assert_eq!(typed(&mut k, "w", t0 + ms(600)), vec![DjCall::BeatJump { deck: 0, beats: 1.0 }]);
+        // `z` means nothing and drops the count like in vim
+        assert_eq!(typed(&mut k, "4zw", t0 + ms(2000)), vec![DjCall::BeatJump { deck: 0, beats: 1.0 }]);
+        // Esc cancels the half-typed `m`, then a mark letter is no mark
+        k.on_key(&press('m'), t0 + ms(5000));
+        k.on_key(&esc(), t0 + ms(5300));
+        assert_eq!(k.showcmd(), "");
+        assert_eq!(typed(&mut k, "a", t0 + ms(5600)), vec![]);
+    }
+
+    #[test]
+    fn auto_repeat_does_not_grow_a_count_or_repeat_a_motion() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        k.on_key(&press('4'), t0);
+        k.on_key(&ev(KeyCode::Char('4'), KeyModifiers::NONE, KeyEventKind::Repeat), t0 + ms(40));
+        assert_eq!(k.showcmd(), "4");
+        k.on_key(&press('w'), t0 + ms(100));
+        k.on_key(&ev(KeyCode::Char('w'), KeyModifiers::NONE, KeyEventKind::Repeat), t0 + ms(140));
+        assert_eq!(k.tick(t0 + ms(200)), vec![DjCall::BeatJump { deck: 0, beats: 4.0 }]);
+        // without release events a burst of one key is its auto-repeat too
+        let mut k = keys(false);
+        k.on_key(&press('4'), t0);
+        k.on_key(&press('4'), t0 + ms(30));
+        assert_eq!(k.showcmd(), "4");
+    }
+
+    #[test]
+    fn marks_are_hot_cues() {
+        let t0 = Instant::now();
+        let mut k = DjKeys::new(true);
+        k.set_snapshot(&[loaded_a(vec![12.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, 40.0], 0.0), deck(false)], &MixerInfo::default());
+        let hc = |slot, action| DjCall::Hotcue { deck: 0, slot, action };
+        // m{a-h} saves, ' and ` jump
+        assert_eq!(typed(&mut k, "ma", t0), vec![hc(0, "set")]);
+        assert_eq!(typed(&mut k, "mc", t0), vec![hc(2, "set")]);
+        assert_eq!(typed(&mut k, "mh", t0), vec![hc(7, "set")]);
+        assert_eq!(typed(&mut k, "'a", t0), vec![hc(0, "jump")]);
+        assert_eq!(typed(&mut k, "`h", t0), vec![hc(7, "jump")]);
+        // a mark that is not set is not jumped to
+        let mut calls = Vec::new();
+        k.on_key(&press('\''), t0 + ms(100));
+        let nav = k.on_key(&press('b'), t0 + ms(500));
+        calls.extend(k.tick(t0 + ms(500)));
+        assert!(calls.is_empty() && matches!(nav, Some(Nav::Note(n)) if n.contains("not set")), "{calls:?} {nav:?}");
+        // only a to h
+        k.on_key(&press('m'), t0 + ms(1000));
+        assert!(matches!(k.on_key(&press('z'), t0 + ms(1400)), Some(Nav::Note(n)) if n.contains("a to h")));
+        assert!(k.tick(t0 + ms(1400)).is_empty());
+        // marks belong to the focused deck
+        k.on_key(&press('l'), t0 + ms(2000));
+        let calls = typed(&mut k, "mb", t0 + ms(2100));
+        assert_eq!(calls, vec![DjCall::Hotcue { deck: 1, slot: 1, action: "set" }]);
+    }
+
+    #[test]
+    fn v_is_a_loop_and_a_count_sizes_it() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        assert_eq!(typed(&mut k, "v", t0), vec![DjCall::Loop { deck: 0, beats: 4.0 }]);
+        assert_eq!(typed(&mut k, "8v", t0), vec![DjCall::Loop { deck: 0, beats: 8.0 }]);
+        assert_eq!(typed(&mut k, "16v", t0), vec![DjCall::Loop { deck: 0, beats: 16.0 }]);
+        assert_eq!(typed(&mut k, "2v", t0), vec![DjCall::Loop { deck: 0, beats: 2.0 }]);
+        // while looping, v leaves it and a count resizes it
+        k.set_snapshot(&[loaded_a(vec![], 8.0), deck(false)], &MixerInfo::default());
+        assert_eq!(typed(&mut k, "v", t0), vec![DjCall::Loop { deck: 0, beats: 0.0 }]);
+        assert_eq!(typed(&mut k, "4v", t0), vec![DjCall::Loop { deck: 0, beats: 4.0 }]);
+        // the loop length of the hints is the default size
+        let mut k = keys(true);
+        let t = select(&mut k, "ca", t0);
+        tap_key(&mut k, ']', t);
+        assert_eq!(typed(&mut k, "v", t + ms(300)), vec![DjCall::Loop { deck: 0, beats: 8.0 }]);
+    }
+
+    #[test]
+    fn focus_decides_the_deck_of_every_action() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        assert_eq!(k.focus(), 0);
+        k.on_key(&press('l'), t0);
+        assert_eq!(k.focus(), 1);
+        let calls = typed(&mut k, " s4wv", t0 + ms(100));
+        assert_eq!(
+            calls,
+            vec![
+                DjCall::Play(1),
+                DjCall::Sync(1),
+                DjCall::BeatJump { deck: 1, beats: 4.0 },
+                DjCall::Loop { deck: 1, beats: 4.0 },
+            ]
+        );
+        // cue, nudge and pitch too
+        k.on_key(&press('c'), t0 + ms(3000));
+        assert_eq!(k.tick(t0 + ms(3000)), vec![DjCall::Cue { deck: 1, pressed: true }]);
+        k.on_key(&rel('c'), t0 + ms(3100));
+        k.tick(t0 + ms(3100));
+        k.on_key(&press(']'), t0 + ms(3200));
+        assert_eq!(k.tick(t0 + ms(3200)), vec![DjCall::Nudge { deck: 1, amount: 1.0 }]);
+        k.on_key(&rel(']'), t0 + ms(3300));
+        k.tick(t0 + ms(3300));
+        k.on_key(&press('-'), t0 + ms(3400));
+        assert_eq!(sets(&k.tick(t0 + ms(3400))), vec![("rate", 1, 0.999)]);
+        k.on_key(&rel('-'), t0 + ms(3450));
+        k.tick(t0 + ms(3450));
+        // back to A, with the arrow keys as well
+        k.on_key(&press('h'), t0 + ms(4000));
+        assert_eq!(typed(&mut k, " ", t0 + ms(4100)), vec![DjCall::Play(0)]);
+        k.on_key(&ev(KeyCode::Right, KeyModifiers::NONE, KeyEventKind::Press), t0 + ms(5000));
+        assert_eq!(k.focus(), 1);
+        k.on_key(&ev(KeyCode::Left, KeyModifiers::NONE, KeyEventKind::Press), t0 + ms(5100));
+        assert_eq!(k.focus(), 0);
+        // focusing drops a half-typed count
+        k.on_key(&press('4'), t0 + ms(6000));
+        k.on_key(&press('l'), t0 + ms(6300));
+        assert_eq!(k.showcmd(), "");
+        // play and pause follow the polled state of the focused deck
+        k.set_snapshot(&[deck(false), deck(true)], &MixerInfo::default());
+        assert_eq!(typed(&mut k, " ", t0 + ms(7000)), vec![DjCall::Pause(1)]);
+    }
+
+    #[test]
+    fn start_and_outro_seek_on_the_focused_deck() {
+        let t0 = Instant::now();
+        let mut k = DjKeys::new(true);
+        k.set_snapshot(&[loaded_a(vec![], 0.0), DeckInfo { track_bpm: 0.0, duration: 200.0, ..deck(false) }], &MixerInfo::default());
+        k.set_starts([Some(0.37), None]);
+        let seek = |deck, seconds| DjCall::Seek { deck, seconds };
+        // 0 and gg: the first downbeat when the grid is known
+        assert_eq!(typed(&mut k, "0", t0), vec![seek(0, 0.37)]);
+        assert_eq!(typed(&mut k, "gg", t0), vec![seek(0, 0.37)]);
+        // G and $: 32 bars before the end: 128 beats at 120 BPM = 64 s
+        assert_eq!(typed(&mut k, "G", t0), vec![seek(0, 236.0)]);
+        assert_eq!(typed(&mut k, "$", t0), vec![seek(0, 236.0)]);
+        // 0 after a count is a digit, not the start: 10 then something
+        assert_eq!(typed(&mut k, "10", t0), vec![]);
+        k.on_key(&esc(), t0 + ms(9000));
+        // no grid: the start of the track, and the last minute for the outro
+        k.on_key(&press('l'), t0 + ms(9100));
+        assert_eq!(typed(&mut k, "0", t0 + ms(9200)), vec![seek(1, 0.0)]);
+        assert_eq!(typed(&mut k, "G", t0 + ms(9300)), vec![seek(1, 140.0)]);
+        // an empty deck says so
+        let mut k = DjKeys::new(true);
+        k.set_snapshot(&[DeckInfo::default(), DeckInfo::default()], &MixerInfo::default());
+        assert!(matches!(k.on_key(&press('0'), t0), Some(Nav::Note(n)) if n.contains("no track")));
+    }
+
+    #[test]
+    fn dot_repeats_the_last_action_on_the_focused_deck() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        assert!(matches!(k.on_key(&press('.'), t0), Some(Nav::Note(n)) if n.contains("nothing to repeat")));
+        assert_eq!(
+            typed(&mut k, "4w.", t0 + ms(100)),
+            vec![DjCall::BeatJump { deck: 0, beats: 4.0 }, DjCall::BeatJump { deck: 0, beats: 4.0 }]
+        );
+        // a count in front of the dot replaces the old one
+        assert_eq!(typed(&mut k, "2.", t0 + ms(5000)), vec![DjCall::BeatJump { deck: 0, beats: 2.0 }]);
+        // the dot acts on whichever deck has the focus now
+        k.on_key(&press('l'), t0 + ms(8000));
+        assert_eq!(typed(&mut k, ".", t0 + ms(8100)), vec![DjCall::BeatJump { deck: 1, beats: 2.0 }]);
+        // sync, play, marks and loops repeat too; the dot itself is not remembered
+        assert_eq!(typed(&mut k, "s..", t0 + ms(10000)), vec![DjCall::Sync(1), DjCall::Sync(1), DjCall::Sync(1)]);
+        assert_eq!(typed(&mut k, "mb.", t0 + ms(13000)).len(), 2);
+        // pitch steps repeat, a hold does not matter
+        let calls = typed(&mut k, "3+.", t0 + ms(20000));
+        let rates = sets(&calls);
+        assert_eq!(rates.last().map(|r| r.0), Some("rate"));
+        assert!((rates.last().unwrap().2 - 1.006).abs() < 1e-9, "{rates:?}");
+    }
+
+    #[test]
+    fn pitch_keys_step_with_counts_and_reset() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        // a count steps without a ramp
+        assert_eq!(sets(&typed(&mut k, "4+", t0)), vec![("rate", 0, 1.004)]);
+        assert_eq!(sets(&typed(&mut k, "2-", t0 + ms(300))), vec![("rate", 0, 1.002)]);
+        // = is back to 0 %
+        assert_eq!(sets(&typed(&mut k, "=", t0 + ms(600))), vec![("rate", 0, 1.0)]);
+    }
+
+    #[test]
+    fn u_and_ctrl_r_undo_and_redo_control_changes() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        assert!(matches!(k.on_key(&press('u'), t0), Some(Nav::Note(n)) if n.contains("nothing to undo")));
+        assert!(matches!(k.on_key(&ctrl('r'), t0), Some(Nav::Note(n)) if n.contains("nothing to redo")));
+        // three separate edits: filter A up twice, crossfader down once (a second apart)
+        let mut t = select(&mut k, "a", t0);
+        tap_key(&mut k, ']', t);
+        t += ms(1000);
+        tap_key(&mut k, ']', t);
+        t += ms(1000);
+        let t_sel = select(&mut k, "w", t);
+        tap_key(&mut k, '[', t_sel);
+        let mut t = t_sel + ms(1000);
+        assert_eq!(sets(&k.tick(t)), vec![("filter", 0, 0.1), ("crossfader", 0, -0.05)]);
+        // u takes the last one back: the crossfader returns to 0
+        t += ms(100);
+        k.on_key(&press('u'), t);
+        assert_eq!(sets(&k.tick(t)), vec![("crossfader", 0, 0.0)]);
+        t += ms(1000);
+        // again: filter 0.1 -> 0.05
+        k.on_key(&press('u'), t);
+        assert_eq!(sets(&k.tick(t)), vec![("filter", 0, 0.05)]);
+        t += ms(1000);
+        // Ctrl-r does it again
+        k.on_key(&ctrl('r'), t);
+        assert_eq!(sets(&k.tick(t)), vec![("filter", 0, 0.1)]);
+        t += ms(1000);
+        k.on_key(&ctrl('r'), t);
+        assert_eq!(sets(&k.tick(t)), vec![("crossfader", 0, -0.05)]);
+        t += ms(1000);
+        assert!(matches!(k.on_key(&ctrl('r'), t), Some(Nav::Note(_))));
+        // a new change after an undo drops what could be redone
+        k.on_key(&press('u'), t + ms(1000));
+        k.tick(t + ms(1000));
+        tap_key(&mut k, ']', t + ms(2000));
+        k.tick(t + ms(2000));
+        assert!(matches!(k.on_key(&ctrl('r'), t + ms(3000)), Some(Nav::Note(n)) if n.contains("nothing to redo")));
+    }
+
+    #[test]
+    fn one_held_ramp_is_one_undo_step() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        k.on_key(&press('+'), t0);
+        for i in 0..100 {
+            k.tick(t0 + ms(i * 10));
+        }
+        k.on_key(&rel('+'), t0 + ms(1000));
+        let moved = k.target(Slot::Rate(0), t0 + ms(1000));
+        assert!(moved > 1.003, "{moved}");
+        k.tick(t0 + ms(1050));
+        k.on_key(&press('u'), t0 + ms(2000));
+        let back = sets(&k.tick(t0 + ms(2000)));
+        assert_eq!(back, vec![("rate", 0, 1.0)]);
+        assert!(matches!(k.on_key(&press('u'), t0 + ms(3000)), Some(Nav::Note(_))), "a single step");
+    }
+
+    #[test]
+    fn commands_set_controls_and_can_be_undone() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        k.set_control(Slot::Ctl(Ctl::Fader(1)), 0.4, t0);
+        k.set_control(Slot::Ctl(Ctl::Eq(0, 0)), -1.0, t0);
+        k.set_control(Slot::Ctl(Ctl::Filter(0)), -0.3, t0);
+        k.set_control(Slot::Ctl(Ctl::Crossfader), 2.0, t0);
+        let out = sets(&k.tick(t0));
+        assert!(out.contains(&("fader", 1, 0.4)) && out.contains(&("low", 0, -1.0)) && out.contains(&("filter", 0, -0.3)));
+        // out of range is clamped
+        assert!(out.contains(&("crossfader", 0, 1.0)));
+        k.on_key(&press('u'), t0 + ms(2000));
+        assert_eq!(sets(&k.tick(t0 + ms(2000))), vec![("crossfader", 0, 0.0)]);
+    }
+
+    #[test]
+    fn nudge_and_cue_keys_on_the_focused_deck() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        k.on_key(&press(']'), t0);
+        assert_eq!(k.tick(t0), vec![DjCall::Nudge { deck: 0, amount: 1.0 }]);
+        k.on_key(&rel(']'), t0 + ms(300));
+        assert_eq!(k.tick(t0 + ms(300)), vec![DjCall::Nudge { deck: 0, amount: 0.0 }]);
+        // with a control picked the same keys step it instead
+        let t = select(&mut k, "a", t0 + ms(1000));
+        tap_key(&mut k, ']', t);
+        let calls = k.tick(t);
+        assert_eq!(sets(&calls), vec![("filter", 0, 0.05)]);
+        assert!(!calls.iter().any(|c| matches!(c, DjCall::Nudge { .. })));
+        // Esc drops the pick (never leaves): the keys nudge again
+        assert_eq!(k.on_key(&esc(), t + ms(500)), None);
+        tap_key(&mut k, '[', t + ms(1000));
+        assert_eq!(k.tick(t + ms(1000)), vec![DjCall::Nudge { deck: 0, amount: -1.0 }]);
+    }
+
+    #[test]
+    fn esc_never_leaves_dj_mode() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        // plain, repeated, with a count, a pending mark, hints, a selection: always nothing
+        assert_eq!(k.on_key(&esc(), t0), None);
+        assert_eq!(k.on_key(&ev(KeyCode::Esc, KeyModifiers::NONE, KeyEventKind::Repeat), t0 + ms(10)), None);
+        k.on_key(&press('3'), t0 + ms(100));
+        assert_eq!(k.on_key(&esc(), t0 + ms(200)), None);
+        k.on_key(&press('m'), t0 + ms(300));
+        assert_eq!(k.on_key(&esc(), t0 + ms(400)), None);
+        let t = select(&mut k, "w", t0 + ms(500));
+        for i in 0..4 {
+            assert_eq!(k.on_key(&esc(), t + ms(i * 300)), None);
+        }
+        assert!(k.hints().selected.is_none());
+        // `:q` is how DJ mode ends
+        assert_eq!(super::super::parse_command("q"), super::super::Command::Exit);
+        assert_eq!(super::super::parse_command("q!"), super::super::Command::Exit);
+    }
+
+    #[test]
+    fn nav_keys_do_not_repeat_except_scrolling() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        let e = |c, kind| ev(c, KeyModifiers::NONE, kind);
+        assert_eq!(k.on_key(&e(KeyCode::Tab, KeyEventKind::Press), t0), Some(Nav::Search));
+        assert_eq!(k.on_key(&e(KeyCode::Tab, KeyEventKind::Repeat), t0), None);
+        assert_eq!(k.on_key(&e(KeyCode::Down, KeyEventKind::Repeat), t0), Some(Nav::LibDown));
+        assert_eq!(k.on_key(&e(KeyCode::Tab, KeyEventKind::Release), t0), None);
+        // `/` is the library search, `?` the help, `:` the command line
+        assert_eq!(k.on_key(&press('/'), t0 + ms(500)), Some(Nav::SearchNow));
+        assert_eq!(k.on_key(&press('?'), t0 + ms(900)), Some(Nav::Help));
+        assert_eq!(k.on_key(&press(':'), t0 + ms(1300)), Some(Nav::Command));
+    }
+
+    #[test]
+    fn question_mark_is_the_help_key() {
+        let mut k = keys(true);
+        assert_eq!(k.on_key(&press('?'), Instant::now()), Some(Nav::Help));
+        // while the hint labels are up it is ignored like every other non-label key
+        k.on_key(&press('f'), Instant::now());
+        assert_eq!(k.on_key(&press('?'), Instant::now()), None);
+        assert!(k.hints().active);
+    }
+
+    #[test]
+    fn hint_keys_in_the_key_map() {
+        assert_eq!(b('f'), Some(Binding::Nav(Nav::Hints)));
+        assert_eq!(b(';'), Some(Binding::Nav(Nav::Toggle)));
+        assert_eq!(b('\\'), Some(Binding::Nav(Nav::Reset)));
+        assert_eq!(b('['), Some(Binding::Bracket(-1)));
+        assert_eq!(b(']'), Some(Binding::Bracket(1)));
+    }
+
+    #[test]
+    fn taps_resolve_against_the_polled_state() {
+        let t0 = Instant::now();
+        let mut k = DjKeys::new(true);
+        let mut bb = deck(false);
+        bb.headphones = true;
+        k.set_snapshot(&[deck(true), bb], &MixerInfo { quantize: true, ..Default::default() });
+        k.on_key(&press(' '), t0);
+        k.on_key(&ev(KeyCode::F(2), KeyModifiers::NONE, KeyEventKind::Press), t0);
+        k.on_key(&ev(KeyCode::F(1), KeyModifiers::NONE, KeyEventKind::Press), t0);
+        k.on_key(&ev(KeyCode::F(5), KeyModifiers::NONE, KeyEventKind::Press), t0);
+        assert_eq!(
+            k.tick(t0),
+            vec![
+                DjCall::Pause(0),
+                DjCall::Set { control: "cue", deck: 1, value: 0.0 },
+                DjCall::Set { control: "cue", deck: 0, value: 1.0 },
+                DjCall::Set { control: "quantize", deck: 0, value: 0.0 },
+            ]
+        );
+    }
+
+    #[test]
+    fn repeat_events_do_not_retrigger_taps() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        k.on_key(&press(' '), t0);
+        k.on_key(&ev(KeyCode::Char(' '), KeyModifiers::NONE, KeyEventKind::Repeat), t0 + ms(500));
+        k.on_key(&rel(' '), t0 + ms(600));
+        assert_eq!(k.tick(t0 + ms(600)), vec![DjCall::Play(0)]);
+    }
+
+    #[test]
+    fn cue_hold_previews_until_release() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        k.on_key(&press('c'), t0);
+        assert_eq!(k.tick(t0), vec![DjCall::Cue { deck: 0, pressed: true }]);
+        k.on_key(&ev(KeyCode::Char('c'), KeyModifiers::NONE, KeyEventKind::Repeat), t0 + ms(400));
+        assert!(k.tick(t0 + ms(400)).is_empty());
+        k.on_key(&rel('c'), t0 + ms(800));
+        assert_eq!(k.tick(t0 + ms(800)), vec![DjCall::Cue { deck: 0, pressed: false }]);
+        // a stray release does nothing
+        k.on_key(&rel('c'), t0 + ms(900));
+        assert!(k.tick(t0 + ms(900)).is_empty());
+    }
+
+    #[test]
+    fn cue_without_release_events_toggles() {
+        let t0 = Instant::now();
+        let mut k = keys(false);
+        k.on_key(&press('l'), t0);
+        k.on_key(&press('c'), t0 + ms(300));
+        assert_eq!(k.tick(t0 + ms(300)), vec![DjCall::Cue { deck: 1, pressed: true }]);
+        // auto-repeat of the held key is ignored
+        k.on_key(&press('c'), t0 + ms(340));
+        assert!(k.tick(t0 + ms(340)).is_empty());
+        k.on_key(&press('c'), t0 + ms(1200));
+        assert_eq!(k.tick(t0 + ms(1200)), vec![DjCall::Cue { deck: 1, pressed: false }]);
+        // on a playing deck the press is stop-at-cue: nothing is left to toggle off
+        k.set_snapshot(&[deck(true), deck(true)], &MixerInfo::default());
+        k.on_key(&press('c'), t0 + ms(2300));
+        assert_eq!(
+            k.tick(t0 + ms(2300)),
+            vec![DjCall::Cue { deck: 1, pressed: true }, DjCall::Cue { deck: 1, pressed: false }]
+        );
+    }
+
+    #[test]
+    fn nudge_follows_the_key_with_release_events() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        k.on_key(&press(']'), t0);
+        assert_eq!(k.tick(t0), vec![DjCall::Nudge { deck: 0, amount: 1.0 }]);
+        // the other nudge key too: releasing one hands over to the one still down
+        k.on_key(&press('['), t0 + ms(100));
+        k.tick(t0 + ms(100));
+        k.on_key(&rel('['), t0 + ms(200));
+        assert_eq!(k.tick(t0 + ms(200)), vec![DjCall::Nudge { deck: 0, amount: 1.0 }]);
+        k.on_key(&rel(']'), t0 + ms(300));
+        assert_eq!(k.tick(t0 + ms(300)), vec![DjCall::Nudge { deck: 0, amount: 0.0 }]);
+    }
+
+    #[test]
+    fn nudge_is_a_timed_bend_without_release_events() {
+        let t0 = Instant::now();
+        let mut k = keys(false);
+        k.on_key(&press('l'), t0);
+        k.on_key(&press(']'), t0 + ms(300));
+        assert_eq!(k.tick(t0 + ms(300)), vec![DjCall::Nudge { deck: 1, amount: 1.0 }]);
+        // auto-repeat keeps the bend alive without resending it
+        k.on_key(&press(']'), t0 + ms(550));
+        assert!(k.tick(t0 + ms(550)).is_empty());
+        assert!(k.tick(t0 + ms(800)).is_empty());
+        assert_eq!(k.tick(t0 + ms(900)), vec![DjCall::Nudge { deck: 1, amount: 0.0 }]);
+        assert!(k.tick(t0 + ms(1000)).is_empty());
+    }
+
+    #[test]
+    fn lost_cue_release_does_not_stick() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        k.on_key(&press('c'), t0);
+        assert_eq!(k.tick(t0), vec![DjCall::Cue { deck: 0, pressed: true }]);
+        assert_eq!(k.tick(t0 + ms(3100)), vec![DjCall::Cue { deck: 0, pressed: false }]);
+    }
+
+    #[test]
+    fn release_all_ends_holds_and_flushes_pending_work() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        k.on_key(&press(']'), t0);
+        k.on_key(&press('c'), t0);
+        k.on_key(&press(' '), t0);
+        k.on_key(&press('+'), t0);
+        k.release_all();
+        let calls = k.tick(t0 + ms(5));
+        assert!(calls.contains(&DjCall::Nudge { deck: 0, amount: 0.0 }));
+        assert!(calls.contains(&DjCall::Cue { deck: 0, pressed: false }));
+        assert!(calls.contains(&DjCall::Play(0)));
+        assert!(calls.contains(&DjCall::Set { control: "rate", deck: 0, value: 1.001 }));
+        // nothing is left held
+        assert!(k.tick(t0 + ms(100)).is_empty());
+        k.on_key(&rel(']'), t0 + ms(120));
+        assert!(k.tick(t0 + ms(130)).is_empty());
+    }
+
+    #[test]
+    fn stale_hold_is_released_when_events_stop() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        k.on_key(&press(']'), t0);
+        k.tick(t0);
+        assert!(k.tick(t0 + ms(2000)).is_empty());
+        assert_eq!(k.tick(t0 + ms(3100)), vec![DjCall::Nudge { deck: 0, amount: 0.0 }]);
+    }
+
+    #[test]
+    fn pitch_tap_is_a_tenth_of_a_percent() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        k.on_key(&press('+'), t0);
+        assert_eq!(sets(&k.tick(t0)), vec![("rate", 0, 1.001)]);
+        k.on_key(&rel('+'), t0 + ms(60));
+        k.on_key(&press('l'), t0 + ms(300));
+        k.on_key(&press('-'), t0 + ms(500));
+        assert_eq!(sets(&k.tick(t0 + ms(500))), vec![("rate", 1, 0.999)]);
+    }
+
+    #[test]
+    fn pitch_hold_is_slow() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        k.on_key(&press('+'), t0);
+        let mut v = 1.0;
+        for i in 0..100 {
+            for (_, _, x) in sets(&k.tick(t0 + ms(i * 10))) {
+                v = x;
+            }
+        }
+        // one second of holding: well under 2 %
+        assert!(v > 1.003 && v < 1.02, "{v}");
+    }
+
+    #[test]
+    fn without_release_events_every_event_is_one_step() {
+        let t0 = Instant::now();
+        let mut k = keys(false);
+        for i in 0..10 {
+            k.on_key(&press('+'), t0 + ms(i * 33));
+        }
+        let v = sets(&k.tick(t0 + ms(400)));
+        assert_eq!(v.len(), 1);
+        assert!((v[0].2 - 1.01).abs() < 1e-9, "{v:?}");
+    }
+
+    #[test]
+    fn opening_hints_ends_holds_so_no_release_is_lost() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        k.on_key(&press(']'), t0);
+        assert_eq!(k.tick(t0), vec![DjCall::Nudge { deck: 0, amount: 1.0 }]);
+        tap_key(&mut k, 'f', t0 + ms(100));
+        assert_eq!(k.tick(t0 + ms(100)), vec![DjCall::Nudge { deck: 0, amount: 0.0 }]);
+        // the release arrives while the labels are up: harmless
+        k.on_key(&rel(']'), t0 + ms(200));
+        assert!(k.tick(t0 + ms(200)).is_empty());
+    }
+
+    #[test]
+    fn nothing_selected_says_so_instead_of_resetting() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        assert_eq!(k.on_key(&press('\\'), t0), Some(Nav::NoSelection));
+        assert!(k.tick(t0).is_empty());
+        assert!(!k.wheel(1, t0));
+        assert!(!k.press(t0));
+    }
+
+    #[test]
+    fn esc_goes_hints_then_selection() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        let t = select(&mut k, "w", t0);
+        assert!(k.hints().selected.is_some());
+        assert_eq!(k.on_key(&esc(), t), None);
+        assert!(k.hints().selected.is_none());
+        assert_eq!(k.on_key(&esc(), t + ms(100)), None);
+        // with the hints up, Esc only closes them
+        tap_key(&mut k, 'f', t + ms(200));
+        assert!(k.hints().active);
+        assert_eq!(k.on_key(&esc(), t + ms(300)), None);
+        assert!(!k.hints().active);
+    }
+
+    #[test]
+    fn loop_length_walks_the_ladder_and_feeds_v() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        // loop length of A: 4 -> 8 -> 16, then v loops 16 beats
+        let mut t = select(&mut k, "ca", t0);
+        tap_key(&mut k, ']', t);
+        t += ms(200);
+        tap_key(&mut k, ']', t);
+        t += ms(200);
+        assert_eq!(k.loop_len(), [16.0, 4.0]);
+        // the selection is still the loop length: edit keys, not deck keys, so leave it first
+        k.on_key(&esc(), t);
+        t += ms(200);
+        tap_key(&mut k, 'v', t);
+        assert_eq!(k.tick(t), vec![DjCall::Loop { deck: 0, beats: 16.0 }]);
+        // halve until the bottom: never below 1/4
+        let mut t = select(&mut k, "ca", t + ms(500));
+        for _ in 0..8 {
+            t += ms(200);
+            tap_key(&mut k, '[', t);
+        }
+        assert_eq!(k.loop_len()[0], 0.25);
+        // reset: 4 beats again
+        tap_key(&mut k, '\\', t + ms(200));
+        assert_eq!(k.loop_len(), [4.0, 4.0]);
     }
 }

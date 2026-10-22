@@ -15,9 +15,9 @@ use super::keys::{Ctl, Deck, Slot};
 #[cfg(test)]
 pub const LETTERS: &str = "asdqwertzxcvgb";
 
-/// Beat counts for loop length and jump size (1/4 .. 32, `]` doubles, `[` halves)
+/// Beat counts for the loop length (1/4 .. 32, `]` doubles, `[` halves)
 pub const LADDER: [f64; 8] = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
-/// Loop length and jump size before anyone changes them
+/// Loop length before anyone changes it
 pub const DEFAULT_BEATS: f64 = 4.0;
 /// `sync_range` of codjd until changed (not readable from the daemon)
 pub const DEFAULT_SYNC_RANGE: f64 = 0.16;
@@ -32,10 +32,8 @@ pub const ACCEL_MAX: u32 = 4;
 pub enum Target {
     /// a value sent with `DjSet`
     Slot(Slot),
-    /// beats of the next loop made with `v` / `m`
+    /// beats of the next loop made with `v`
     LoopLen(Deck),
-    /// beats of a beat jump (`e r u i`)
-    Jump(Deck),
     /// a knob of a patch slot: (slot 0..3, index in the slot's knob list), sent as a `knob` action
     Knob(u8, u8),
 }
@@ -85,7 +83,6 @@ impl Target {
             Target::Slot(Slot::CueMix) => "cue mix".into(),
             Target::Slot(Slot::SyncRange) => "sync range".into(),
             Target::LoopLen(d) => format!("{} loop", deck(d)),
-            Target::Jump(d) => format!("{} jump", deck(d)),
         }
     }
 
@@ -99,7 +96,7 @@ impl Target {
             Target::Slot(Slot::Gain(_)) => format!("{v:+.1} dB"),
             Target::Slot(Slot::Rate(_)) => format!("{:+.2}%", (v - 1.0) * 100.0),
             Target::Slot(Slot::SyncRange) => format!("±{:.0}%", v * 100.0),
-            Target::LoopLen(_) | Target::Jump(_) => format!("{} beats", fmt_beats(v)),
+            Target::LoopLen(_) => format!("{} beats", fmt_beats(v)),
             Target::Knob(..) => format!("{v:.2}"),
         }
     }
@@ -150,8 +147,6 @@ pub fn table() -> Vec<(Target, &'static str)> {
         (s(Slot::Rate(1)), "xs"),
         (Target::LoopLen(0), "ca"),
         (Target::LoopLen(1), "cs"),
-        (Target::Jump(0), "va"),
-        (Target::Jump(1), "vs"),
         (s(Slot::Gain(0)), "za"),
         (s(Slot::Gain(1)), "zs"),
         // mixer-wide
@@ -300,7 +295,7 @@ mod tests {
     #[test]
     fn labels_are_left_hand_prefix_free_and_complete() {
         let tab = table();
-        assert_eq!(tab.len(), 22 + 48);
+        assert_eq!(tab.len(), 20 + 48);
         for (_, l) in &tab {
             assert!(matches!(l.len(), 1 | 2), "{l}");
             assert!(l.chars().all(|c| LETTERS.contains(c)), "{l}");
@@ -313,7 +308,7 @@ mod tests {
                 }
             }
         }
-        // the target list covers every control of the screen: 9 per deck and 4 mixer-wide
+        // the target list covers every control of the screen: 8 per deck and 4 mixer-wide
         let all = |d| {
             vec![
                 Target::ctl(Ctl::Eq(d, 0)),
@@ -324,7 +319,6 @@ mod tests {
                 Target::Slot(Slot::Gain(d)),
                 Target::Slot(Slot::Rate(d)),
                 Target::LoopLen(d),
-                Target::Jump(d),
             ]
         };
         for x in all(0).into_iter().chain(all(1)).chain([
