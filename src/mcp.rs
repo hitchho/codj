@@ -385,6 +385,17 @@ pub fn write_result(reply: &str) -> Result<Value, String> {
     }
 }
 
+/// Result of `sheet_write`, like [`write_result`] but pointing back at `sheet_source`
+pub fn sheet_write_result(reply: &str) -> Result<Value, String> {
+    if !reply.starts_with("ok") && reply.contains("changed since you read it") {
+        return Err(format!(
+            "{reply}. The sheet was edited since you read it (vim, codj or another agent). Call sheet_source again, \
+             apply your change to that text and call sheet_write with the new hash."
+        ));
+    }
+    write_result(reply)
+}
+
 /// Validates a cue or loop name (a set-language identifier)
 pub fn check_name(name: &str) -> Result<(), String> {
     if crate::dj::capture::valid_name(name) {
@@ -535,6 +546,43 @@ pub struct SetWriteArgs {
     /// The complete new text of the file
     pub text: String,
     /// The `hash` that `set_source` returned for the version this text is based on ("" only when creating a new file)
+    pub base_hash: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TrackViewArgs {
+    /// A track's file path (from `library` or `track_find`) or its AudioId (`a1:` + 32 hex digits)
+    pub track: String,
+    /// true: the view as JSON with the source of every field, for programs; default: the text form
+    #[serde(default)]
+    pub json: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TrackFindArgs {
+    /// Part of the artist, title, file name, or a sheet's name (case-insensitive)
+    pub query: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SheetIdArgs {
+    /// The track's AudioId (`a1:` + 32 hex digits, from `track_find` or `track_view`) or its file path
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SheetCheckArgs {
+    /// The complete text of a sheet to validate (nothing is saved)
+    pub text: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SheetWriteArgs {
+    /// The track's AudioId (or file path); the text's `audio` line must name the same AudioId
+    pub id: String,
+    /// The complete new text of the sheet
+    pub text: String,
+    /// The `hash` that `sheet_source` returned for the version this text is based on ("" when the track has no sheet yet)
     pub base_hash: String,
 }
 
@@ -986,6 +1034,42 @@ impl Codj {
         to_text(write_result(&reply)?)
     }
 
+    #[tool(description = "What is known about one track, as a sheet-shaped text: the AudioId, grid, gain, key, marks, cues, loops, sections (intro, build, drop, breakdown, outro, body: measured from the waveform or stated), vocals, notes and tags. Lines ending in `# analysis` were measured; the rest were stated in the track's sheet; `# !` lines are diagnostics (a sheet set aside for errors, a pinned grid that no longer matches the analysis, a cue past the end). `track` is a file path or an AudioId. Set `json` for the same with the source of every field. Sets can use any of these names as `<track>.<name>` (e.g. `at aft.outro`). To change what is stated: sheet_source -> edit -> sheet_check -> sheet_write.")]
+    async fn track_view(&self, Parameters(a): Parameters<TrackViewArgs>) -> Result<String, String> {
+        if a.json.unwrap_or(false) {
+            Ok(ask!(self, p => p.track_view_json(&a.track)))
+        } else {
+            Ok(ask!(self, p => p.track_view(&a.track)))
+        }
+    }
+
+    #[tool(description = "Find tracks by artist, title, file name or sheet name: returns [{id, name, path}] (at most 25). `id` is the track's AudioId, the identity of its audio: copies and renamed files share it, and so share one sheet. Use it with track_view and the sheet tools.")]
+    async fn track_find(&self, Parameters(a): Parameters<TrackFindArgs>) -> Result<String, String> {
+        let hits = ask!(self, p => p.track_find(&a.query));
+        let rows: Vec<Value> = hits.iter().map(|(id, name, path)| json!({ "id": id, "name": name, "path": path })).collect();
+        to_text(json!({ "tracks": rows }))
+    }
+
+    #[tool(description = "Read a track's sheet (the .codj text file of what people and agents stated about it): returns {text, hash}; text and hash are \"\" when the track has no sheet yet (write a new one with base_hash \"\"). WORKFLOW: sheet_source -> edit the text -> sheet_check -> sheet_write with base_hash = this hash; if sheet_write says the sheet changed, read it again and redo the edit.")]
+    async fn sheet_source(&self, Parameters(a): Parameters<SheetIdArgs>) -> Result<String, String> {
+        let (text, hash) = ask!(self, p => p.sheet_source(&a.id));
+        to_text(json!({ "id": a.id, "text": text, "hash": hash }))
+    }
+
+    #[tool(description = "Validate a sheet's text without saving: returns {valid, errors} with every error as `file:line:col: message`. A sheet with any error is ignored whole, so fix them all. Syntax, one statement per line, `#` comments: `version 1` (first), `audio <AudioId>` (required), `name \"<text>\"`, `grid <bpm> @ <s>s beat1 <n>` (required as soon as any position is in bars: it pins the bar numbers; the error quotes the current grid), `gain <dB>dB`, `mark <a-h> <pos>`, `cue <name> <pos>`, `loop <name> <pos> len <k> beats|bars`, `section <name> <intro|body|build|drop|breakdown|outro> <pos> len <k> bars` (replaces the measured section of that name, or adds one), `section <name> hidden` (hides a measured one), `vocals bar 33..48, @ 200s..210s` or `vocals none`, `note \"<text>\"`, `tag <word>`. A <pos> is `bar <n> [beat <m>]` or `@ <seconds>s`. Names are shared by marks, cues, loops and sections.")]
+    async fn sheet_check(&self, Parameters(a): Parameters<SheetCheckArgs>) -> Result<String, String> {
+        let errors = ask!(self, p => p.sheet_check(&a.text));
+        to_text(json!({ "valid": errors.is_empty(), "errors": errors }))
+    }
+
+    #[tool(description = "Save a track's sheet after checking it. Needs `base_hash` from the sheet_source you based the text on (\"\" for a new sheet); refused with \"sheet changed since you read it\" if it was edited meanwhile, and refused if the text has errors (run sheet_check first). The write is attributed to you in the sheet's history. It never changes what is playing; sets that use the track's names see the change on their next load.")]
+    async fn sheet_write(&self, Parameters(a): Parameters<SheetWriteArgs>) -> Result<String, String> {
+        let author = self.author();
+        self.gate("sheet_write", Effect::Safe, &format!("id={} base_hash={} author={author} bytes={}", a.id, a.base_hash, a.text.len()))?;
+        let reply = ask!(self, p => p.sheet_write(&a.id, &a.text, &a.base_hash, &author));
+        to_text(sheet_write_result(&reply)?)
+    }
+
     #[tool(description = "A cheat sheet of the set language (.codj files): tracks, cues, loops, grids, mixes, items, controls and the rules for bar numbers. Read it before writing a set.")]
     async fn set_language_help(&self) -> Result<String, String> {
         Ok(SET_LANGUAGE_HELP.to_string())
@@ -1159,7 +1243,7 @@ impl Codj {
 #[tool_handler(
     router = self.tool_router,
     name = "codj",
-    instructions = "Control codj/codjd. `library` lists tracks; their `index` is what play_index and queue_add take. Tools marked LIVE are refused unless the server was started with `codj mcp --live`. Sets: sets_list, set_source, set_check, set_write (with base_hash) and the cue/loop/grid/record tools edit set files and never change what is playing; set_language_help has the syntax. Patch decks (synths and drum machines that play with the decks): patch_node_types -> write the JSON -> patch_check -> patch_write (with base_hash) -> patch_load (LIVE) -> patch_action for knobs and sequencer cells -> patch_live (LIVE); patch_list, patch_source, patch_import, patch_state read and edit files and state."
+    instructions = "Control codj/codjd. `library` lists tracks; their `index` is what play_index and queue_add take. Tools marked LIVE are refused unless the server was started with `codj mcp --live`. Sets: sets_list, set_source, set_check, set_write (with base_hash) and the cue/loop/grid/record tools edit set files and never change what is playing; set_language_help has the syntax. Tracks: track_find gives a track's AudioId, track_view shows what is measured and stated about it (sections like intro/drop/outro, cues, grid), and its sheet is edited with sheet_source -> sheet_check -> sheet_write (with base_hash); a set can use those names as `<track>.<name>`. Patch decks (synths and drum machines that play with the decks): patch_node_types -> write the JSON -> patch_check -> patch_write (with base_hash) -> patch_load (LIVE) -> patch_action for knobs and sequencer cells -> patch_live (LIVE); patch_list, patch_source, patch_import, patch_state read and edit files and state."
 )]
 impl ServerHandler for Codj {
     async fn initialize(
@@ -1350,6 +1434,10 @@ mod tests {
         assert_eq!(write_result("kaiku.codj:3:1: nope").unwrap_err(), "kaiku.codj:3:1: nope");
         assert!(check_name("drop").is_ok() && check_name("a b").is_err() && check_name("").is_err());
         assert!(SET_LANGUAGE_HELP.contains("swap") && SET_LANGUAGE_HELP.contains("mix aft -> smk"));
+        assert_eq!(sheet_write_result("ok abc").unwrap()["hash"], "abc");
+        let e = sheet_write_result("sheet changed since you read it").unwrap_err();
+        assert!(e.contains("sheet_source") && !e.contains("set_source"), "{e}");
+        assert_eq!(sheet_write_result("x.codj:3:1: nope").unwrap_err(), "x.codj:3:1: nope");
     }
 
     #[tokio::test]

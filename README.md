@@ -113,6 +113,15 @@ Set tools (sets are `.codj` text files, see `docs/set-language.md` in the codjd 
 |`set_record`|Start / stop recording a mix into the active set|always|
 |`set_arm`, `set_disarm`, `set_auto`, `set_preview`, `set_load`|Run the set: they start, stop or load audio|`--live` only|
 
+Track tools (the track model: an AudioId per encoded audio, measured observations and a stated sheet per track, see `docs/track-sheets.md` in the codjd repo):
+
+|Tool|Does|Class|
+|----|----|-----|
+|`track_find`|`[{id, name, path}]` of tracks and sheets matching a query; `id` is the AudioId|always|
+|`track_view`|What is known about a track (by path or AudioId) as sheet-shaped text, measured lines marked `# analysis`; `json: true` for the same with sources|always|
+|`sheet_source`, `sheet_check`|`{text, hash}` of a track's sheet (`""` when none); errors of a sheet text, nothing written|always|
+|`sheet_write`|Save a sheet after checking; `base_hash` required (`""` for a new one), author `agent:<client>`|always|
+
 Patch tools (patch decks: synths and drum machines as JSON node graphs, see `docs/patches.md` in the codjd repo):
 
 |Tool|Does|Class|

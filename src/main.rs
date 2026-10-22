@@ -222,6 +222,20 @@ pub trait Server {
     /// save after checking: `ok <new hash>` or the reason; `author` is `human` or `agent:<name>`
     async fn set_write(&self, name: &str, text: &str, base_hash: &str, author: &str) -> Result<String>;
 
+    // the track model (AudioId, sheets, views), see "Tracks" in codjd's docs/dj-api.md
+    /// the resolved track as sheet-shaped text, `path_or_id` a file or an AudioId
+    async fn track_view(&self, path_or_id: &str) -> Result<String>;
+    /// the same as JSON, every field with its source
+    async fn track_view_json(&self, path_or_id: &str) -> Result<String>;
+    /// (AudioId, name, path) of tracks and sheets matching `query`
+    async fn track_find(&self, query: &str) -> Result<Vec<(String, String, String)>>;
+    /// (text, hash) of the sheet of an AudioId; ("", "") when it has none
+    async fn sheet_source(&self, id: &str) -> Result<(String, String)>;
+    /// errors of `text` as a sheet, empty = valid
+    async fn sheet_check(&self, text: &str) -> Result<Vec<String>>;
+    /// save after checking: `ok <new hash>` or the reason
+    async fn sheet_write(&self, id: &str, text: &str, base_hash: &str, author: &str) -> Result<String>;
+
     /// transition recipes: (name, explanation, default bars)
     async fn set_recipes(&self) -> Result<Vec<(String, String, u32)>>;
     /// a full commented `mix` block of `recipe` for the two tracks of the active set
