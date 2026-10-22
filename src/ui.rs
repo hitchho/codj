@@ -1966,6 +1966,21 @@ impl<'a> UI<'a> {
         } else {
             self.render_list_without_genre(frame)
         }
+        // an empty library says what to do instead of showing a blank list
+        if self.music_list.unfiltered_music_list.is_empty() {
+            let area = self.geometry.list_geo();
+            let inner = Rect::new(area.x + 2, area.y + 3, area.width.saturating_sub(4), area.height.saturating_sub(4));
+            let lines = vec![
+                Line::from("No music in the library yet.").bold(),
+                Line::from(""),
+                Line::from("codjd plays the folder set as `path` in ~/.config/codjd/config.toml;"),
+                Line::from("files copied there show up by themselves."),
+                Line::from(""),
+                Line::from(vec![Span::from(":slsk <artist or title>").bold().cyan(), Span::from("  search Soulseek and download")]),
+                Line::from(vec![Span::from(":set").bold().cyan(), Span::from("                     settings  ·  "), Span::from("?").bold().cyan(), Span::from(" all keys")]),
+            ];
+            Paragraph::new(lines).wrap(Wrap { trim: false }).render(inner, frame.buffer_mut());
+        }
     }
 
     fn get_action_index(&self) -> usize {
