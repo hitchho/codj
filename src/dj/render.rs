@@ -293,6 +293,9 @@ pub fn draw(buf: &mut Buffer, area: Rect, v: &View) -> Vec<Spot> {
     }
     if v.panel.is_none() {
         match tutor {
+            // a narrow screen gives the tutor the whole bottom, except while browsing the
+            // library: then the library has it, and Tab or Esc brings the tutor back
+            Some(_) if lib.width < 100 && matches!(v.focus, Focus::Library | Focus::Search) => draw_library(buf, lib, v),
             Some(t) => {
                 // the library keeps the left side and the tutor takes the right; a narrow screen
                 // gives the tutor all of it
@@ -2092,6 +2095,18 @@ mod tests {
         assert!(deck_rows >= 12, "{deck_rows} rows for the decks");
         // the library stays on the left, readable
         assert!(text.lines().any(|l| l.starts_with("│▸ Smokin")), "{text}");
+    }
+
+    #[test]
+    fn browsing_shows_the_library_over_a_narrow_tutor() {
+        let tv = tutor_view();
+        let text = render(80, 30, |v| v.learn.tutor = Some(tv));
+        assert!(text.contains("TUTOR 3/8") && !text.contains("Library"), "{text}");
+        let text = render(80, 30, |v| {
+            v.learn.tutor = Some(tv);
+            v.focus = Focus::Library;
+        });
+        assert!(text.contains("LIBRARY") && !text.contains("TUTOR 3/8"), "{text}");
     }
 
     #[test]

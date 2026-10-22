@@ -729,7 +729,8 @@ impl ListMode {
             // Tab / Shift-Tab complete the command name, like vim's wildmenu
             if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
                 let typed = ui.command_bufr.value().to_string();
-                if !typed.contains(' ') {
+                // command names, and `pl` with its subcommands
+                if ui.completion.is_some() || !complete_command(&typed).is_empty() {
                     let (base, i) = match ui.completion.take() {
                         Some((base, i)) if key.code == KeyCode::BackTab => (base, i.wrapping_sub(1)),
                         Some((base, i)) => (base, i + 1),
@@ -1230,6 +1231,8 @@ impl Region {
                     ui.select_list_region();
                 }
                 KeyCode::Char(':') => {
+                    // back to the panel after the command, like `:` from the Soulseek panel
+                    ui.focus_playlists = true;
                     ui.change_list_mode(ListMode::Command);
                     ui.select_region(Region::Command);
                 }
@@ -4876,7 +4879,7 @@ fn sort_label(sort: &Sort) -> &'static str {
 const COMMANDS: &[&str] = &[
     "dj", "tutor", "patch", "slsk", "set", "dupes", "help", "lyrics", "playlists", "mute", "q", "reload", "pause", "resume", "toggle_mute",
     "create_playlist", "add_to_playlist", "rename_playlist", "remove_playlist", "slsk_connect",
-    "slsk_disconnect",
+    "slsk_disconnect", "pl new ", "pl add ", "pl mv ", "pl rm ",
 ];
 
 /// Commands starting with `typed`, in a stable order
@@ -4894,6 +4897,9 @@ mod completion_tests {
         assert_eq!(complete_command("t"), ["tutor", "toggle_mute"]);
         assert_eq!(complete_command("sl"), ["slsk", "slsk_connect", "slsk_disconnect"]);
         assert!(complete_command("zz").is_empty());
+        assert_eq!(complete_command("pl"), ["playlists", "pl new ", "pl add ", "pl mv ", "pl rm "]);
+        assert_eq!(complete_command("pl m"), ["pl mv "]);
+        assert!(complete_command("pl new warmup").is_empty(), "a name is not completed");
         assert_eq!(complete_command("").len(), COMMANDS.len());
     }
 }

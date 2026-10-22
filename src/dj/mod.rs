@@ -2594,6 +2594,9 @@ mod tests {
         assert!(describe_error("DjSync", &e).contains("Space it first"), "{}", describe_error("DjSync", &e));
         let e = zbus::Error::Failure("other deck has nothing loaded".into());
         assert!(describe_error("DjSync", &e).contains("a or b loads it"));
+        // waiting for a quantized start: the daemon's own advice, no Space (it would pause)
+        let e = zbus::Error::Failure("other deck is waiting for its beat (quantize): sync again in a moment".into());
+        assert!(!describe_error("DjSync", &e).contains("Space"));
         let e = zbus::Error::Failure("bad amount".into());
         assert_eq!(describe_error("DjNudge", &e), format!("DjNudge: {e}"));
     }
