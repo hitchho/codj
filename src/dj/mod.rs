@@ -2056,8 +2056,9 @@ impl DjScreen {
                 return Outcome::Stay;
             }
         }
-        // while the tutor is open Tab skips its step and Esc pauses it (Shift+Tab still searches)
-        if !self.pane.typing() && key.kind == KeyEventKind::Press && !self.keys.hints().active {
+        // while the tutor is open Tab skips its step and Esc pauses it (Shift+Tab still browses the
+        // library; while browsing, Tab and Esc go back to the decks as usual)
+        if !self.pane.typing() && !self.pane.browsing() && key.kind == KeyEventKind::Press && !self.keys.hints().active {
             let selected = self.keys.hints().selected.is_some() || self.keys.has_pending();
             if let Some(t) = self.tutor.as_mut().filter(|t| t.visible) {
                 match key.code {
