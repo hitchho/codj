@@ -126,7 +126,7 @@ Soulseek integration allows searching and downloading music from the soulseek p2
 |`j` / `k`, `Ctrl-d` / `Ctrl-u`, `gg` / `G`|Move|
 |`/`|Search (regex, `artist:` `title:` `genre:`); `Enter` keeps the filter and goes back to the list, `Esc` clears it|
 |`a` / `b`|Load the highlighted track onto deck A / B and focus that deck|
-|`Enter`|Load it onto the deck that is not playing|
+|`Enter`|Load it onto the focused deck (`h` / `l`); onto the other one if the focused deck is playing|
 |`:`|Command line|
 |`Tab` / `Esc`|Back to the deck keys (`Esc` does not leave DJ mode; `:q` does)|
 
@@ -231,7 +231,7 @@ DJ mode is vim for decks. **One deck has the focus** (A at the start) and every 
 |`Tab`|Browse the [library](#library-vim-keys) with vim keys (`j` / `k`, `a` / `b` load); `Tab` or `Esc` come back. The same while the [tutor](#learning) is open|
 |`/`|Straight into the library search (same regex and `artist:`/`title:`/`genre:` filters as the list); `Enter` keeps the filter and browses, `Esc` clears it|
 |`Up` / `Down`, `PageUp` / `PageDown`|Move in the library without leaving the decks|
-|`Enter`|Load the highlighted track onto the deck that is not playing (A when both are idle)|
+|`Enter`|Load the highlighted track onto the focused deck; when that one is playing, onto the other (never over a playing deck: with both playing it says so and loads nothing)|
 |`:`|DJ command line, see below|
 |`?`|[The key map on the screen](#learning), every key explained (`q` or `Esc` closes it; on a small screen `j` `k` `Ctrl-d` `Ctrl-u` `g` `G` scroll it)|
 |`F1` / `F2`|Headphone cue on deck A / B (`:hp`)|
@@ -321,7 +321,7 @@ grab = true                         # EVIOCGRAB the device while codj runs
 - **Normal view:** turning changes codjd's volume 2 % a detent; a press mutes / unmutes.
 - **DJ mode**, first match wins:
   - a control is picked (`f` and its label): turning edits it with the same acceleration (up = +), a press resets it;
-  - the library is browsed (`Tab`): turning scrolls it, a press loads the highlighted track onto the deck that is not playing (like `Enter`);
+  - the library is browsed (`Tab`): turning scrolls it, a press loads the highlighted track like `Enter` (the focused deck, else the other);
   - otherwise the knob is the **jog wheel** of the focused deck, like a record under the hand. Paused, turning scrubs the position to find a spot by ear: 1/16 beat a detent, x2 / x4 / x8 when spun fast (detents under 60 ms apart); without a beat grid a beat counts as half a second. Playing, turning bends the tempo (±2 %) while the knob moves, to line up the beats; the bend ends 250 ms after the last detent. A press cues the paused deck at the spot (then `Space` plays from it, `ma` keeps it as a mark); on a playing deck a press does nothing, so a stray press never stops the room.
 - Only the three configured codes are acted on; everything else the device sends is dropped unseen (never logged or stored), because the device may also be your keyboard.
 - With `grab = true` the device is taken exclusively while codj runs, so the system volume does not move with it; quitting codj releases it (and so does the kernel if codj dies or panics, because the grab belongs to the open file). A device that also has letter keys is never grabbed, it would swallow your typing; use the consumer-control node (`device` matches the first node whose name contains it and that has one of the configured keys).
@@ -357,7 +357,7 @@ Mixes and tracks are numbered from 1 on screen (the bus counts from 0).
 |`F10`|Editor pane (same as `:e`)|
 |`F11`|AI prompt box (same as `:ai`); brings back a hidden run|
 
-`Enter` is not used for this: it loads the library selection onto the free deck.
+`Enter` is not used for this: it loads the library selection onto the focused deck.
 
 While a set is active a strip sits between the decks and the mixer: the set name, `✓ no errors` or `✗ N errors` in red, `AUTO` when auto mode is on, the track list with the track on air (`▶`, green) and the incoming one (`»`, yellow) and the mixes as segments between them (`───16b▶` is a 16-bar mix, bold when armed). For the armed mix there is a progress bar over its length in bars with the current bar and a `◆` at each upcoming automation item, and below it the next items (`bar 16 · swap low`). Without an armed mix the strip lists the mixes and which one F6 would arm. It is 6 rows on a tall screen, 4 on a medium one and one line on a small one. `SetState` is polled at about 7 Hz while a set is active, once a second otherwise.
 

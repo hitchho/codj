@@ -230,7 +230,7 @@ pub enum Nav {
     LibDown,
     LibPageUp,
     LibPageDown,
-    /// load the highlighted track onto the deck that is not playing
+    /// load the highlighted track onto the focused deck (the other one if it plays)
     LoadSmart,
     /// arm the next mix of the active set (F6)
     SetArmNext,

@@ -372,6 +372,19 @@ impl SetCall {
     }
 }
 
+/// Where `Enter` loads: the focused deck, else the other one when the focused one is playing;
+/// None when both play (a load would cut what the room hears)
+pub fn smart_deck(focus: u8, playing: [bool; 2]) -> Option<u8> {
+    let other = 1 - focus.min(1);
+    if !playing[focus.min(1) as usize] {
+        Some(focus.min(1))
+    } else if !playing[other as usize] {
+        Some(other)
+    } else {
+        None
+    }
+}
+
 fn deck_letter(d: u32) -> char {
     if d == 0 { 'A' } else { 'B' }
 }
@@ -1683,11 +1696,21 @@ impl DjScreen {
         }
     }
 
-    /// load the highlighted track onto the deck that is not playing; both idle: A
+    /// load the highlighted track onto the focused deck (`h` / `l`), unless that one is playing:
+    /// then onto the other, so a load never cuts the track the room hears
     fn load_smart(&mut self) {
         let playing = |i: usize| self.session.shared.lock().unwrap().decks[i].playing;
-        let deck = if playing(0) && !playing(1) { 1 } else { 0 };
-        self.load(deck);
+        let focus = self.keys.focus();
+        match smart_deck(focus, [playing(0), playing(1)]) {
+            Some(deck) => {
+                self.load(deck);
+                if deck != focus {
+                    let f = if focus == 0 { 'A' } else { 'B' };
+                    self.set_note(format!("deck {f} is playing, so the track went onto the other deck"));
+                }
+            }
+            None => self.set_note("both decks are playing: a or b loads over one of them"),
+        }
     }
 
     /// `:e` / F10: the editor pane on the active set
@@ -2659,6 +2682,15 @@ mod tests {
         type_str(&mut p, "load a");
         p.handle_typing(&key(KeyCode::Esc));
         assert!(!p.typing());
+    }
+
+    #[test]
+    fn enter_loads_onto_the_focused_deck_unless_it_plays() {
+        assert_eq!(smart_deck(1, [false, false]), Some(1), "B focused, both idle: B");
+        assert_eq!(smart_deck(0, [false, false]), Some(0));
+        assert_eq!(smart_deck(1, [false, true]), Some(0), "B is on air: A");
+        assert_eq!(smart_deck(0, [true, false]), Some(1));
+        assert_eq!(smart_deck(0, [true, true]), None, "never cut what plays");
     }
 
     #[test]

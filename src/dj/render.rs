@@ -1361,7 +1361,7 @@ fn draw_library(buf: &mut Buffer, area: Rect, v: &View) {
         format!(" Library {}/{} — /{}█ (Enter done · Esc clear) ", v.lib.len(), v.lib_total, v.input)
     } else if browsing {
         let long = format!(
-            " LIBRARY {}/{}{} · j/k move · / search · a or b load onto deck · Enter free deck · Tab/Esc decks ",
+            " LIBRARY {}/{}{} · j/k move · / search · a or b load onto deck · Enter focused deck · Tab/Esc decks ",
             v.lib.len(),
             v.lib_total,
             filter
@@ -1369,7 +1369,7 @@ fn draw_library(buf: &mut Buffer, area: Rect, v: &View) {
         if long.chars().count() + 2 <= area.width as usize {
             long
         } else {
-            format!(" LIBRARY {}/{}{} · j/k · / search · a b load · Enter free deck · Esc ", v.lib.len(), v.lib_total, filter)
+            format!(" LIBRARY {}/{}{} · j/k · / search · a b load · Enter focused deck · Esc ", v.lib.len(), v.lib_total, filter)
         }
     } else {
         format!(" Library {}{} · Tab to browse ", v.lib_total, filter)
