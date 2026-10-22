@@ -213,6 +213,8 @@ pub trait Server {
     async fn set_record(&self, on: bool) -> Result<String>;
     /// (recording, elapsed beats on the outgoing deck's clock, events logged)
     async fn set_recording(&self) -> Result<(bool, f64, u32)>;
+    async fn record_audio(&self, on: bool) -> Result<String>;
+    async fn record_audio_state(&self) -> Result<(bool, String, f64, u64, String)>;
     /// (text, sha-256 hex hash) of a set file as on disk
     async fn set_source(&self, name: &str) -> Result<(String, String)>;
     /// errors of `text` as if saved, empty = valid

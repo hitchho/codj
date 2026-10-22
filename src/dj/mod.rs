@@ -97,6 +97,10 @@ struct Shared {
     rec: Option<(bool, f64, u32)>,
     /// codjd has no `SetRecording`: polling stops
     rec_missing: bool,
+    /// `RecordAudioState`: (recording, file, seconds, dropped frames, error)
+    audio_rec: Option<(bool, String, f64, u64, String)>,
+    /// codjd has no `RecordAudioState`
+    audio_rec_missing: bool,
     /// feedback of a set command (list, "armed mix 2"), shown like a note
     /// (text, shown until, made at)
     info: Option<(String, Instant, Instant)>,
@@ -172,6 +176,8 @@ pub enum SetCall {
     LoopSave(u32, String),
     GridSave(u32),
     Record(bool),
+    /// `:rec audio`: the master to a file
+    AudioRec(bool),
     /// `:mix new` without a recipe: list them
     Recipes,
     /// `:mix new <recipe> [bars]`
@@ -335,6 +341,7 @@ impl SetCall {
             SetCall::LoopSave(..) => "SetLoopCapture",
             SetCall::GridSave(_) => "SetGridCapture",
             SetCall::Record(_) => "SetRecord",
+            SetCall::AudioRec(_) => "RecordAudio",
             SetCall::Recipes => "SetRecipes",
             SetCall::MixNew(_) => "SetRecipeText",
         }
@@ -357,6 +364,7 @@ impl SetCall {
             SetCall::GridSave(d) => format!("grid of deck {} saved", deck_letter(*d)),
             SetCall::Record(true) => "recording: play the mix, F9 or :rec off stops".into(),
             SetCall::Record(false) => "recording stopped".into(),
+            SetCall::AudioRec(on) => if *on { "recording the room" } else { "recording saved" }.into(),
             SetCall::Recipes | SetCall::MixNew(_) => String::new(),
         }
     }
@@ -367,6 +375,8 @@ impl SetCall {
         match self {
             SetCall::Record(false) => format!("recorded {text}"),
             SetCall::Record(true) => format!("recording: {text}"),
+            SetCall::AudioRec(true) => format!("● recording the room to {} · :rec audio stops", home_short(detail.trim())),
+            SetCall::AudioRec(false) => format!("saved {}", home_short(detail.trim())),
             _ => text,
         }
     }
@@ -382,6 +392,14 @@ pub fn smart_deck(focus: u8, playing: [bool; 2]) -> Option<u8> {
         Some(other)
     } else {
         None
+    }
+}
+
+/// `/home/me/Music/x.wav` as `~/Music/x.wav`
+fn home_short(path: &str) -> String {
+    match std::env::var("HOME") {
+        Ok(h) if !h.is_empty() && path.starts_with(&h) => format!("~{}", &path[h.len()..]),
+        _ => path.to_string(),
     }
 }
 
@@ -481,6 +499,7 @@ async fn run_set_call(proxy: &ServerProxy<'_>, call: &SetCall) -> zbus::Result<S
         SetCall::LoopSave(d, n) => SetReply::Status(proxy.set_loop_capture(*d, n).await?),
         SetCall::GridSave(d) => SetReply::Status(proxy.set_grid_capture(*d).await?),
         SetCall::Record(on) => SetReply::Status(proxy.set_record(*on).await?),
+        SetCall::AudioRec(on) => SetReply::Status(proxy.record_audio(*on).await?),
     })
 }
 
@@ -619,19 +638,37 @@ async fn poll_patches(proxy: &ServerProxy<'_>, shared: &Arc<Mutex<Shared>>, tick
     }
 }
 
-/// Reads `SetRecording` when it is due: ~4 Hz while recording, once a second otherwise
+fn is_unknown_method(text: &str) -> bool {
+    text.contains("UnknownMethod") || text.contains("Unknown method") || text.contains("No such method")
+}
+
+/// Reads `SetRecording` and `RecordAudioState` when it is due: ~4 Hz while recording, once a second otherwise
 async fn poll_recording(proxy: &ServerProxy<'_>, shared: &Arc<Mutex<Shared>>, tick: u32) {
     let due = {
         let mut s = shared.lock().unwrap();
-        let every = if s.rec.is_some_and(|r| r.0) { REC_POLL_ACTIVE } else { REC_POLL_IDLE };
+        let recording = s.rec.is_some_and(|r| r.0) || s.audio_rec.as_ref().is_some_and(|r| r.0);
+        let every = if recording { REC_POLL_ACTIVE } else { REC_POLL_IDLE };
         let forced = std::mem::take(&mut s.rec_poll_now);
-        !s.rec_missing && (forced || tick % every == 0)
+        !(s.rec_missing && s.audio_rec_missing) && (forced || tick % every == 0)
     };
     if !due {
         return;
     }
+    let audio = if shared.lock().unwrap().audio_rec_missing {
+        None
+    } else {
+        Some(tokio::time::timeout(CALL_TIMEOUT, proxy.record_audio_state()).await)
+    };
     let reply = tokio::time::timeout(CALL_TIMEOUT, proxy.set_recording()).await;
     let mut s = shared.lock().unwrap();
+    match audio {
+        Some(Ok(Ok(state))) => s.audio_rec = Some(state),
+        Some(Ok(Err(e))) if is_unknown_method(&e.to_string()) => {
+            s.audio_rec_missing = true;
+            s.audio_rec = None;
+        }
+        _ => {}
+    }
     match reply {
         Ok(Ok(state)) => s.rec = Some(state),
         Ok(Err(e)) => {
@@ -660,6 +697,8 @@ impl Session {
             set_poll_now: false,
             rec: None,
             rec_missing: false,
+            audio_rec: None,
+            audio_rec_missing: false,
             rec_poll_now: false,
             info: None,
             overlay: None,
@@ -1011,6 +1050,8 @@ pub enum Command {
     GridSave(Option<u8>),
     /// `:rec on|off`, bare `:rec` toggles
     Record(Option<bool>),
+    /// `:rec audio [on|off]`: the master to a WAV file; None toggles
+    AudioRec(Option<bool>),
     /// `:e`: the in-TUI editor pane on the active set
     Editor,
     /// `:ai <text>`: run the agent on a request ("" opens the prompt box)
@@ -1309,7 +1350,14 @@ pub fn parse_command(cmd: &str) -> Command {
         Some("errors") => Command::SetErrors,
         Some("edit") => Command::SetEdit,
         Some(w @ ("cue" | "loopsave" | "gridsave" | "rec" | "record")) => {
-            capture::parse(w, &words.collect::<Vec<_>>()).unwrap_or(Command::Nothing)
+            let rest: Vec<&str> = words.collect();
+            match rest.as_slice() {
+                ["audio"] => Command::AudioRec(None),
+                ["audio", "on"] => Command::AudioRec(Some(true)),
+                ["audio", "off"] => Command::AudioRec(Some(false)),
+                ["audio", ..] => Command::Unknown("usage: rec audio [on|off]".into()),
+                _ => capture::parse(w, &rest).unwrap_or(Command::Nothing),
+            }
         }
         Some("mix") => mixnew::parse(&words.collect::<Vec<_>>()),
         Some("patch" | "patches") => parse_patch(&words.collect::<Vec<_>>()),
@@ -2324,6 +2372,17 @@ impl DjScreen {
             Command::LoopSave(name, d) => self.capture(|deck| SetCall::LoopSave(deck, name), d),
             Command::GridSave(d) => self.capture(SetCall::GridSave, d),
             Command::Record(on) => self.record(on),
+            Command::AudioRec(on) => {
+                let (missing, recording) = {
+                    let s = self.session.shared.lock().unwrap();
+                    (s.audio_rec_missing, s.audio_rec.as_ref().is_some_and(|r| r.0))
+                };
+                if missing {
+                    self.set_note("this codjd cannot record audio: update codjd");
+                } else {
+                    self.session.set_call(SetCall::AudioRec(on.unwrap_or(!recording)));
+                }
+            }
             Command::Editor => self.open_editor(Instant::now()),
             Command::Ai(text) => self.open_prompt(Some(text), Instant::now()),
             Command::Help(query) => self.help_command(&query),
@@ -2551,6 +2610,7 @@ impl DjScreen {
             showcmd: &showcmd,
             set: s.set.as_ref().filter(|x| x.is_active()),
             rec: s.rec.filter(|r| r.0).map(|r| (r.1, r.2)),
+            audio_rec: s.audio_rec.as_ref().filter(|r| r.0).map(|r| r.2),
             overlay: s.overlay.as_deref(),
             panel,
             hints: render::HintView {
@@ -2932,6 +2992,10 @@ mod tests {
         assert_eq!(parse_command("gridsave"), Command::GridSave(None));
         assert_eq!(parse_command("rec"), Command::Record(None));
         assert_eq!(parse_command("rec off"), Command::Record(Some(false)));
+        assert_eq!(parse_command("rec audio"), Command::AudioRec(None));
+        assert_eq!(parse_command("rec audio off"), Command::AudioRec(Some(false)));
+        assert!(matches!(parse_command("rec audio loud"), Command::Unknown(_)));
+        assert_eq!(home_short("/nowhere/x.wav"), "/nowhere/x.wav");
         assert!(matches!(parse_command("cue"), Command::Unknown(_)));
         assert_eq!(SetCall::Record(false).done_with("mix 2: aft -> smk, 16 bars, 9 items"), "recorded mix 3: aft → smk, 16 bars, 9 items");
         assert_eq!(SetCall::Cue(0, "drop".into()).done_with("cue drop -> aft bar 33"), "cue drop → aft bar 33");

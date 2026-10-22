@@ -78,6 +78,8 @@ pub struct View<'a> {
     pub set: Option<&'a SetState>,
     /// recording a mix: (beats, events)
     pub rec: Option<(f64, u32)>,
+    /// seconds of the audio recording while it runs
+    pub audio_rec: Option<f64>,
     /// the set's errors, drawn over the decks
     pub overlay: Option<&'a [String]>,
     /// an editor or prompt pane replaces the set strip and the library; it is drawn by the
@@ -794,7 +796,7 @@ fn draw_header(buf: &mut Buffer, area: Rect, v: &View) {
         ]),
         None => {
             // the longest help that fits beside the badge and the link state; `? keys` always stays
-            let room = (area.width as usize).saturating_sub(4 + 10);
+            let room = (area.width as usize).saturating_sub(4 + 10 + if v.audio_rec.is_some() { 14 } else { 0 });
             let help = [
                 "  h l focus deck · Tab library (j/k, a/b load) · : command (:q leaves) · ? keys",
                 "  h l focus · Tab library · :q leaves · ? keys",
@@ -814,6 +816,15 @@ fn draw_header(buf: &mut Buffer, area: Rect, v: &View) {
     let w = text.chars().count() as u16;
     if area.width > w {
         buf.set_string(area.right() - w, area.y, text, Style::default().fg(color));
+    }
+    // the room is being recorded: always in sight
+    if let Some(secs) = v.audio_rec {
+        let s = secs.max(0.0) as u64;
+        let rec = if s >= 3600 { format!(" ● REC {}:{:02}:{:02} ", s / 3600, s / 60 % 60, s % 60) } else { format!(" ● REC {}:{:02} ", s / 60, s % 60) };
+        let rw = rec.chars().count() as u16;
+        if area.width > w + rw + 1 {
+            buf.set_string(area.right() - w - rw - 1, area.y, rec, Style::default().fg(Color::White).bg(Color::Red).add_modifier(Modifier::BOLD));
+        }
     }
 }
 
@@ -1532,6 +1543,7 @@ mod tests {
             showcmd: "",
             set: None,
             rec: None,
+            audio_rec: None,
             overlay: None,
             panel: None,
             hints: HintView::default(),
@@ -1913,6 +1925,15 @@ mod tests {
     }
 
     #[test]
+    fn an_audio_recording_shows_its_time_in_the_header() {
+        let text = render(80, 30, |v| v.audio_rec = Some(754.0));
+        let head = text.lines().next().unwrap();
+        assert!(head.contains("● REC 12:34") && head.contains("● live") && head.contains("? keys"), "{head}");
+        let text = render(80, 30, |_| {});
+        assert!(!text.lines().next().unwrap().contains("REC"));
+    }
+
+    #[test]
     fn the_header_and_empty_decks_fit_a_narrow_screen() {
         for w in [60u16, 80, 120] {
             let text = render(w, 30, |_| {});
@@ -2281,6 +2302,7 @@ mod tests {
             showcmd: "",
             set: None,
             rec: None,
+            audio_rec: None,
             overlay: None,
             panel: None,
             hints: HintView::default(),
