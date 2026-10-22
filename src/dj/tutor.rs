@@ -102,7 +102,7 @@ impl Step {
     /// The exact keys
     pub fn keys(self) -> &'static [&'static str] {
         match self {
-            Step::Pick => &["Shift+Tab  browse the library: j k move, a loads on A, b on B", "/  searches it"],
+            Step::Pick => &["Tab  browse the library: j k move, a loads on A, b on B", "/  searches it"],
             Step::PlayA => &["h Space  focus A and play it (loading a deck focuses it; Space again pauses)"],
             Step::HearB => &["F2  headphones on B (F1 for A)", ":xfade a  crossfader to A: only A in the room"],
             Step::SyncB => &["l s  focus B and sync it to A (h s syncs A to B)"],
@@ -350,7 +350,7 @@ impl Tutor {
             why: self.step.why().to_string(),
             keys: self.step.keys().iter().map(|k| k.to_string()).collect(),
             live: live_lines(self.step, decks, mixer, grids, &self.finding),
-            footer: if self.step == Step::Done { "Esc closes · :tutor reset starts over".into() } else { "Tab skips · Esc pauses · :tutor resumes".into() },
+            footer: if self.step == Step::Done { "Esc closes · :tutor reset starts over".into() } else { ":tutor next skips · Esc pauses · :tutor resumes".into() },
         }
     }
 }
@@ -802,7 +802,7 @@ mod tests {
         assert_eq!(t.update(&[playing.clone(), b.clone()], &m, at(1600)), None);
         assert_eq!(t.update(&[playing.clone(), b.clone()], &m, at(3000)), Some(Step::PlayA));
         assert_eq!(t.step, Step::HearB);
-        // Tab skips; Esc pauses and keeps the step; nothing advances while paused
+        // :tutor next skips; Esc pauses and keeps the step; nothing advances while paused
         t.skip(at(3100));
         assert_eq!(t.step, Step::SyncB);
         t.close();
@@ -857,7 +857,7 @@ mod tests {
         }
         // the exact keys of the task
         let keys = |s: Step| s.keys().join(" ");
-        assert!(keys(Step::Pick).contains("Shift+Tab") && keys(Step::Pick).contains("j k") && keys(Step::Pick).contains("a loads"));
+        assert!(keys(Step::Pick).contains("Tab  browse") && keys(Step::Pick).contains("j k") && keys(Step::Pick).contains("a loads"));
         assert!(keys(Step::PlayA).contains("Space"));
         assert!(keys(Step::HearB).contains("F2") && keys(Step::HearB).contains(":xfade a"));
         assert!(keys(Step::SyncB).contains("l s"));

@@ -1885,7 +1885,7 @@ mod tests {
         assert_eq!(key(KeyCode::F(10)), Some(Nav(self::Nav::Editor)));
         assert_eq!(key(KeyCode::F(11)), Some(Nav(self::Nav::Prompt)));
         assert_eq!(key(KeyCode::F(12)), Some(Nav(self::Nav::Patch)));
-        // Shift+Tab still reaches the library search while the tutor is open
+        // Shift+Tab reaches the library search too
         assert_eq!(bind(&normalize(&ev(KeyCode::BackTab, KeyModifiers::SHIFT, KeyEventKind::Press))), Some(Nav(self::Nav::Search)));
     }
 

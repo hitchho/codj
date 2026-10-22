@@ -2081,7 +2081,7 @@ mod tests {
         let text = render(120, 35, |v| v.learn.tutor = Some(tv));
         println!("{text}");
         assert_eq!(text.lines().count(), 35);
-        for l in ["TUTOR 3/8", "Listen to B in headphones", "F2  headphones on B", "internal mode", "Tab skips · Esc pauses", "DECK A", "DECK B", "Mixer", "Library"] {
+        for l in ["TUTOR 3/8", "Listen to B in headphones", "F2  headphones on B", "internal mode", ":tutor next skips · Esc pauses", "DECK A", "DECK B", "Mixer", "Library"] {
             assert!(text.contains(l), "{l}\n{text}");
         }
         // the decks keep what they showed in the text rows, and have rows left for the waveforms

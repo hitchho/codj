@@ -228,7 +228,7 @@ DJ mode is vim for decks. **One deck has the focus** (A at the start) and every 
 |`f`|[Control hints](#control-hints-and-editing): label every control, type a label to pick it|
 |`\`|Reset the picked control|
 |`;`|Toggle between the last two picked controls|
-|`Tab`|Browse the [library](#library-vim-keys) with vim keys (`j` / `k`, `a` / `b` load); `Tab` or `Esc` come back. While the [tutor](#learning) is open `Tab` skips its step and `Shift + Tab` browses|
+|`Tab`|Browse the [library](#library-vim-keys) with vim keys (`j` / `k`, `a` / `b` load); `Tab` or `Esc` come back. The same while the [tutor](#learning) is open|
 |`/`|Straight into the library search (same regex and `artist:`/`title:`/`genre:` filters as the list); `Enter` keeps the filter and browses, `Esc` clears it|
 |`Up` / `Down`, `PageUp` / `PageDown`|Move in the library without leaving the decks|
 |`Enter`|Load the highlighted track onto the deck that is not playing (A when both are idle)|
@@ -422,11 +422,11 @@ DJ mode explains itself, for someone who has never DJ'd. All the wording lives i
 
 ### `:tutor`
 
-A guided first mix with your own library, like vimtutor. A pane shares the bottom of the screen with the library (the decks keep at least 10 rows; the set strip shrinks to a line on a medium screen; on a screen under 100 columns the pane takes the whole bottom). Each step has a title, 1 to 3 sentences of why, the exact keys and a live checklist. **Steps finish by themselves**, a moment after the state shows they were done (the step stays up for at least 1.2 s so it can be read). `Tab` skips the current step (`Shift+Tab` still browses the library meanwhile), `Esc` pauses and closes the pane (an open hint selection is cleared first), `:tutor` resumes, `:tutor reset` starts over. Progress (`{"version":1,"step":N}`) is saved to `$XDG_STATE_HOME/codj/tutor.json` (`~/.local/state/codj/tutor.json`, else under the data directory) after every step.
+A guided first mix with your own library, like vimtutor. A pane shares the bottom of the screen with the library (the decks keep at least 10 rows; the set strip shrinks to a line on a medium screen; on a screen under 100 columns the pane takes the whole bottom). Each step has a title, 1 to 3 sentences of why, the exact keys and a live checklist. **Steps finish by themselves**, a moment after the state shows they were done (the step stays up for at least 1.2 s so it can be read). `:tutor next` skips the current step (`Tab` browses the library as always), `Esc` pauses and closes the pane (an open hint selection is cleared first), `:tutor` resumes, `:tutor reset` starts over. Progress (`{"version":1,"step":N}`) is saved to `$XDG_STATE_HOME/codj/tutor.json` (`~/.local/state/codj/tutor.json`, else under the data directory) after every step.
 
 |#|Step|Keys|Done when (polled `DjDecks` / `DjMixer`)|
 |-|----|----|----------------------------------------|
-|1|Choose two tracks: codj proposes a pair from the library with tempos within ±6 % and marks them `★A` / `★B`|`Shift+Tab` browses the library, `a` loads the highlighted track on A, `b` on B, `Tab` comes back (after A is loaded the highlight moves to the second track)|both decks loaded, with different files|
+|1|Choose two tracks: codj proposes a pair from the library with tempos within ±6 % and marks them `★A` / `★B`|`Tab` browses the library, `a` loads the highlighted track on A, `b` on B, `Tab` comes back (after A is loaded the highlight moves to the second track)|both decks loaded, with different files|
 |2|Play deck A: what BPM, beat and bar are, and the phase meter|`h Space` (h focuses A; loading a deck focuses it)|A playing|
 |3|Listen to B in headphones: what cue is for|`F2`, and `:xfade a` so the room only hears A|B's headphone send on, or 45 s (with one output, `internal` mode, there is nothing to hear apart; the step says so)|
 |4|Sync B to A: what sync does, the ±16 % limit, what a yellow `?` next to the BPM means, `:grid`|`l s` (focus B, sync)|B synced|

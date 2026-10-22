@@ -12,7 +12,7 @@
 # Phase 5 drives the control hints: f, a label, ] [ \ ; edits, the mouse wheel (SGR mouse
 # sequences sent as literal keys), the beat-jump keys w b, Esc.
 # Phase 6 drives the learning features: the ? key map, :help <term>, the hint explanations, :tutor
-# (the first steps advance as the fake's state changes, Tab skips, Esc pauses, :tutor resumes and
+# (the first steps advance as the fake's state changes, :tutor next skips, Esc pauses, :tutor resumes and
 # resets, the progress file lives in the isolated XDG_STATE_HOME) and :mix new through the fake.
 # Phase 7 drives the patch decks: F12 opens the patch pane, `:patch new d1` (written and loaded by
 # the fake), the sequencer grid (hjkl, x, velocity digits, a capital letter for the pattern, Enter
@@ -253,14 +253,14 @@ keys Escape; sleep 0.3                              # clears the selection
 cmd help\ flux; cap help_unknown                     # a note, not a popup
 # the tutor
 cmd tutor; sleep 1.5; cap tutor_1_pick                # a pair proposed from the library, marked
-keys BTab a Tab; sleep 0.6; cap tutor_1_loaded_a      # Shift+Tab browses, a loads on A, Tab back; the highlight moved on
-keys BTab b BTab; sleep 2; cap tutor_2_play_a         # b loads B: both loaded, step 2 after the dwell
-keys Space; sleep 2; cap tutor_3_headphones           # A playing: step 3
+keys Tab a Tab; sleep 0.6; cap tutor_1_loaded_a       # Tab browses, a loads on A, Tab back; the highlight moved on
+keys Tab b Tab; sleep 2; cap tutor_2_play_a           # b loads B: both loaded, step 2 after the dwell
+keys h Space; sleep 2; cap tutor_3_headphones         # B was loaded last: h focuses A, Space plays it: step 3
 keys F2; sleep 2; cap tutor_4_sync                    # B headphones: step 4
 keys l s; sleep 2; cap tutor_5_phrase                 # focus B, sync it: step 5 with A's bar counter
 keys Escape; sleep 0.5; cap tutor_paused              # pause: the pane is gone, decks untouched
 cmd tutor; sleep 0.5; cap tutor_resumed               # resumes at step 5
-keys Tab; sleep 0.5; cap tutor_6_skipped              # Tab skips step 5
+cmd tutor\ next; sleep 0.5; cap tutor_6_skipped       # :tutor next skips step 5
 keys f q; sleep 0.3; rep 20 '['; sleep 2; cap tutor_7_swap  # B low killed: step 7
 keys f d; sleep 0.3; rep 20 '['; keys f q; sleep 0.3; keys '\\'; sleep 2; cap tutor_8_fade   # swap done
 cmd xfade\ b; keys h Space; sleep 2; cap tutor_9_done  # faded, A focused and stopped: the goodbye

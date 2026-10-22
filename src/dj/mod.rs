@@ -978,6 +978,8 @@ pub enum Command {
     MixNew { recipe: Option<String>, bars: Option<u32> },
     /// `:tutor [reset]`
     Tutor { reset: bool },
+    /// `:tutor next`: skip the current step
+    TutorNext,
     /// `:patch ...`
     Patch(PatchCmd),
     /// `:fader 0.5`, `:low kill`, `:filter -0.3`, `:xfade a`: set a control (deck None = the focused one)
@@ -1275,6 +1277,7 @@ pub fn parse_command(cmd: &str) -> Command {
         Some("tutor") => match words.next() {
             None => Command::Tutor { reset: false },
             Some("reset") if words.next().is_none() => Command::Tutor { reset: true },
+            Some("next" | "skip") if words.next().is_none() => Command::TutorNext,
             Some(_) => Command::Unknown("usage: tutor [reset]".into()),
         },
         Some("e") => Command::Editor,
@@ -1710,7 +1713,7 @@ impl DjScreen {
             self.set_note("tutor restarted from the first step");
         } else {
             match self.tutor.as_mut() {
-                Some(t) if t.visible => self.set_note("the tutor is open: Tab skips a step, Esc pauses it"),
+                Some(t) if t.visible => self.set_note("the tutor is open: :tutor next skips a step, Esc pauses it"),
                 Some(t) => t.resume(now),
                 None => {
                     self.tutor = Some(tutor::Tutor::open(self.tutor_path.clone(), now));
@@ -2092,8 +2095,8 @@ impl DjScreen {
                 return Outcome::Stay;
             }
         }
-        // while the tutor is open Tab skips its step and Esc pauses it (Shift+Tab still browses the
-        // library; while browsing, Tab and Esc go back to the decks as usual)
+        // while the tutor is open Esc pauses it (after a pending count or pick is dropped); Tab
+        // browses the library as everywhere else, `:tutor next` skips a step
         if !self.pane.typing() && !self.pane.browsing() && key.kind == KeyEventKind::Press && !self.keys.hints().active {
             let selected = self.keys.hints().selected.is_some() || self.keys.has_pending();
             if let Some(t) = self.tutor.as_mut().filter(|t| t.visible) {
@@ -2101,11 +2104,6 @@ impl DjScreen {
                     KeyCode::Esc if !selected => {
                         t.close();
                         self.set_note("tutor paused: :tutor resumes where you left off");
-                        return Outcome::Stay;
-                    }
-                    KeyCode::Tab if !key.modifiers.contains(KeyModifiers::SHIFT) => {
-                        t.skip(now);
-                        self.tutor_sel = (false, false);
                         return Outcome::Stay;
                     }
                     _ => {}
@@ -2238,6 +2236,13 @@ impl DjScreen {
             Command::Help(query) => self.help_command(&query),
             Command::MixNew { recipe, bars } => self.mix_new(recipe, bars),
             Command::Tutor { reset } => self.tutor_command(reset),
+            Command::TutorNext => match self.tutor.as_mut().filter(|t| t.visible) {
+                Some(t) => {
+                    t.skip(Instant::now());
+                    self.tutor_sel = (false, false);
+                }
+                None => self.set_note("the tutor is not open: :tutor starts or resumes it"),
+            },
             Command::Patch(cmd) => self.patch_command(cmd),
             Command::PatchSave(name) => {
                 if self.patch.open {
@@ -2782,6 +2787,8 @@ mod tests {
     fn tutor_command_and_highlighting_a_track() {
         assert_eq!(parse_command("tutor"), Command::Tutor { reset: false });
         assert_eq!(parse_command("tutor reset"), Command::Tutor { reset: true });
+        assert_eq!(parse_command("tutor next"), Command::TutorNext);
+        assert_eq!(parse_command("tutor skip"), Command::TutorNext);
         assert!(matches!(parse_command("tutor now"), Command::Unknown(_)));
         assert!(matches!(parse_command("tutor reset now"), Command::Unknown(_)));
         let mut p = pane();
