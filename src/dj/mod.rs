@@ -1055,6 +1055,8 @@ pub enum Command {
     /// `:e`: the in-TUI editor pane on the active set
     Editor,
     /// `:ai <text>`: run the agent on a request ("" opens the prompt box)
+    /// `:ai new`: forget the conversation, the next prompt starts a new one
+    AiNew,
     Ai(String),
     /// `:help [term]`: the glossary ("" lists the terms)
     Help(String),
@@ -1277,6 +1279,9 @@ fn one_based(word: Option<&str>) -> Option<u32> {
 pub fn parse_command(cmd: &str) -> Command {
     if let Some(rest) = cmd.trim().strip_prefix("ai") {
         if rest.is_empty() || rest.starts_with(char::is_whitespace) {
+            if rest.trim() == "new" {
+                return Command::AiNew;
+            }
             return Command::Ai(rest.trim().to_string());
         }
     }
@@ -1641,6 +1646,8 @@ pub struct DjScreen {
     editor: Option<editor::Editor>,
     /// the AI prompt box and the agent run behind it
     prompt: Option<prompt::Prompt>,
+    /// the conversation the prompt box continues (one per DJ session, `:ai new` resets it)
+    ai_session: Option<prompt::Session>,
     /// `[agent]` from the config, for the prompt box
     agent: crate::parser::AgentSettings,
     /// the hardware knob while DJ mode is open (dropping it releases the device)
@@ -1677,6 +1684,7 @@ impl DjScreen {
             edit_request: None,
             editor: None,
             prompt: None,
+            ai_session: None,
             agent: Default::default(),
             knob: None,
             help: false,
@@ -1789,7 +1797,11 @@ impl DjScreen {
                 return;
             }
         }
-        self.prompt = Some(prompt::Prompt::new(Some(self.session.conn.clone()), self.agent.clone()));
+        let mut p = prompt::Prompt::new(Some(self.session.conn.clone()), self.agent.clone());
+        if let Some(s) = &self.ai_session {
+            p.set_session(s.clone());
+        }
+        self.prompt = Some(p);
         if let Some(t) = text.filter(|t| !t.is_empty()) {
             self.submit_prompt(t);
         }
@@ -1801,8 +1813,12 @@ impl DjScreen {
         let (patches, _) = self.patch_slots();
         let live = self.agent.live.unwrap_or(false);
         let full = prompt::build_prompt(&request, set.as_ref().filter(|s| s.is_active()), &decks, &patches, live);
+        // the prompts of one DJ session are one conversation with the agent (`:ai new` resets)
+        let session = self.ai_session.get_or_insert_with(prompt::Session::new);
         if let Some(p) = self.prompt.as_mut() {
+            p.set_session(session.clone());
             p.start(full);
+            session.turns += 1;
         }
     }
 
@@ -2385,6 +2401,15 @@ impl DjScreen {
             }
             Command::Editor => self.open_editor(Instant::now()),
             Command::Ai(text) => self.open_prompt(Some(text), Instant::now()),
+            Command::AiNew => {
+                if self.prompt.as_ref().is_some_and(|p| p.busy()) {
+                    self.set_note("an agent run is still going: Ctrl-C cancels it first");
+                } else {
+                    self.ai_session = None;
+                    self.prompt = None;
+                    self.set_note("new AI conversation: :ai <request> or F11");
+                }
+            }
             Command::Help(query) => self.help_command(&query),
             Command::MixNew { recipe, bars } => self.mix_new(recipe, bars),
             Command::Tutor { reset } => self.tutor_command(reset),
@@ -2962,6 +2987,8 @@ mod tests {
         assert_eq!(parse_command("tutor"), Command::Tutor { reset: false });
         assert_eq!(parse_command("tutor reset"), Command::Tutor { reset: true });
         assert_eq!(parse_command("tutor next"), Command::TutorNext);
+        assert_eq!(parse_command("ai new"), Command::AiNew);
+        assert_eq!(parse_command("ai new tracks for a warm-up"), Command::Ai("new tracks for a warm-up".into()));
         assert_eq!(parse_command("set new friday"), Command::SetNew("friday".into()));
         assert!(matches!(parse_command("set new"), Command::Unknown(m) if m.contains("usage: set new")));
         assert!(matches!(parse_command("set new two words"), Command::Unknown(_)));

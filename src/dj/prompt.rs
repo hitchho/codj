@@ -153,6 +153,36 @@ impl AgentCmd {
     }
 }
 
+/// The conversation the prompt box keeps with `claude` across prompts (`:ai new` starts another)
+#[derive(Debug, Clone, PartialEq)]
+pub struct Session {
+    /// a v4 UUID, as `claude --session-id` wants it
+    pub id: String,
+    /// prompts sent in it so far
+    pub turns: u32,
+}
+
+impl Session {
+    pub fn new() -> Session {
+        Session { id: uuid_v4(), turns: 0 }
+    }
+}
+
+/// A random version 4 UUID from the kernel's random source
+fn uuid_v4() -> String {
+    use std::io::Read;
+    let mut b = [0u8; 16];
+    if std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b)).is_err() {
+        // no /dev/urandom: time and pid are unique enough for a local session name
+        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        b[..16].copy_from_slice(&(t ^ ((std::process::id() as u128) << 64)).to_le_bytes());
+    }
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
+}
+
 /// True for `claude` (or a path ending in it): it gets the MCP flags
 pub fn is_claude(program: &str) -> bool {
     Path::new(program).file_name().is_some_and(|n| n == "claude")
@@ -164,7 +194,7 @@ pub fn is_claude(program: &str) -> bool {
 /// <mcp tools>`, so the only things it can do are codj's MCP tools. Any other command gets
 /// `CODJ_MCP_CONFIG`, `CODJ_MCP_LIVE` and `CODJ_MCP_TOOLS` in its environment instead (and the
 /// same file), which a wrapper script can pass on to its agent.
-pub fn build_agent_cmd(cfg: &AgentSettings, exe: &Path, mcp_path: &Path, prompt: &str) -> Result<AgentCmd, String> {
+pub fn build_agent_cmd(cfg: &AgentSettings, exe: &Path, mcp_path: &Path, prompt: &str, session: Option<&Session>) -> Result<AgentCmd, String> {
     let line = cfg.command.as_deref().map(str::trim).filter(|c| !c.is_empty()).unwrap_or(DEFAULT_COMMAND);
     let mut words = split_command(line);
     if words.is_empty() {
@@ -185,6 +215,10 @@ pub fn build_agent_cmd(cfg: &AgentSettings, exe: &Path, mcp_path: &Path, prompt:
             "--allowedTools".into(),
             tools.join(","),
         ]);
+        // one conversation across prompts: the first names the session, the rest resume it
+        if let Some(sess) = session {
+            args.extend([if sess.turns == 0 { "--session-id" } else { "--resume" }.to_string(), sess.id.clone()]);
+        }
     }
     let stdin = match via {
         PromptVia::Stdin => Some(prompt.to_string()),
@@ -554,9 +588,16 @@ pub struct Prompt {
     status: String,
     tx: mpsc::UnboundedSender<PromptEvent>,
     rx: mpsc::UnboundedReceiver<PromptEvent>,
+    /// the conversation this run belongs to (the DJ screen keeps it across prompts)
+    session: Option<Session>,
 }
 
 impl Prompt {
+    /// The conversation the next run continues
+    pub fn set_session(&mut self, session: Session) {
+        self.session = Some(session);
+    }
+
     pub fn new(conn: Option<Connection>, agent: AgentSettings) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         Prompt {
@@ -577,6 +618,7 @@ impl Prompt {
             status: String::new(),
             tx,
             rx,
+            session: None,
         }
     }
 
@@ -615,7 +657,7 @@ impl Prompt {
     fn launch(&mut self) {
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("codj"));
         let mcp_path = std::env::temp_dir().join(format!("codj-agent-{}-{}.json", std::process::id(), self.out.len() + self.before.len()));
-        match build_agent_cmd(&self.agent, &exe, &mcp_path, &self.prompt) {
+        match build_agent_cmd(&self.agent, &exe, &mcp_path, &self.prompt, self.session.as_ref()) {
             Ok(cmd) => {
                 self.out.push((format!("$ {}", cmd.display()), false));
                 let (ktx, krx) = oneshot::channel();
@@ -806,7 +848,10 @@ impl Prompt {
             }
         }
         let title = match self.phase {
-            Phase::Input => " AI prompt · Enter runs · Esc closes ".to_string(),
+            Phase::Input => match self.session.as_ref().filter(|s| s.turns > 0) {
+                Some(s) => format!(" AI prompt · turn {} of this conversation · Enter runs · :ai new starts over · Esc closes ", s.turns + 1),
+                None => " AI prompt · Enter runs · Esc closes ".to_string(),
+            },
             Phase::Starting | Phase::Running | Phase::Collecting => format!(" AI agent · {} · Ctrl-C cancels · Esc hides ", self.status),
             Phase::Review => format!(" AI agent · {} · y keep · n undo ", self.status),
             Phase::Done => format!(" AI agent · {} · Esc closes ", self.status),
@@ -878,7 +923,7 @@ mod tests {
 
     #[test]
     fn claude_gets_the_mcp_flags_and_the_prompt_on_stdin() {
-        let c = build_agent_cmd(&cfg(None, false, None, None), Path::new("/opt/codj"), Path::new("/tmp/m.json"), "PROMPT").unwrap();
+        let c = build_agent_cmd(&cfg(None, false, None, None), Path::new("/opt/codj"), Path::new("/tmp/m.json"), "PROMPT", None).unwrap();
         assert_eq!(c.program, "claude");
         assert_eq!(c.args[0], "-p");
         let at = |f: &str| c.args.iter().position(|a| a == f).unwrap();
@@ -895,7 +940,7 @@ mod tests {
 
     #[test]
     fn live_adds_the_flag_and_the_live_tools() {
-        let c = build_agent_cmd(&cfg(Some("claude -p"), true, None, None), Path::new("/opt/codj"), Path::new("/tmp/m.json"), "P").unwrap();
+        let c = build_agent_cmd(&cfg(Some("claude -p"), true, None, None), Path::new("/opt/codj"), Path::new("/tmp/m.json"), "P", None).unwrap();
         let allowed = c.args.iter().find(|a| a.contains("mcp__codj__")).unwrap();
         assert!(allowed.contains("mcp__codj__set_arm"));
         let json: serde_json::Value = serde_json::from_str(&c.mcp_json).unwrap();
@@ -907,28 +952,44 @@ mod tests {
 
     #[test]
     fn prompt_as_the_last_argument() {
-        let c = build_agent_cmd(&cfg(Some("claude -p"), false, Some("arg"), None), Path::new("/c"), Path::new("/m"), "do it").unwrap();
+        let c = build_agent_cmd(&cfg(Some("claude -p"), false, Some("arg"), None), Path::new("/c"), Path::new("/m"), "do it", None).unwrap();
         assert_eq!(c.stdin, None);
         assert_eq!(&c.args[c.args.len() - 2..], ["--", "do it"], "-- keeps the list flags from eating it");
         // another command: no flags, prompt last, config through the environment
-        let o = build_agent_cmd(&cfg(Some("my-agent --fast"), false, Some("arg"), None), Path::new("/c"), Path::new("/tmp/m.json"), "do it").unwrap();
+        let o = build_agent_cmd(&cfg(Some("my-agent --fast"), false, Some("arg"), None), Path::new("/c"), Path::new("/tmp/m.json"), "do it", None).unwrap();
         assert_eq!(o.program, "my-agent");
         assert_eq!(o.args, ["--fast", "do it"]);
         assert!(o.env.contains(&("CODJ_MCP_CONFIG".into(), "/tmp/m.json".into())));
-        let o = build_agent_cmd(&cfg(Some("my-agent"), false, Some("stdin"), None), Path::new("/c"), Path::new("/m"), "p").unwrap();
+        let o = build_agent_cmd(&cfg(Some("my-agent"), false, Some("stdin"), None), Path::new("/c"), Path::new("/m"), "p", None).unwrap();
         assert_eq!(o.stdin.as_deref(), Some("p"));
         assert!(o.args.is_empty());
     }
 
     #[test]
     fn custom_tool_list_and_bad_settings() {
-        let c = build_agent_cmd(&cfg(None, false, None, Some(&["set_check", "mcp__other__x"])), Path::new("/c"), Path::new("/m"), "p").unwrap();
+        let c = build_agent_cmd(&cfg(None, false, None, Some(&["set_check", "mcp__other__x"])), Path::new("/c"), Path::new("/m"), "p", None).unwrap();
         let allowed = c.args.iter().find(|a| a.contains("mcp__")).unwrap();
         assert_eq!(allowed, "mcp__codj__set_check,mcp__other__x");
-        assert!(build_agent_cmd(&cfg(None, false, Some("pipe"), None), Path::new("/c"), Path::new("/m"), "p").is_err());
+        assert!(build_agent_cmd(&cfg(None, false, Some("pipe"), None), Path::new("/c"), Path::new("/m"), "p", None).is_err());
         assert!(PromptVia::parse(Some("arg")).is_ok());
-        let wrapped = build_agent_cmd(&cfg(Some("/usr/bin/claude -p"), false, None, None), Path::new("/c"), Path::new("/m"), "p").unwrap();
+        let wrapped = build_agent_cmd(&cfg(Some("/usr/bin/claude -p"), false, None, None), Path::new("/c"), Path::new("/m"), "p", None).unwrap();
         assert!(wrapped.args.contains(&"--mcp-config".to_string()), "a path to claude counts as claude");
+        // a conversation: the first prompt names the session, later ones resume it
+        let first = Session { id: "4f2c9a1e-0b7d-4c3e-9f10-2a3b4c5d6e7f".into(), turns: 0 };
+        let c = build_agent_cmd(&cfg(None, false, None, None), Path::new("/c"), Path::new("/m"), "p", Some(&first)).unwrap();
+        let at = |c: &AgentCmd, f: &str| c.args.iter().position(|a| a == f);
+        assert_eq!(c.args[at(&c, "--session-id").unwrap() + 1], first.id);
+        assert!(at(&c, "--resume").is_none());
+        let later = Session { turns: 2, ..first.clone() };
+        let c = build_agent_cmd(&cfg(None, false, None, None), Path::new("/c"), Path::new("/m"), "p", Some(&later)).unwrap();
+        assert_eq!(c.args[at(&c, "--resume").unwrap() + 1], first.id);
+        // another agent command gets no claude flags
+        let o = build_agent_cmd(&cfg(Some("my-agent"), false, None, None), Path::new("/c"), Path::new("/m"), "p", Some(&later)).unwrap();
+        assert!(at(&o, "--resume").is_none());
+        // a fresh id is a v4 UUID
+        let id = Session::new().id;
+        assert_eq!(id.len(), 36);
+        assert_eq!(&id[14..15], "4");
     }
 
     fn set() -> SetState {

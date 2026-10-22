@@ -346,7 +346,8 @@ Mixes and tracks are numbered from 1 on screen (the bus counts from 0).
 |`:preview <n> [bars]`|Audition mix `n`: both tracks loaded, the outgoing deck `bars` (default 8) before the mix start, armed and playing|
 |`:load <n>`|Load track `n` of the set onto the free deck with the set's grid/gain overrides (`:load a` / `:load b` still load the library selection)|
 |`:e`|The in-TUI editor pane on the active set (also `F10`), see below|
-|`:ai <text>`|Run the AI agent on a request (also `F11`), see below|
+|`:ai <text>`|Run the AI agent on a request (also `F11`), see below. The prompts of a DJ session are one conversation|
+|`:ai new`|Start a new conversation with the agent|
 |`:errors`|The active set's errors as `file:line:col: message` in an overlay; `Esc` closes it|
 |`:edit`|Open the set file in `$EDITOR` (else `$VISUAL`, else `vi`). The terminal is handed over (raw mode, alternate screen, mouse capture and keyboard-protocol flags are given back), the audio keeps playing, and everything is restored when the editor exits; codjd reloads the file when you save|
 
@@ -400,6 +401,8 @@ If somebody else saved first (vim, an agent, a capture) `:w` is refused with "se
 ### AI prompt box (`:ai <text>` or `F11`)
 
 `:ai make the second mix longer` (or `F11`, type, `Enter`) runs the agent from `[agent]` in the config as a child process. codj holds no AI keys: the command brings its own login.
+
+**One conversation.** With `claude` as the command, the prompts of one DJ session are one conversation: the first runs with `--session-id <uuid>`, later ones with `--resume <uuid>`, so "make it shorter" knows what "it" is. Every prompt still carries the current decks and sets. The box's title says which turn it is; `:ai new` forgets the conversation and the next prompt starts another (so does leaving and opening DJ mode). Other agent commands run one prompt at a time, as before.
 
 What it gets: a preamble (the active set's name and file, its tracks and mixes, both decks' track / BPM / key / position, and the rules: edit sets only through the codj MCP set tools, `set_check` before `set_write`, never touch audio unless live) followed by your text, on stdin or as the last argument (`prompt_via`). codj's MCP server is attached:
 
