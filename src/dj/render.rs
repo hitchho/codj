@@ -765,7 +765,7 @@ fn draw_header(buf: &mut Buffer, area: Rect, v: &View) {
             ),
             Span::styled(
                 match p {
-                    Panel::Editor => "  deck keys are OFF · Esc, :q back",
+                    Panel::Editor => "  deck keys are OFF · F10, Esc, :q back",
                     Panel::Prompt => "  deck keys are OFF · Esc hides · Ctrl-C cancels",
                     Panel::Patch => "  deck keys are OFF · f ] [ work · F12/Esc back",
                 },
@@ -787,7 +787,7 @@ fn draw_header(buf: &mut Buffer, area: Rect, v: &View) {
             ),
             Span::styled(
                 match p {
-                    Panel::Editor => " · Esc (normal mode) / :q back to the deck keys",
+                    Panel::Editor => " · F10, Esc (normal mode) or :q back to the deck keys",
                     Panel::Prompt => " · Esc hides · Ctrl-C cancels the agent",
                     Panel::Patch => " · f hints and ] [ still work · F12 / Esc back to the deck keys",
                 },

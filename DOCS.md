@@ -239,7 +239,7 @@ DJ mode is vim for decks. **One deck has the focus** (A at the start) and every 
 |`F5`|Quantize on / off (mixer-wide, `:quantize`)|
 |`F6` / `F7` / `F8`|[Set](#sets-in-dj-mode): arm the next mix / auto mode on-off / disarm (`:arm next`, `:auto`, `:disarm`)|
 |`F9`|[Record](#capture-and-recording) a mix into the active set on / off (same as `:rec`)|
-|`F10` / `F11`|[Editor pane / AI prompt box](#editor-pane-and-ai-prompt-box) (`:e`, `:ai`)|
+|`F10` / `F11`|[Editor pane / AI prompt box](#editor-pane-and-ai-prompt-box) (`:e`, `:ai`); the same key closes it again, like `F12` for the patch pane|
 |`F12`|[Patch pane](#patch-decks): synths and drum machines in four slots, with a sequencer grid (same as `:patch`)|
 |Mouse wheel|Edits the picked control (up = +); with nothing picked it scrolls the library. Clicks do nothing in DJ mode|
 |`Esc`|Closes the set error overlay if open; else drops a half-typed count or mark; cancels the hints if they are up; clears the picked control. It never leaves DJ mode|

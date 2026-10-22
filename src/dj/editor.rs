@@ -553,7 +553,7 @@ impl Editor {
         }
         if !self.loaded {
             // still reading, or the read failed: only closing works
-            if key.code == KeyCode::Esc || matches!(key.code, KeyCode::Char('q')) {
+            if matches!(key.code, KeyCode::Esc | KeyCode::F(10) | KeyCode::Char('q')) {
                 return EditorOutcome::Close;
             }
             return EditorOutcome::Stay;
@@ -570,10 +570,11 @@ impl Editor {
             return EditorOutcome::Stay;
         }
         let normal = self.state.mode == EditorMode::Normal;
-        if normal && key.code == KeyCode::Esc {
+        // F10 opened the pane and closes it again, from any mode; Esc only from normal mode
+        if (normal && key.code == KeyCode::Esc) || key.code == KeyCode::F(10) {
             if self.dirty() && !self.warned_discard {
                 self.warned_discard = true;
-                self.set_status("unsaved changes: :w saves, Esc again discards them and closes");
+                self.set_status("unsaved changes: :w saves, Esc or F10 again discards them and closes");
                 return EditorOutcome::Stay;
             }
             return EditorOutcome::Close;
@@ -1047,6 +1048,17 @@ mod tests {
         e.on_key(&shifted, Instant::now());
         type_str(&mut e, ":;{}→");
         assert_eq!(e.text(), "A:;{}→");
+    }
+
+    #[test]
+    fn f10_toggles_the_pane_closed_from_any_mode() {
+        let mut e = loaded("abc\n");
+        assert_eq!(e.on_key(&key(KeyCode::F(10)), Instant::now()), EditorOutcome::Close);
+        // in insert mode with an edit: a warning first, then it closes
+        let mut e = loaded("abc\n");
+        type_str(&mut e, "ix");
+        assert_eq!(e.on_key(&key(KeyCode::F(10)), Instant::now()), EditorOutcome::Stay, "warns first");
+        assert_eq!(e.on_key(&key(KeyCode::F(10)), Instant::now()), EditorOutcome::Close);
     }
 
     #[test]
