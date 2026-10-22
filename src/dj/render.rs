@@ -767,13 +767,22 @@ fn draw_header(buf: &mut Buffer, area: Rect, v: &View) {
                 dim(),
             ),
         ]),
-        None => Line::from(vec![
-            Span::styled(" DJ ", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::styled(
+        None => {
+            // the longest help that fits beside the badge and the link state; `? keys` always stays
+            let room = (area.width as usize).saturating_sub(4 + 10);
+            let help = [
                 "  h l focus deck · Tab library (j/k, a/b load) · : command (:q leaves) · ? keys",
-                dim(),
-            ),
-        ]),
+                "  h l focus · Tab library · :q leaves · ? keys",
+                "  ? keys · :q leaves",
+            ]
+            .into_iter()
+            .find(|t| t.chars().count() <= room)
+            .unwrap_or("  ? keys");
+            Line::from(vec![
+                Span::styled(" DJ ", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::styled(help, dim()),
+            ])
+        }
     };
     Paragraph::new(left).render(area, buf);
     let (text, color) = if live { ("● live ", Color::Green) } else { ("○ no data ", Color::Red) };
@@ -886,7 +895,9 @@ fn draw_deck(
     block.render(area, buf);
     let w = inner.width as usize;
     if !d.loaded {
-        let msg = "— empty — Tab, j/k to pick a track, then a (deck A) or b (deck B)";
+        // this deck's own load key, short enough for a phone-width deck
+        let key = if idx == 0 { 'a' } else { 'b' };
+        let msg = format!("— empty — Tab, j/k, {key} loads here");
         buf.set_stringn(inner.x + 1, inner.y + inner.height / 2, msg, w.saturating_sub(1), dim());
         return;
     }
@@ -1863,6 +1874,20 @@ mod tests {
         for gone in ["Alt q/a", "play / pause this deck", "⇧1-4", "7-0"] {
             assert!(!text.contains(gone), "{gone}");
         }
+    }
+
+    #[test]
+    fn the_header_and_empty_decks_fit_a_narrow_screen() {
+        for w in [60u16, 80, 120] {
+            let text = render(w, 30, |_| {});
+            let head = text.lines().next().unwrap();
+            assert!(head.contains("? keys") && head.contains("● live"), "{w}: {head}");
+        }
+        let text = render(80, 30, |v| {
+            static EMPTY: std::sync::OnceLock<Vec<DeckInfo>> = std::sync::OnceLock::new();
+            v.decks = EMPTY.get_or_init(|| vec![DeckInfo::default(), DeckInfo::default()]);
+        });
+        assert!(text.contains("a loads here") && text.contains("b loads here"), "{text}");
     }
 
     #[test]
