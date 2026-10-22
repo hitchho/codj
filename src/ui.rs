@@ -1765,7 +1765,7 @@ impl<'a> UI<'a> {
 
         // store soulseek config for later connection via dbus
         if let Some(slsk) = &config.soulseek {
-            if slsk.enabled.unwrap_or(false) {
+            if crate::settings::enabled(slsk) {
                 self.soulseek_config = Some(slsk.clone());
                 self.soulseek_status = "configured (use :slsk_connect)".to_string();
             }
@@ -2772,7 +2772,7 @@ impl<'a> UI<'a> {
             Ok(()) => "saved, takes effect on the next connect".to_string(),
             Err(e) => e,
         };
-        self.soulseek_config = data.enabled.unwrap_or(false).then(|| data.clone());
+        self.soulseek_config = crate::settings::enabled(&data).then(|| data.clone());
         if ranking {
             let _ = self
                 .state
@@ -2927,11 +2927,24 @@ impl<'a> UI<'a> {
         // nothing searched yet: say how
         if self.soulseek_ranked.is_empty() {
             let inner = Rect::new(area.x + 2, area.y + 3, area.width.saturating_sub(4), area.height.saturating_sub(4));
-            let lines = vec![
+            let account = self
+                .soulseek_config
+                .as_ref()
+                .is_some_and(|c| c.username.as_deref().is_some_and(|u| !u.is_empty()));
+            let mut lines = vec![];
+            if !account {
+                lines.push(Line::from(vec![
+                    Span::from("First time: ").bold(),
+                    Span::from(":set").bold().cyan(),
+                    Span::from(" → username and password (any new name creates an account)"),
+                ]));
+                lines.push(Line::from(""));
+            }
+            lines.extend([
                 Line::from(vec![Span::from(":slsk <artist or title>").bold().cyan(), Span::from("  search the Soulseek network")]),
                 Line::from("Results stream in over a few seconds, best quality first."),
                 Line::from("Downloads land in the library and show up in the list."),
-            ];
+            ]);
             Paragraph::new(lines).wrap(Wrap { trim: false }).render(inner, frame.buffer_mut());
         }
     }

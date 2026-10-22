@@ -26,6 +26,30 @@ pub struct Setting {
 
 pub const SOULSEEK: &[Setting] = &[
     Setting {
+        key: "username",
+        kind: Kind::Text,
+        help: "soulseek account (created on first login)",
+        ranking: false,
+    },
+    Setting {
+        key: "password",
+        kind: Kind::Secret,
+        help: "soulseek password",
+        ranking: false,
+    },
+    Setting {
+        key: "enabled",
+        kind: Kind::Bool,
+        help: "use soulseek at all",
+        ranking: false,
+    },
+    Setting {
+        key: "download_dir",
+        kind: Kind::Text,
+        help: "where downloads are saved",
+        ranking: false,
+    },
+    Setting {
         key: "formats",
         kind: Kind::List,
         help: "only show these formats, earlier = preferred (empty: all audio)",
@@ -59,30 +83,6 @@ pub const SOULSEEK: &[Setting] = &[
         key: "max_results",
         kind: Kind::Number,
         help: "how many results to show",
-        ranking: false,
-    },
-    Setting {
-        key: "download_dir",
-        kind: Kind::Text,
-        help: "where downloads are saved",
-        ranking: false,
-    },
-    Setting {
-        key: "enabled",
-        kind: Kind::Bool,
-        help: "use soulseek at all",
-        ranking: false,
-    },
-    Setting {
-        key: "username",
-        kind: Kind::Text,
-        help: "soulseek account (created on first login)",
-        ranking: false,
-    },
-    Setting {
-        key: "password",
-        kind: Kind::Secret,
-        help: "soulseek password",
         ranking: false,
     },
     Setting {
@@ -125,7 +125,7 @@ pub fn display(s: &SoulseekSettings, key: &str) -> String {
             .download_dir
             .as_ref()
             .map_or("~/Music/soulseek".to_string(), |p| p.display().to_string()),
-        "enabled" => yes_no(s.enabled.unwrap_or(false)),
+        "enabled" => yes_no(enabled(s)),
         "username" => opt(&s.username, ""),
         "password" => match &s.password {
             Some(p) if !p.is_empty() => "•".repeat(p.chars().count().min(12)),
@@ -142,6 +142,12 @@ fn yes_no(b: bool) -> String {
     if b { "yes" } else { "no" }.to_string()
 }
 
+/// Soulseek is on when switched on, or (never switched) once there is a username: filling in an
+/// account is enough to use it
+pub fn enabled(s: &SoulseekSettings) -> bool {
+    s.enabled.unwrap_or_else(|| s.username.as_deref().is_some_and(|u| !u.trim().is_empty()))
+}
+
 /// Text the edit box starts with
 pub fn edit_text(s: &SoulseekSettings, key: &str) -> String {
     match key {
@@ -155,7 +161,7 @@ pub fn edit_text(s: &SoulseekSettings, key: &str) -> String {
 pub fn toggle(s: &mut SoulseekSettings, key: &str) {
     match key {
         "prefer_free_slots" => s.prefer_free_slots = Some(!s.prefer_free_slots.unwrap_or(true)),
-        "enabled" => s.enabled = Some(!s.enabled.unwrap_or(false)),
+        "enabled" => s.enabled = Some(!enabled(s)),
         _ => {}
     }
 }
@@ -290,6 +296,17 @@ mod tests {
         assert_eq!(s.prefer_free_slots, Some(false));
         toggle(&mut s, "prefer_free_slots");
         assert_eq!(s.prefer_free_slots, Some(true));
+    }
+
+    #[test]
+    fn a_username_is_enough_to_switch_soulseek_on() {
+        let mut s = SoulseekSettings::default();
+        assert!(!enabled(&s));
+        set(&mut s, "username", "dj_me").unwrap();
+        assert!(enabled(&s));
+        toggle(&mut s, "enabled");
+        assert!(!enabled(&s), "switching it off still wins");
+        assert_eq!(SOULSEEK[0].key, "username", "the account comes first in the panel");
     }
 
     #[test]
