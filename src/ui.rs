@@ -3595,10 +3595,20 @@ impl<'a> UI<'a> {
         if !commands.is_empty() {
             let command_name = commands.remove(0);
             let command_args = commands;
+            // vim's :help opens the key list
+            if matches!(command_name.as_str(), "h" | "help") {
+                self.help_open = true;
+                self.change_list_mode(ListMode::Select);
+                self.select_list_region();
+                return Ok(false);
+            }
             match CommandName::from_str(&command_name) {
                 Ok(name) => return self.preform(CommandContext::new(name, command_args)).await,
                 Err(_) => {
-                    return Err(io::Error::other(format!("unknown command: {}", command_name)))
+                    return Err(io::Error::other(format!(
+                        "unknown command: {} (:help lists the keys and commands)",
+                        command_name
+                    )))
                 }
             }
         }
