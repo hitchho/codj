@@ -255,7 +255,7 @@ pub fn format_patch_list(files: &[(String, String)]) -> String {
 pub fn new_set_text(name: &str) -> String {
     format!(
         "# {name}: made in codj with :set new. F10 edits it here, :edit in $EDITOR.\n\
-         # :mix new writes a transition between the two decks, F9 records what you play.\n\
+         # :mix new writes a mix between the decks, F9 records what you play.\n\
          # The language: docs/set-language.md in codjd.\n\
          set \"{name}\"\n"
     )
