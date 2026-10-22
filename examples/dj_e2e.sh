@@ -365,7 +365,8 @@ sleep 2
 cmd() { keys ':'; $T send-keys -t $S -l -- "$1"; sleep 0.15; $T send-keys -t $S Enter; sleep 0.6; }
 keys M; sleep 0.5
 keys Enter Down Tab b Tab; sleep 1                 # A and B loaded
-cap vim_focus_a                                    # A has the focus
+cap vim_load_focus                                 # loading B focused it
+keys h; sleep 0.3; cap vim_focus_a                 # h focuses A
 keys Space; sleep 0.4                              # DjPlay 0
 keys l; sleep 0.3; cap vim_focus_b                 # the badge moves to B
 keys Space; sleep 0.4                              # DjPlay 1
@@ -443,7 +444,8 @@ chk ":fader a names the deck" '^DjSet fader 0 0.2000$'
 chkn "u took the fader back" '^DjSet fader 0 ' 2
 chk ":delm a clears the mark on the focus" '^DjHotcue 1 0 clear$'
 chkn ":delm! clears all eight" '^DjHotcue 1 . clear$' 8
-chkcap "A has the focus at the start" vim_focus_a 'DECK A  ▶ FOCUS'
+chkcap "loading B focused B" vim_load_focus 'DECK B  ▶ FOCUS'
+chkcap "h focused A" vim_focus_a 'DECK A  ▶ FOCUS'
 chkcap "the focus moved to B" vim_focus_b 'DECK B  ▶ FOCUS'
 chkno "and left A" vim_focus_b 'DECK A  ▶ FOCUS'
 chkcap "the count shows in the status line" vim_count ' 4 *$'
