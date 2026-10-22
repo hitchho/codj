@@ -330,6 +330,7 @@ pub struct UI<'a> {
     soulseek_filtering: bool,
     /// first `d` of a `dd` in the soulseek panel
     soulseek_pending_d: bool,
+    playlists_pending_g: bool,
     /// config file the settings panel writes to
     pub config_path: Option<std::path::PathBuf>,
     /// the settings panel, when open
@@ -374,6 +375,8 @@ pub struct UI<'a> {
     pub soulseek_open_on_results: bool,
     /// The command input was opened from the soulseek region, go back there afterwards
     pub command_from_soulseek: bool,
+    /// `:playlists` opened the panel: focus it once the command line closes
+    pub focus_playlists: bool,
     /// Whether showing soulseek results panel
     pub soulseek_visible: bool,
     /// the `?` key list of the normal view
@@ -1208,16 +1211,31 @@ impl Region {
     }
 
     async fn handle_playlist(ui: &mut UI<'_>, key: &KeyEvent) -> std::io::Result<bool> {
-        if key.kind == event::KeyEventKind::Press && key.modifiers == KeyModifiers::NONE {
+        if key.kind == event::KeyEventKind::Press
+            && matches!(key.modifiers, KeyModifiers::NONE | KeyModifiers::SHIFT)
+        {
+            // `gg` only counts when the two g's are back to back
+            let pending_g = std::mem::take(&mut ui.playlists_pending_g);
             match key.code {
-                KeyCode::Char(c) => match c {
-                    'z' => ui.select_list_region(),
-                    'j' => ui.select_next_playlist_name(),
-                    'k' => ui.select_previous_playlist_name(),
-                    _ => {}
-                },
-                KeyCode::Enter => {
+                KeyCode::Char('j') | KeyCode::Down => ui.select_next_playlist_name(),
+                KeyCode::Char('k') | KeyCode::Up => ui.select_previous_playlist_name(),
+                KeyCode::Char('g') if pending_g => ui.displayed_playlists.state.select_first(),
+                KeyCode::Char('g') => ui.playlists_pending_g = true,
+                KeyCode::Char('G') | KeyCode::End => ui.displayed_playlists.state.select_last(),
+                KeyCode::Home => ui.displayed_playlists.state.select_first(),
+                // leave the panel open, go back to the tracks
+                KeyCode::Char('z') | KeyCode::Tab | KeyCode::BackTab => ui.select_list_region(),
+                KeyCode::Char('q') | KeyCode::Esc => {
+                    ui.disable_playlists();
+                    ui.select_list_region();
+                }
+                KeyCode::Char(':') => {
+                    ui.change_list_mode(ListMode::Command);
+                    ui.select_region(Region::Command);
+                }
+                KeyCode::Enter | KeyCode::Char('l') => {
                     ui.switch_to_selected_playlist().await;
+                    ui.select_list_region();
                 }
                 _ => {}
             }
@@ -1385,6 +1403,7 @@ impl<'a> UI<'a> {
             soulseek_filter: Input::default(),
             soulseek_filtering: false,
             soulseek_pending_d: false,
+            playlists_pending_g: false,
             config_path: None,
             settings_view: None,
             queue: Vec::new(),
@@ -1407,6 +1426,7 @@ impl<'a> UI<'a> {
             soulseek_downloads_state: TableState::new(),
             soulseek_open_on_results: false,
             command_from_soulseek: false,
+            focus_playlists: false,
             soulseek_visible: false,
             help_open: false,
             soulseek_connected: false,
@@ -3674,7 +3694,7 @@ impl<'a> UI<'a> {
                 let widths = [Constraint::Fill(4)];
 
                 let style = match self.region {
-                    Region::Lyrics => {
+                    Region::Playlist => {
                         Style::new().fg(self.style.playlists_style.active_region_color)
                     }
                     _ => Style::new().fg(self.style.playlists_style.passive_region_color),
@@ -3683,6 +3703,7 @@ impl<'a> UI<'a> {
                 let block = match self.region {
                     Region::Playlist => Block::default()
                         .title("Playlists")
+                        .title_bottom(" j/k move · Enter open · Tab tracks · Esc close ")
                         .borders(Borders::ALL)
                         .fg(self.style.playlists_style.active_region_color),
                     _ => Block::default()
@@ -3716,8 +3737,9 @@ impl<'a> UI<'a> {
     async fn switch_to_selected_playlist(&mut self) {
         if let Some(index) = self.displayed_playlists.state.selected() {
             let titles = self.state.playlist_names();
-            let title = titles.get(index).unwrap();
-            let _ = self.state.proxy.use_playlist(title.clone()).await;
+            if let Some(title) = titles.get(index) {
+                let _ = self.state.proxy.use_playlist(title.clone()).await;
+            }
         }
     }
 
@@ -3761,6 +3783,12 @@ impl<'a> UI<'a> {
                 }
                 "playlists" | "pl" => {
                     self.toggle_playlists();
+                    if self.displayed_playlists.displayable {
+                        self.focus_playlists = true;
+                        if self.displayed_playlists.state.selected().is_none() {
+                            self.displayed_playlists.state.select(Some(0));
+                        }
+                    }
                     return Ok(false);
                 }
                 _ => {}
@@ -4128,7 +4156,9 @@ impl<'a> UI<'a> {
 
     /// Returns from the command input to the region it was opened from
     fn leave_command_region(&mut self) {
-        if self.command_from_soulseek && self.soulseek_visible {
+        if std::mem::take(&mut self.focus_playlists) && self.displayed_playlists.displayable {
+            self.select_playlist_region();
+        } else if self.command_from_soulseek && self.soulseek_visible {
             self.select_region(Region::Soulseek);
         } else {
             self.select_region(Region::List);

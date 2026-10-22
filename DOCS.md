@@ -43,9 +43,10 @@
 |List|After Search|`k`|Scroll up|
 |List|After Search|`Enter`|Play the music under selection|
 |List|After Search|`p`|Toggle `play` for the currently playing song|
-|Playlist|Normal|`j`|Move down|
-|Playlist|Normal|`k`|Move up|
-|Playlist|Normal|`Enter`|Select current playlist|
+|Playlist|Normal|`j` `k` `gg` `G`|Move (`:pl` opens the panel and puts the cursor here)|
+|Playlist|Normal|`Enter` or `l`|Open the playlist and go back to its tracks|
+|Playlist|Normal|`Tab` or `z`|Back to the tracks, panel stays open|
+|Playlist|Normal|`Esc` or `q`|Close the panel|
 |Lyrics|Normal|`j`|Move down|
 |Lyrics|Normal|`k`|Move up|
 |Lyrics|Normal|`Enter`|Play music from line if possible|
