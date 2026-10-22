@@ -908,11 +908,15 @@ fn draw_deck(
     lines.push(Line::from(Span::styled(trunc(&who, w), Style::default().add_modifier(Modifier::BOLD))));
     // tempo, key, rate
     let rate_pct = (d.rate - 1.0) * 100.0;
+    // a narrow deck (80 columns, a phone) keeps every field by dropping decimals and labels
+    let compact = w < 50;
     let mut tempo = Vec::new();
     if d.has_grid() {
-        tempo.push(Span::styled(format!("{:6.2}", d.bpm), Style::default().add_modifier(Modifier::BOLD)));
+        let bpm = if compact { format!("{:.1}", d.bpm) } else { format!("{:6.2}", d.bpm) };
+        tempo.push(Span::styled(bpm, Style::default().add_modifier(Modifier::BOLD)));
         tempo.push(Span::raw(" BPM "));
-        tempo.push(Span::styled(format!("(trk {:.2})", d.track_bpm), dim()));
+        let trk = if compact { format!("({:.0})", d.track_bpm) } else { format!("(trk {:.2})", d.track_bpm) };
+        tempo.push(Span::styled(trk, dim()));
         if doubt {
             // the detectors disagree: maybe half, double or 1.5x; fix with :grid
             tempo.push(Span::styled("?", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
@@ -920,7 +924,7 @@ fn draw_deck(
     } else {
         tempo.push(Span::styled("no beat grid", Style::default().fg(Color::Yellow)));
     }
-    tempo.push(Span::raw("  key "));
+    tempo.push(Span::raw(if compact { " " } else { "  key " }));
     tempo.push(Span::styled(
         if d.key.is_empty() { "--".to_string() } else { d.key.clone() },
         Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
@@ -928,7 +932,7 @@ fn draw_deck(
     tempo.push(Span::raw("  "));
     let rate_col = text_width(&tempo) - 2;
     tempo.push(Span::styled(
-        format!("{rate_pct:+.2}%"),
+        if compact { format!("{rate_pct:+.1}%") } else { format!("{rate_pct:+.2}%") },
         if rate_pct.abs() < 0.005 { dim() } else { Style::default().fg(Color::Yellow) },
     ));
     let mut found: Vec<(Target, usize, u16, u16, u16)> =
@@ -1334,12 +1338,17 @@ fn draw_library(buf: &mut Buffer, area: Rect, v: &View) {
     let title = if searching {
         format!(" Library {}/{} — /{}█ (Enter done · Esc clear) ", v.lib.len(), v.lib_total, v.input)
     } else if browsing {
-        format!(
+        let long = format!(
             " LIBRARY {}/{}{} · j/k move · / search · a or b load onto deck · Enter free deck · Tab/Esc decks ",
             v.lib.len(),
             v.lib_total,
             filter
-        )
+        );
+        if long.chars().count() + 2 <= area.width as usize {
+            long
+        } else {
+            format!(" LIBRARY {}/{}{} · j/k · / search · a b load · Enter free deck · Esc ", v.lib.len(), v.lib_total, filter)
+        }
     } else {
         format!(" Library {}{} · Tab to browse ", v.lib_total, filter)
     };
@@ -1591,7 +1600,8 @@ mod tests {
         let text = render(80, 24, |_| {});
         println!("{text}");
         assert!(text.contains("Aftertekno"));
-        assert!(text.contains("129.55"));
+        // a narrow deck keeps tempo, track tempo, key and pitch with fewer decimals
+        assert!(text.contains("BPM (128) 8A") && text.contains("+1.2%"), "{text}");
     }
 
     #[test]

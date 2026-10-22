@@ -130,7 +130,15 @@ pub fn describe_error(what: &str, e: &zbus::Error) -> String {
     } else if text.contains("ServiceUnknown") || text.contains("NameHasNoOwner") {
         "codjd is not running".to_string()
     } else {
-        format!("{what}: {text}")
+        // the daemon's refusals a newcomer meets first, with the keys that get past them
+        let next = if text.contains("other deck is not playing") {
+            " · sync follows a playing deck: focus the other one (h/l) and Space it first"
+        } else if text.contains("other deck has nothing loaded") {
+            " · Tab, j/k to a track, a or b loads it"
+        } else {
+            ""
+        };
+        format!("{what}: {text}{next}")
     }
 }
 
@@ -2573,6 +2581,16 @@ mod tests {
         type_str(&mut p, "load a");
         p.handle_typing(&key(KeyCode::Esc));
         assert!(!p.typing());
+    }
+
+    #[test]
+    fn refusals_say_what_to_press() {
+        let e = zbus::Error::Failure("other deck is not playing".into());
+        assert!(describe_error("DjSync", &e).contains("Space it first"), "{}", describe_error("DjSync", &e));
+        let e = zbus::Error::Failure("other deck has nothing loaded".into());
+        assert!(describe_error("DjSync", &e).contains("a or b loads it"));
+        let e = zbus::Error::Failure("bad amount".into());
+        assert_eq!(describe_error("DjNudge", &e), format!("DjNudge: {e}"));
     }
 
     #[test]
