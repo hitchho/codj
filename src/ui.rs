@@ -4800,7 +4800,7 @@ fn sort_label(sort: &Sort) -> &'static str {
 
 /// `:` commands, for completion (the main name of each; aliases still work when typed)
 const COMMANDS: &[&str] = &[
-    "dj", "slsk", "set", "dupes", "help", "q", "reload", "pause", "resume", "toggle_mute",
+    "dj", "tutor", "patch", "slsk", "set", "dupes", "help", "q", "reload", "pause", "resume", "toggle_mute",
     "create_playlist", "add_to_playlist", "rename_playlist", "remove_playlist", "slsk_connect",
     "slsk_disconnect",
 ];
@@ -4817,6 +4817,7 @@ mod completion_tests {
     #[test]
     fn completes_command_names() {
         assert_eq!(complete_command("d"), ["dj", "dupes"]);
+        assert_eq!(complete_command("t"), ["tutor", "toggle_mute"]);
         assert_eq!(complete_command("sl"), ["slsk", "slsk_connect", "slsk_disconnect"]);
         assert!(complete_command("zz").is_empty());
         assert_eq!(complete_command("").len(), COMMANDS.len());
