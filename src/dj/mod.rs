@@ -270,6 +270,11 @@ async fn run_patch_call(proxy: &ServerProxy<'_>, call: &PatchCall) -> Result<Str
             // an empty base hash creates the file; an existing patch of that name is refused
             let r = proxy.patch_write(name, &text, "", editor::AUTHOR).await.map_err(err)?;
             if !is_ok(&r) {
+                // the daemon's reply speaks of its API (PatchSource, hashes); say what to type
+                if r.contains("exists") {
+                    let slot = slot.map_or("<slot>".to_string(), |s| (s + 1).to_string());
+                    return Err(format!("{name} exists: :patch load {slot} {name} plays it, or pick another name"));
+                }
                 return Err(format!("PatchWrite: {r}"));
             }
             return match slot {

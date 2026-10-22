@@ -748,6 +748,25 @@ fn draw_header(buf: &mut Buffer, area: Rect, v: &View) {
     let live = v.link_ok;
     let left = match v.panel {
         // the performance keys are off: say so, loudly
+        // a narrow header keeps the badge and the way back
+        Some(p) if area.width < 110 => Line::from(vec![
+            Span::styled(
+                match p {
+                    Panel::Editor => " EDIT ",
+                    Panel::Prompt => " AI ",
+                    Panel::Patch => " PATCH ",
+                },
+                Style::default().fg(Color::Black).bg(if p == Panel::Patch { Color::Cyan } else { Color::Magenta }).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                match p {
+                    Panel::Editor => "  deck keys are OFF · Esc, :q back",
+                    Panel::Prompt => "  deck keys are OFF · Esc hides · Ctrl-C cancels",
+                    Panel::Patch => "  deck keys are OFF · f ] [ work · F12/Esc back",
+                },
+                Style::default().fg(if p == Panel::Patch { Color::Cyan } else { Color::Magenta }).add_modifier(Modifier::BOLD),
+            ),
+        ]),
         Some(p) => Line::from(vec![
             Span::styled(
                 match p {

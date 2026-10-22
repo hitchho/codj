@@ -103,7 +103,9 @@ fn slot_line(slot: usize, s: &PatchSlot, selected: bool, mix: [f64; 3], w: usize
     let mark = if selected { "▸" } else { " " };
     let head = group(format!("{mark}P{} ", slot + 1), Style::default().add_modifier(Modifier::BOLD).fg(if selected { Color::Yellow } else { Color::White }));
     if !s.loaded {
-        return vec![head, group("— empty", dim()), group(format!("   :patch load {} <name>", slot + 1), dim())];
+        // the first empty slot is where `:patch new` goes
+        let how = if w >= 60 { format!("   :patch new <name> drums|acid|pad · :patch load {} <name>", slot + 1) } else { "   :patch new <name> drums".to_string() };
+        return vec![head, group("— empty", dim()), group(how, dim())];
     }
     let name_w = if w >= 100 { 14 } else { 10 };
     let mut g = vec![head, group(trunc(&s.name, name_w), Style::default().add_modifier(Modifier::BOLD))];
@@ -183,11 +185,22 @@ pub fn draw_patch(buf: &mut Buffer, area: Rect, pv: &PatchView, spots: &mut Vec<
             buf[(x, y)].reset();
         }
     }
-    let footer = if pv.grid.is_some() {
-        " hjkl move · x toggle · 1-9 velocity · A-H pattern · ⏎ queue · p live/cue · u undo · :w save · Tab seq · ? keys "
+    // the longest key line that fits the bottom border
+    let footers: &[&str] = if pv.grid.is_some() {
+        &[
+            " hjkl move · x toggle · 1-9 velocity · A-H pattern · ⏎ queue · p live/cue · u undo · :w save · Tab seq · ? keys ",
+            " hjkl · x toggle · 1-9 vel · A-H pattern · ⏎ queue · p live · u undo · ? keys ",
+            " hjkl · x · ⏎ queue · p live · ? keys ",
+        ]
     } else {
-        " 1-4 open the grid · p live/cue · u ^r undo · f hints then ] [ edit · :patch new|load|edit · ? keys · Esc closes "
+        &[
+            " j/k ⏎ or 1-4 open the grid · p live/cue · u ^r undo · f hints then ] [ edit · :patch new|load|edit · ? keys · Esc closes ",
+            " j/k ⏎ grid · p live · u undo · f hints · :patch new · ? keys · Esc closes ",
+            " j/k ⏎ grid · p live · ? keys · Esc ",
+        ]
     };
+    let room = (area.width as usize).saturating_sub(2);
+    let footer = footers.iter().find(|f| f.chars().count() <= room).unwrap_or(footers.last().unwrap());
     let sel = pv.slots.get(pv.sel).filter(|s| s.loaded);
     let title = match (&pv.grid, sel) {
         (Some(g), Some(s)) => format!(" PATCH · P{} {} · {} ({}/{}) ", pv.sel + 1, s.name, if g.seq.name.is_empty() { "sequencer" } else { &g.seq.name }, g.seq_index + 1, g.seq_count),

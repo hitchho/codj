@@ -391,7 +391,7 @@ impl PatchPane {
     /// Opens the grid of sequencer `seq` of the selected slot, on the pattern that is playing
     fn open_grid(&mut self, slots: &[PatchSlot], seq: usize) -> Option<String> {
         let slot = slots.get(self.sel).filter(|s| s.loaded);
-        let Some(slot) = slot else { return Some(format!("P{} is empty: :patch load {} <name>", self.sel + 1, self.sel + 1)) };
+        let Some(slot) = slot else { return Some(format!("P{} is empty: :patch new <name> drums, or :patch load {} <name>", self.sel + 1, self.sel + 1)) };
         match &self.models[self.sel] {
             ModelState::Pending(_) | ModelState::None => return Some("reading the patch...".into()),
             ModelState::Failed(_, e) => return Some(format!("cannot read the patch: {e}")),
