@@ -233,7 +233,7 @@ DJ mode is vim for decks. **One deck has the focus** (A at the start) and every 
 |`Up` / `Down`, `PageUp` / `PageDown`|Move in the library without leaving the decks|
 |`Enter`|Load the highlighted track onto the deck that is not playing (A when both are idle)|
 |`:`|DJ command line, see below|
-|`?`|[The key map on the screen](#learning), every key explained (any key closes it)|
+|`?`|[The key map on the screen](#learning), every key explained (`q` or `Esc` closes it; on a small screen `j` `k` `Ctrl-d` `Ctrl-u` `g` `G` scroll it)|
 |`F1` / `F2`|Headphone cue on deck A / B (`:hp`)|
 |`F5`|Quantize on / off (mixer-wide, `:quantize`)|
 |`F6` / `F7` / `F8`|[Set](#sets-in-dj-mode): arm the next mix / auto mode on-off / disarm (`:arm next`, `:auto`, `:disarm`)|
@@ -414,7 +414,7 @@ The output (stdout and stderr) streams into the pane; the UI and the audio-facin
 
 DJ mode explains itself, for someone who has never DJ'd. All the wording lives in one module (`src/dj/glossary.rs`), so the key map, the status line, `:help` and the tutor say the same thing.
 
-**`?` key map.** Draws the keys on the real screen, which-key style: one panel over the decks lists the focused deck's keys (in two columns on a wide screen; its title names the focused deck), the area over the mixer and the library lists the mixer's keys (the hints and the `:` commands) and the global ones, every entry with a line of explanation (`sync: match B's tempo and beats to A`, `cue: a saved spot; hold to hear it in headphones`, `low: the bass — keep only one bassline at a time`, `crossfader: which deck the room hears`). Any key closes it and does nothing else; the DJ keys are not played while it is up. A short screen shows what fits and says `… N more: :help keys`.
+**`?` key map.** Draws the keys on the real screen, which-key style: one panel over the decks lists the focused deck's keys (in two columns on a wide screen; its title names the focused deck), the area over the mixer and the library lists the mixer's keys (the hints and the `:` commands) and the global ones, every entry with a line of explanation (`sync: match B's tempo and beats to A`, `cue: a saved spot; hold to hear it in headphones`, `low: the bass — keep only one bassline at a time`, `crossfader: which deck the room hears`). `q`, `Esc` or any key other than the scroll keys closes it and does nothing else; the DJ keys are not played while it is up. When the panels do not fit (a small terminal or a phone), every key goes into one list with a heading per section, which `j` `k` `Ctrl-d` `Ctrl-u` `g` `G` scroll like vim's help; its title says which lines show and `j more` while there are more.
 
 **Hints explain too.** While the `f` labels are up the status line says what the typed letters lead to (`mid: vocals, synths, snares; the body of a track  (TA A mid · TS B mid)`); once a control is selected its one-liner sits next to the chip (`low: the bass — keep only one bassline at a time ◆ B low -0.30`).
 

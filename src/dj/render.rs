@@ -94,6 +94,8 @@ pub struct View<'a> {
 pub struct LearnView<'a> {
     /// the `?` key map is up
     pub help: bool,
+    /// first line of the key map when it is scrolled (a small screen)
+    pub help_scroll: u16,
     /// a text popup (`:help <term>`, `:mix new`): title and paragraphs, wrapped when drawn
     pub popup: Option<(&'a str, &'a [String])>,
     /// library tracks to mark: (path, deck letter) of the tutor's proposal
@@ -316,7 +318,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, v: &View) -> Vec<Spot> {
     draw_hints(buf, &spots, &v.hints);
     if v.learn.help {
         let lower = Rect::new(area.x, mixer.y, area.width, lib.bottom().saturating_sub(mixer.y));
-        super::help::draw(buf, decks, lower, v.focus_deck);
+        super::help::draw(buf, decks, lower, v.focus_deck, v.learn.help_scroll);
     }
     spots
 }
@@ -799,7 +801,7 @@ fn draw_status(buf: &mut Buffer, area: Rect, v: &View) {
     if v.learn.help {
         let badge = Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD);
         buf.set_stringn(area.x, area.y, " ? KEYS ", text_w, badge);
-        buf.set_stringn(area.x + 8, area.y, " every key explained · any key closes · :help <term> for the words", text_w.saturating_sub(8), Style::default().fg(Color::Cyan));
+        buf.set_stringn(area.x + 8, area.y, " every key explained · q closes · :help <term> for the words", text_w.saturating_sub(8), Style::default().fg(Color::Cyan));
     } else if v.hints.active {
         let badge = Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD);
         buf.set_stringn(area.x, area.y, " HINTS ", text_w, badge);
@@ -1868,11 +1870,17 @@ mod tests {
         for (w, h) in [(100, 30), (80, 24), (70, 20), (60, 14)] {
             let text = render(w, h, help_view);
             assert_eq!(text.lines().count(), h as usize);
-            assert!(text.contains("FOCUSED DECK A keys") && text.contains("? KEYS"), "{w}x{h}\n{text}");
+            assert!(text.contains("FOCUSED DECK A") && text.contains("? KEYS"), "{w}x{h}\n{text}");
         }
-        // a short deck panel says what it left out
+        // what does not fit becomes one list that j/k scroll, like vim's help
         let text = render(80, 24, help_view);
-        assert!(text.contains("more: :help keys"), "{text}");
+        assert!(text.contains("j k scroll") && text.contains("j more"), "{text}");
+        assert!(!text.contains("this key map"), "the last key is below the screen\n{text}");
+        let text = render(80, 24, |v| {
+            help_view(v);
+            v.learn.help_scroll = 99;
+        });
+        assert!(text.contains("this key map") && !text.contains("j more"), "scrolled to the end\n{text}");
         // the key map does not change the control spots
         let (_, plain) = render_full(120, 35, |_| {});
         let (_, with) = render_full(120, 35, help_view);

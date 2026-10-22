@@ -1540,6 +1540,8 @@ pub struct DjScreen {
     knob: Option<crate::knob::Knob>,
     /// the `?` key map is up
     help: bool,
+    /// how far the `?` key map is scrolled
+    help_scroll: u16,
     /// the guided first mix, while open or paused
     tutor: Option<tutor::Tutor>,
     /// the tutor has moved the library highlight to its pair's first / second track
@@ -1570,6 +1572,7 @@ impl DjScreen {
             agent: Default::default(),
             knob: None,
             help: false,
+            help_scroll: 0,
             tutor: None,
             tutor_sel: (false, false),
             tutor_path: tutor::state_path(),
@@ -2047,11 +2050,31 @@ impl DjScreen {
             }
             editor::KeyFocus::Deck => {}
         }
-        // the key map and popups close on any key, which does nothing else
+        // the key map scrolls with vim's keys when it does not fit; other keys close it
+        if self.help && key.kind != KeyEventKind::Release {
+            let max = help::lines(self.keys.focus()) as u16;
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+            let s = &mut self.help_scroll;
+            match key.code {
+                KeyCode::Char('j') | KeyCode::Down => *s = (*s + 1).min(max),
+                KeyCode::Char('k') | KeyCode::Up => *s = s.saturating_sub(1),
+                KeyCode::Char('d') if ctrl => *s = (*s + 10).min(max),
+                KeyCode::Char('u') if ctrl => *s = s.saturating_sub(10),
+                KeyCode::PageDown => *s = (*s + 10).min(max),
+                KeyCode::PageUp => *s = s.saturating_sub(10),
+                KeyCode::Char('g') | KeyCode::Home => *s = 0,
+                KeyCode::Char('G') | KeyCode::End => *s = max,
+                _ => {
+                    self.help = false;
+                    self.help_scroll = 0;
+                }
+            }
+            return Outcome::Stay;
+        }
+        // popups close on any key, which does nothing else
         if key.kind != KeyEventKind::Release {
             let popup = self.session.shared.lock().unwrap().popup.take();
-            if self.help || popup.is_some() {
-                self.help = false;
+            if popup.is_some() {
                 return Outcome::Stay;
             }
         }
@@ -2289,6 +2312,10 @@ impl DjScreen {
 
     pub fn render(&mut self, frame: &mut Frame) {
         let area: Rect = frame.area();
+        // the scrolled key map shows the screen minus header, status and its border: past the
+        // last full screen, j would scroll nothing and k would seem stuck
+        let room = area.height.saturating_sub(4);
+        self.help_scroll = self.help_scroll.min((help::lines(self.keys.focus()) as u16).saturating_sub(room));
         let s = self.session.shared.lock().unwrap();
         let wave_view = |slot: &'_ WaveSlot| match slot {
             WaveSlot::Empty => (None, WaveKind::None),
@@ -2425,6 +2452,7 @@ impl DjScreen {
             patch: Some(&patch_view),
             learn: render::LearnView {
                 help: self.help,
+                help_scroll: self.help_scroll,
                 popup: s.popup.as_ref().map(|(t, l)| (t.as_str(), l.as_slice())),
                 marks: &marks,
                 explain: explain.as_deref(),
