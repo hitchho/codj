@@ -208,6 +208,9 @@ pub fn check_control(control: &str, value: f64) -> Result<(), String> {
     if !value.is_finite() {
         return Err(format!("value must be a finite number, got {value}"));
     }
+    if control == "gain" && value < 0.0 {
+        return Err(format!("gain is a multiplier, not dB (1 = as analyzed, 0.5 = -6 dB); {value} would silence the deck"));
+    }
     Ok(())
 }
 
@@ -938,7 +941,7 @@ impl Codj {
         reply_ok(ask!(self, p => p.dj_seek(deck, s)))
     }
 
-    #[tool(description = "Set a mixer control: rate, gain, fader, cue (per deck), crossfader, master, cue_mix (deck ignored). Deck 0 controls, master and crossfader are LIVE; deck 1 and cue_mix are always allowed.")]
+    #[tool(description = "Set a mixer control: rate, gain, fader, cue (per deck), crossfader, master, cue_mix (deck ignored). gain is a multiplier on top of the track's auto-gain, not dB: 1 = as analyzed, 0.5 = -6 dB, 2 = +6 dB. Deck 0 controls, master and crossfader are LIVE; deck 1 and cue_mix are always allowed.")]
     async fn deck_set(&self, Parameters(a): Parameters<DeckSetArgs>) -> Result<String, String> {
         let deck = check_deck(a.deck)?;
         check_control(&a.control, a.value)?;
@@ -1376,6 +1379,8 @@ mod tests {
         assert!(check_control("rate", 1.0).is_ok() && check_control("master", 0.0).is_ok());
         assert!(check_control("bogus", 1.0).is_err());
         assert!(check_control("gain", f64::NAN).is_err());
+        assert!(check_control("gain", -3.5).unwrap_err().contains("not dB"));
+        assert!(check_control("gain", 0.7).is_ok());
         assert_eq!(clamp_limit(None), 50);
         assert_eq!(clamp_limit(Some(0)), 1);
         assert_eq!(clamp_limit(Some(100000)), MAX_LIMIT);

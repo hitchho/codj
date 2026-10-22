@@ -142,6 +142,11 @@ impl Slot {
     }
 }
 
+/// dB as the multiplier `DjSet gain` takes: 0 dB = 1, -6 dB = 0.5
+pub fn db_to_gain(db: f64) -> f64 {
+    10f64.powf(db / 20.0)
+}
+
 /// Ramp easing: starts slow, full speed after about 0.85 s of holding
 fn ease(ramp_s: f64) -> f64 {
     (0.15 + ramp_s).min(1.0)
@@ -1492,7 +1497,14 @@ impl DjKeys {
                         continue;
                     }
                     let (control, deck) = s.slot.control();
-                    calls.push(DjCall::Set { control, deck, value: s.value });
+                    // the screen's gain is the deck's level in dB; codjd multiplies its `gain` (1 =
+                    // as is) with the track's auto-gain trim, which `gain_db` reports: send the step
+                    // from that trim as a multiplier
+                    let value = match s.slot {
+                        Slot::Gain(d) => db_to_gain(s.value - self.decks.get(d as usize).map_or(0.0, |i| i.gain_db)),
+                        _ => s.value,
+                    };
+                    calls.push(DjCall::Set { control, deck, value });
                     sent = true;
                 }
             }
@@ -1745,7 +1757,8 @@ mod tests {
             ("a", "filter", 0, 0.05, 0.0),
             ("w", "crossfader", 0, -0.05, 0.0),
             ("xa", "rate", 0, 1.001, 1.0),
-            ("zs", "gain", 1, 0.5, 0.0),
+            // the gain is shown in dB and sent as a multiplier: +0.5 dB, and 1 (the trim as is)
+            ("zs", "gain", 1, db_to_gain(0.5), 1.0),
             ("ba", "master", 0, 0.05, 1.0),
             ("bs", "cue_mix", 0, 0.05, 0.0),
             ("bd", "sync_range", 0, 0.17, 0.16),
@@ -1800,15 +1813,19 @@ mod tests {
         let mut t = select(&mut k, "za", t0);
         assert_eq!(k.gain_shown(0, t), -2.5);
         tap_key(&mut k, ']', t);
-        assert_eq!(sets(&k.tick(t)), vec![("gain", 0, -2.0)]);
+        // shown in dB (-2.0), sent as codjd's multiplier on top of the -2.5 dB trim: +0.5 dB.
+        // Never the dB value itself: codjd takes a negative gain as silence
+        let gain = |db: f64| ("gain", 0, db_to_gain(db));
+        assert_eq!(sets(&k.tick(t)), vec![gain(0.5)]);
         // the daemon keeps reporting the auto-gain, the shown trim is the one sent
         t += ms(2000);
         k.set_snapshot(&[a.clone(), deck(false)], &MixerInfo::default());
         assert_eq!(k.gain_shown(0, t), -2.0);
         tap_key(&mut k, ']', t);
-        assert_eq!(sets(&k.tick(t)), vec![("gain", 0, -1.5)]);
+        assert_eq!(sets(&k.tick(t)), vec![gain(1.0)]);
+        // back to the default: the trim as it is, a multiplier of 1
         tap_key(&mut k, '\\', t + ms(100));
-        assert_eq!(sets(&k.tick(t + ms(100))), vec![("gain", 0, -2.5)]);
+        assert_eq!(sets(&k.tick(t + ms(100))), vec![("gain", 0, 1.0)]);
         // another track on the deck: its own auto-gain
         let mut other = a.clone();
         other.path = "/m/b.flac".into();
