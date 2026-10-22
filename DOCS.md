@@ -119,7 +119,7 @@ Soulseek integration allows searching and downloading music from the soulseek p2
 
 ### Library (vim keys)
 
-`Tab` focuses the library; the deck keys are off while it has focus (the box turns yellow and says `LIBRARY`).
+`Tab` focuses the library; the deck keys are off while it has focus (the box turns yellow and says `LIBRARY`). `/` in the decks goes straight into its search.
 
 |Key|Does|
 |---|----|
@@ -128,7 +128,7 @@ Soulseek integration allows searching and downloading music from the soulseek p2
 |`a` / `b`|Load the highlighted track onto deck A / B|
 |`Enter`|Load it onto the deck that is not playing|
 |`:`|Command line|
-|`Tab` / `Esc`|Back to the deck keys|
+|`Tab` / `Esc`|Back to the deck keys (`Esc` does not leave DJ mode; `:q` does)|
 
 ## Registration
 
@@ -184,13 +184,13 @@ When a download is queued, up to 3 other users who had the same file in the sear
 Two decks, a mixer and a library on one screen, played from the keyboard. Open it with `:dj` or `Shift + m` in the list (`Shift + d` already downloads lyrics). It needs a codjd with the deck API (`docs/dj-api.md`); against an older codjd the screen opens and says so in the status line.
 
 ```
- DJ   Esc back · Tab search · < > load A/B · ...                         ● live
-┌ DECK A  ▶ playing ────────────────┐┌ DECK B  ⏸ paused ─────────────────┐
+ DJ   h l focus deck · Tab library · : command (:q leaves) · ? keys     ● live
+┏ DECK A  ▶ FOCUS  ▶ playing ━━━━━━━┓┌ DECK B  ⏸ paused ─────────────────┐
 │ title — artist                    ││                                   │
 │ 129.55 BPM (trk 127.98) key 8A +1.23% SYNC                            │
 │ 01:23.4 -5:53  LOOP 4  HP ●       ││ time, loop, headphone-cue         │
 │ 1 ███ 2 ██░ 3 ░░░ 4 ░░░          ││ phase meter: the 4 beats, current lit
-│  1 0:12  2 --  3 1:35  4 --  more ○○○○   hot cues                     │
+│  a 0:12  b --  c 1:35  d --  e○ f○ g○ h○   marks (hot cues)          │
 │ ▾▆▆█▆▆█▆▆ (overview + playhead)   ││                                   │
 │ ╎█ ╎██┃██╎██│██ (zoomed strip)    ││ 8 s around the playhead, beat grid│
 ├ Mixer  quantize ON · internal · xruns 0 · phase Δ +0.03 ────────────────┤
@@ -204,48 +204,66 @@ The waveform is fetched once per loaded track (`GetWaveform`) and drawn with blo
 
 ## Keys
 
-Letters are the same in every terminal; `Alt` combinations are the mixer. Digits for hot cues and `Shift + digit` use the US layout.
-
-|Control|Deck A (left hand)|Deck B (right hand)|
-|-------|------------------|-------------------|
-|Cue (hold = preview)|`z`|`/`|
-|Play / pause|`x`|`.`|
-|Sync to the other deck|`c`|`,`|
-|Loop on / off (4 beats unless you [changed the loop length](#control-hints-and-editing))|`v`|`m`|
-|Pitch − / +|`a` / `s`|`k` / `l`|
-|Nudge − / + (hold)|`q` / `w`|`o` / `p`|
-|Hot cue 1–4 (empty: set, set: jump)|`1` `2` `3` `4`|`7` `8` `9` `0`|
-|Clear hot cue|`Shift + 1`…`4`|`Shift + 7`…`0`|
-|Beat jump back / forward (4 beats unless you changed the jump size)|`e` / `r`|`u` / `i`|
-|EQ low + / −|`Alt + q` / `Alt + a`|`Alt + u` / `Alt + j`|
-|EQ mid + / −|`Alt + w` / `Alt + s`|`Alt + i` / `Alt + k`|
-|EQ high + / −|`Alt + e` / `Alt + d`|`Alt + o` / `Alt + l`|
-|Filter + / − (+ high-pass, − low-pass)|`Alt + r` / `Alt + f`|`Alt + p` / `Alt + ;`|
-|Channel fader up / down|`g` / `b`|`h` / `n`|
+DJ mode is vim for decks. **One deck has the focus** (A at the start) and every deck key acts on it; `h` focuses deck A, `l` deck B (the arrow keys do too). The focused deck has a thick, bright border and a `▶ FOCUS` badge. Motions take a **count** typed in front, like `4w` or `2}`; the half-typed count or command shows at the right end of the status line (like vim's showcmd: `4`, `42m`), `Esc` drops it. Letters are the same in every terminal. **`Esc` never leaves DJ mode, `:q` does.**
 
 |Key|Does|
 |---|----|
-|`t` / `y`|Crossfader toward A / toward B|
+|`h` / `l`, `Left` / `Right`|Focus deck A / B|
+|`Space`|Play / pause the focused deck|
+|`c`|Cue (CDJ cue): hold to preview where the terminal reports key releases, else press to start and press again to end|
+|`s`|Sync the focused deck to the other|
+|`w` / `b`|Jump 1 beat forward / back, `4w` 4 beats, `12b` 12 beats back (beat phase is kept)|
+|`W` / `B`|Jump a bar (4 beats) forward / back, `2W` two bars. A bar is taken as 4 beats, codjd reports no time signature|
+|`}` / `{`|Jump a phrase (16 bars, 64 beats) forward / back, `2}` two phrases|
+|`0` or `gg`|Go to the start of the track (the first downbeat when the grid is known, else 0 s). A `0` after other digits is part of a count (`10w`)|
+|`G` or `$`|Go to the outro: 32 bars before the end (60 s before the end without a grid). Seeking does not keep the beat phase, jumps do|
+|`m{a-h}`|Mark: save a hot cue at the playhead (eight slots, `a` to `h`; beat-snapped with quantize)|
+|`'{a-h}` or `` `{a-h} ``|Jump to a mark (quantized while playing). An empty mark says so and does nothing|
+|`v`|Loop: starts a loop of the loop length (4 beats, or what `f` + the loop label set) on the focused deck; `v` again leaves it. `8v` loops 8 beats; while looping a count resizes the loop (`16v`) and plain `v` leaves it. The status line shows `-- LOOP 8 --` while the focused deck loops|
+|`+` / `-`|Pitch of the focused deck up / down 0.1 % per tap (`4+` is 0.4 %); holding ramps slowly (1 to 4 %/s). `+` is `Shift + =`|
+|`=`|Pitch back to 0 %|
+|`[` / `]`|Nudge the focused deck's tempo down / up (hold = continuous bend where releases are reported, tap = a short 0.3 s bend). **With a control picked through the hints they step that control instead**, see below|
+|`.`|Repeat the last action on the focused deck (a motion with its count, a mark, a loop, sync, play, a pitch step). A count replaces the old one: `2.`|
+|`u` / `Ctrl-r`|Undo / redo the last change of a control made by hand (keys, hints, wheel, knob, `:` commands). A held ramp or edits within 0.6 s of each other are one step; 50 steps are kept|
+|`f`|[Control hints](#control-hints-and-editing): label every control, type a label to pick it|
+|`\`|Reset the picked control|
+|`;`|Toggle between the last two picked controls|
+|`Tab`|Browse the [library](#library-vim-keys) with vim keys (`j` / `k`, `a` / `b` load); `Tab` or `Esc` come back. While the [tutor](#learning) is open `Tab` skips its step and `Shift + Tab` browses|
+|`/`|Straight into the library search (same regex and `artist:`/`title:`/`genre:` filters as the list); `Enter` keeps the filter and browses, `Esc` clears it|
+|`Up` / `Down`, `PageUp` / `PageDown`|Move in the library without leaving the decks|
+|`Enter`|Load the highlighted track onto the deck that is not playing (A when both are idle)|
+|`:`|DJ command line, see below|
 |`?`|[The key map on the screen](#learning), every key explained (any key closes it)|
-|`f`|[Control hints](#control-hints-and-editing): label every control, type a label to select it|
-|`]` / `[` / `\`|Step the selected control up / down / reset it|
-|`;`|Toggle between the last two selected controls|
-|Mouse wheel|Edits the selected control (up = +); with nothing selected it scrolls the library. Clicks do nothing in DJ mode|
-|`F1` / `F2`|Headphone cue on deck A / B|
-|`F5`|Quantize on / off (mixer-wide)|
-|`F6` / `F7` / `F8`|[Set](#sets-in-dj-mode): arm the next mix / auto mode on-off / disarm|
+|`F1` / `F2`|Headphone cue on deck A / B (`:hp`)|
+|`F5`|Quantize on / off (mixer-wide, `:quantize`)|
+|`F6` / `F7` / `F8`|[Set](#sets-in-dj-mode): arm the next mix / auto mode on-off / disarm (`:arm next`, `:auto`, `:disarm`)|
 |`F9`|[Record](#capture-and-recording) a mix into the active set on / off (same as `:rec`)|
-|`F10` / `F11`|[Editor pane / AI prompt box](#editor-pane-and-ai-prompt-box)|
+|`F10` / `F11`|[Editor pane / AI prompt box](#editor-pane-and-ai-prompt-box) (`:e`, `:ai`)|
 |`F12`|[Patch pane](#patch-decks): synths and drum machines in four slots, with a sequencer grid (same as `:patch`)|
-|`Up` / `Down`, `PageUp` / `PageDown`|Move in the library|
-|`<` or `Shift + a`|Load the highlighted track onto deck A (`Shift + ,`)|
-|`>` or `Shift + b`|Load it onto deck B (`Shift + .`)|
-|`Enter`|Load it onto the deck that is not playing (A when both are idle)|
-|`Tab`|Type in the library search (same regex and `artist:`/`title:`/`genre:` filters as the list); `Tab` or `Enter` hands the keys back to the decks, `Esc` clears the search. While the [tutor](#learning) is open `Tab` skips its step and `Shift + Tab` searches|
-|`Shift + ;` (`:`)|DJ command line: `:q` back to the normal view, `:load a`, `:load b`, `:grid a x2` / `/2` / `x1.5` / `/1.5` / `reset` to correct a deck's detected tempo (saved per track). A yellow `?` after the BPM means the tempo detectors disagree, so the grid is likely half, double or 1.5× off. Sync refuses changes over ±16 % and says which tempos clash. Also `:help [term]`, `:tutor [reset]` and `:mix new [recipe] [bars]`, see [Learning](#learning), and `:patch ...`, see [Patch decks](#patch-decks).|
-|`Esc`|Closes the set error overlay if open; cancels the hints if they are up; clears the selected control; else back to the normal view|
+|Mouse wheel|Edits the picked control (up = +); with nothing picked it scrolls the library. Clicks do nothing in DJ mode|
+|`Esc`|Closes the set error overlay if open; else drops a half-typed count or mark; cancels the hints if they are up; clears the picked control. It never leaves DJ mode|
 
-Tap vs hold: tapping EQ, filter, faders and crossfader steps 0.05, pitch steps 0.1 %. Holding ramps after 0.2 s with an ease-in to a full sweep in about 1.5 s (pitch ramps slowly, 1 to 4 %/s). Values are sent at most about 30 times a second per control and coalesced, so a slow bus never builds a backlog; the screen always shows what codjd reports.
+Nothing else is bound on the decks: no letter, digit or `Alt` combination plays, and there is no `x` / `d` that could unload a track in the middle of a set.
+
+**Commands** (`:` then Enter; the mixer is set here and through the hints):
+
+|Command|Does|
+|-------|----|
+|`:q`|Leave DJ mode back to the normal view (also `:quit`, `:q!`, `:wq`, `:x`); music keeps playing|
+|`:fader [a\|b] <0..1>`|Channel fader of the focused deck (or the named one); `off` is 0, `full` 1|
+|`:low` / `:mid` / `:high [a\|b] <-1..1>`|EQ band of the focused deck; `kill` is -1, `flat` or `0` is 0. `:low kill`, `:low b flat`|
+|`:filter [a\|b] <-1..1>`|Filter: below 0 muffles, above 0 thins the bass; `reset` is 0|
+|`:xfade <-1..1>`|Crossfader, -1 is all deck A, 1 all deck B; `a`, `b` and `center` work too|
+|`:delm a` / `:delm a c` / `:delm b-d` / `:delm!`|Delete marks of the focused deck (like vim's `:delmarks`); `:delm!` deletes all eight|
+|`:focus a\|b`|Focus a deck|
+|`:hp [a\|b] [on\|off]`, `:quantize [on\|off]`|Headphone cue (the focused deck unless named), quantize|
+|`:load a`, `:load b`, `:grid a x2` / `/2` / `x1.5` / `/1.5` / `reset`|Load the highlighted library track; correct a deck's detected tempo (saved per track). A yellow `?` after the BPM means the tempo detectors disagree, so the grid is likely half, double or 1.5× off. Sync refuses changes over ±16 % and says which tempos clash|
+|`:help [term]`, `:tutor [reset]`, `:mix new [recipe] [bars]`|See [Learning](#learning)|
+|`:patch ...`|See [Patch decks](#patch-decks)|
+
+Values outside the range are refused with a usage note, nothing is sent. Every value goes through the normal `DjSet` path, so codjd sees a manual move, and `u` takes it back.
+
+Tap vs hold: pitch taps step 0.1 %; holding `+` / `-` ramps after 0.2 s (slowly, 1 to 4 %/s). Hints edits step 0.05 (see below). Values are sent at most about 30 times a second per control and coalesced, so a slow bus never builds a backlog; the screen always shows what codjd reports.
 
 ## Control hints and editing
 
@@ -260,12 +278,14 @@ Every adjustable control on the screen can be picked with a short label and then
 |`d` / `q`|EQ low A / B|`w`|crossfader|
 |`ta` / `ts`|EQ mid A / B|`ga` / `gs`|EQ high A / B|
 |`xa` / `xs`|pitch A / B|`za` / `zs`|gain (trim, dB) A / B|
-|`ca` / `cs`|loop length A / B (for the next `v` / `m`)|`va` / `vs`|beat jump size A / B (for `e r u i`)|
+|`ca` / `cs`|loop length A / B (for a `v` without a count)||
 |`ba`|master|`bs`|cue mix|
 |`bd`|sync range (the largest tempo change a synced play may need)||
 
-   The table is fixed, so a label never moves with the window size. A control the screen has no room for at the moment (small terminals drop master / cue mix / sync range first, then jump size and gain) gets no label and cannot be picked.
-3. The control is now selected: it is drawn inverted, the right end of the status line shows a chip like `◆ A filter -0.30`, and `f` brings the labels back for another pick. `;` swaps with the control selected before it (two controls you play together: filter and crossfader). `Esc` clears the selection.
+   The table is fixed, so a label never moves with the window size. A control the screen has no room for at the moment (small terminals drop master / cue mix / sync range first, then gain) gets no label and cannot be picked.
+3. The control is now selected: it is drawn inverted, the right end of the status line shows a chip like `◆ A filter -0.30`, and `f` brings the labels back for another pick. `;` swaps with the control selected before it (two controls you play together: filter and crossfader). `Esc` clears the selection; the hint labels are only typed while they are up, so they never collide with the deck keys (`w` is a motion, and a label too).
+
+While a control is picked `]` / `[` / `\` edit it; **with nothing picked `]` / `[` nudge the focused deck** and `\` says so. A picked control is shown in the status line, so you can always tell which of the two the bracket keys do.
 
 Editing the selected control:
 
@@ -274,14 +294,14 @@ Editing the selected control:
 |EQ, filter, crossfader, channel fader, cue mix, master|0.05|EQ / filter 0, crossfader 0, fader 1, cue mix 0, master 1|
 |Pitch|0.1 %|0 %|
 |Gain|0.5 dB|the track's auto-gain (what the deck loaded with)|
-|Loop length, jump size|×2 / ÷2 along 1/4 1/2 1 2 4 8 16 32 beats|4 beats|
+|Loop length|×2 / ÷2 along 1/4 1/2 1 2 4 8 16 32 beats|4 beats|
 |Sync range|0.01 (1 %)|0.16 (codjd's default)|
 
-Everything goes through the normal `DjSet` path (coalesced, at most ~30 a second per control), so codjd sees a manual move: it cancels the automation of that control and records it into a mix recording. Loop length and jump size are only used by the next `v` / `m` and `e r u i`; they live in codj, not in codjd. The decks show them as `loop 4` (idle loops), `jmp 4` and `gain +0.0` in the time line when it has room; the mixer line shows `MST`, `CUE` and `RNG` on wide terminals (72 columns and up).
+Everything goes through the normal `DjSet` path (coalesced, at most ~30 a second per control), so codjd sees a manual move: it cancels the automation of that control and records it into a mix recording. The loop length is only used by a `v` without a count; it lives in codj, not in codjd. The decks show it as `loop 4` (idle loops) and `gain +0.0` in the time line when it has room; the mixer line shows `MST`, `CUE` and `RNG` on wide terminals (72 columns and up).
 
 Codjd does not report a manual gain trim or the sync range, so codj shows the last value it sent itself (a track loaded afterwards starts from its own auto-gain again). The sync range is assumed to be codjd's default 0.16 whenever DJ mode opens, since codjd cannot be asked for it.
 
-**Acceleration** (keys, wheel and knob alike): detents less than 60 ms apart multiply the step, x2 for the second, x4 from the third on, until you pause or reverse. A slow turn is always one step per detent; a held `]` accelerates through the keyboard's auto-repeat. For loop length and jump size a x4 detent moves up to four notches.
+**Acceleration** (keys, wheel and knob alike): detents less than 60 ms apart multiply the step, x2 for the second, x4 from the third on, until you pause or reverse. A slow turn is always one step per detent; a held `]` accelerates through the keyboard's auto-repeat. For the loop length a x4 detent moves up to four notches.
 
 **Mouse wheel**: enabled in DJ mode for the wheel only. With a selected control the wheel edits it (up = +); with none it scrolls the library list. It is ignored while the set editor or the AI prompt box is open.
 
@@ -347,7 +367,7 @@ Playing by hand turns into set code: codjd writes the active set's file itself (
 |`:gridsave [a\|b]`|Write the deck's current grid (after `:grid` corrections) into the set as a `grid` line|
 |`:rec` / `:rec on` / `:rec off`, `F9`|Start / stop recording a mix. While recording every control change on either deck (keys, MCP, D-Bus) is logged; stopping writes the `mix` block and says e.g. `recorded mix 2: aft → smk, 16 bars, 9 items`|
 
-Names are set-language identifiers (letters, digits, `_`, `-`, starting with a letter or `_`). Without `a` or `b` the deck is chosen by this rule: the deck that is playing; when both play, the louder one (channel fader times its share of the crossfader), on a tie the one on the crossfader's side (A when centered); when neither plays, the only loaded deck; otherwise the command asks for `a` or `b`.
+Names are set-language identifiers (letters, digits, `_`, `-`, starting with a letter or `_`). Without `a` or `b` the command uses the focused deck (`h` / `l`); an empty focused deck says so and asks for the other one by name.
 
 While recording the set strip shows a red `● REC 12.5 bars · 34 events` (bars of the outgoing deck's clock, events logged so far); `SetRecording` is polled at about 4 Hz while recording and once a second otherwise, so a recording started over MCP shows too.
 
@@ -394,7 +414,7 @@ The output (stdout and stderr) streams into the pane; the UI and the audio-facin
 
 DJ mode explains itself, for someone who has never DJ'd. All the wording lives in one module (`src/dj/glossary.rs`), so the key map, the status line, `:help` and the tutor say the same thing.
 
-**`?` key map.** Draws the keys on the real screen, which-key style: each deck panel lists its own keys (deck A left-hand, deck B mirrored), the area over the mixer and the library lists the mixer's keys and the global ones, every entry with a line of explanation (`sync: match B's tempo and beats to A`, `cue: a saved spot; hold to hear it in headphones`, `low: the bass — keep only one bassline at a time`, `crossfader: which deck the room hears`). Any key closes it and does nothing else; the DJ keys are not played while it is up. A short screen shows what fits and says `… N more: :help keys`.
+**`?` key map.** Draws the keys on the real screen, which-key style: one panel over the decks lists the focused deck's keys (in two columns on a wide screen; its title names the focused deck), the area over the mixer and the library lists the mixer's keys (the hints and the `:` commands) and the global ones, every entry with a line of explanation (`sync: match B's tempo and beats to A`, `cue: a saved spot; hold to hear it in headphones`, `low: the bass — keep only one bassline at a time`, `crossfader: which deck the room hears`). Any key closes it and does nothing else; the DJ keys are not played while it is up. A short screen shows what fits and says `… N more: :help keys`.
 
 **Hints explain too.** While the `f` labels are up the status line says what the typed letters lead to (`mid: vocals, synths, snares; the body of a track  (TA A mid · TS B mid)`); once a control is selected its one-liner sits next to the chip (`low: the bass — keep only one bassline at a time ◆ B low -0.30`).
 
@@ -402,25 +422,25 @@ DJ mode explains itself, for someone who has never DJ'd. All the wording lives i
 
 ### `:tutor`
 
-A guided first mix with your own library, like vimtutor. A pane shares the bottom of the screen with the library (the decks keep at least 10 rows; the set strip shrinks to a line on a medium screen; on a screen under 100 columns the pane takes the whole bottom). Each step has a title, 1 to 3 sentences of why, the exact keys and a live checklist. **Steps finish by themselves**, a moment after the state shows they were done (the step stays up for at least 1.2 s so it can be read). `Tab` skips the current step (`Shift+Tab` still searches the library meanwhile), `Esc` pauses and closes the pane (an open hint selection is cleared first), `:tutor` resumes, `:tutor reset` starts over. Progress (`{"version":1,"step":N}`) is saved to `$XDG_STATE_HOME/codj/tutor.json` (`~/.local/state/codj/tutor.json`, else under the data directory) after every step.
+A guided first mix with your own library, like vimtutor. A pane shares the bottom of the screen with the library (the decks keep at least 10 rows; the set strip shrinks to a line on a medium screen; on a screen under 100 columns the pane takes the whole bottom). Each step has a title, 1 to 3 sentences of why, the exact keys and a live checklist. **Steps finish by themselves**, a moment after the state shows they were done (the step stays up for at least 1.2 s so it can be read). `Tab` skips the current step (`Shift+Tab` still browses the library meanwhile), `Esc` pauses and closes the pane (an open hint selection is cleared first), `:tutor` resumes, `:tutor reset` starts over. Progress (`{"version":1,"step":N}`) is saved to `$XDG_STATE_HOME/codj/tutor.json` (`~/.local/state/codj/tutor.json`, else under the data directory) after every step.
 
 |#|Step|Keys|Done when (polled `DjDecks` / `DjMixer`)|
 |-|----|----|----------------------------------------|
-|1|Choose two tracks: codj proposes a pair from the library with tempos within ±6 % and marks them `★A` / `★B`|`<` loads the highlighted track on A, `>` on B (after A is loaded the highlight moves to the second track)|both decks loaded, with different files|
-|2|Play deck A: what BPM, beat and bar are, and the phase meter|`x`|A playing|
-|3|Listen to B in headphones: what cue is for|`F2` (and hold `t` so the room only hears A)|B's headphone send on, or 45 s (with one output, `internal` mode, there is nothing to hear apart; the step says so)|
-|4|Sync B to A: what sync does, the ±16 % limit, what a yellow `?` next to the BPM means, `:grid`|`,`|B synced|
-|5|Start B on a phrase: phrases of 16 / 32 bars, quantize. The pane counts A's bars and says when to press|`.`|B playing|
-|6|Bring B in without its bass: why two basslines clash|`f q`, `[` down to -1 (or wheel / knob), `h` fader up, `y` crossfader|B low <= -0.9|
-|7|Swap the bass on a bar line|`f d`, `[` to -1 on A's low; `f q`, `\` on B's low|A low <= -0.9 and B low >= -0.1|
-|8|Fade A out, then stop it|`y` (crossfader to B) or `b` (A's fader down), `x`|A stopped and (crossfader >= 0.5 or A's fader <= 0.1)|
+|1|Choose two tracks: codj proposes a pair from the library with tempos within ±6 % and marks them `★A` / `★B`|`Shift+Tab` browses the library, `a` loads the highlighted track on A, `b` on B, `Tab` comes back (after A is loaded the highlight moves to the second track)|both decks loaded, with different files|
+|2|Play deck A: what BPM, beat and bar are, and the phase meter|`Space` (A has the focus)|A playing|
+|3|Listen to B in headphones: what cue is for|`F2`, and `:xfade a` so the room only hears A|B's headphone send on, or 45 s (with one output, `internal` mode, there is nothing to hear apart; the step says so)|
+|4|Sync B to A: what sync does, the ±16 % limit, what a yellow `?` next to the BPM means, `:grid`|`l s` (focus B, sync)|B synced|
+|5|Start B on a phrase: phrases of 16 / 32 bars, quantize. The pane counts A's bars and says when to press|`Space` (B has the focus)|B playing|
+|6|Bring B in without its bass: why two basslines clash|`f q`, `[` down to -1 (or wheel / knob; or `:low b kill`), `:xfade 0`|B low <= -0.9|
+|7|Swap the bass on a bar line|`:low a kill`; `:low b flat` (or `f q`, `\`)|A low <= -0.9 and B low >= -0.1|
+|8|Fade A out, then stop it|`:xfade b` (or `:fader a 0`), then `h` `Space`|A stopped and (crossfader >= 0.5 or A's fader <= 0.1)|
 |9|Done: record the next one (`F9`), `:mix new blend`, `:help`|||
 
-Step 1 spends at most 14 `GetGrid` calls: the first track with an analysed, steady grid (of the first 6) is the seed, then up to 8 candidates, the ones `SimilarTo` names first and then the following library tracks (the indices `SimilarTo` returns are taken as positions in the library list); the first with a tempo within ±6 % is proposed. An old codjd without `GetGrid` or with nothing analysed gets "no tempos to compare: pick any two tracks". **Bars**: with the deck's grid (`GetGrid`: first beat, downbeat offset, beats per bar) bar = `floor((k - offset) / beats_per_bar) + 1` for the beat index `k = floor((position - first_beat) * track_bpm / 60)`; without a grid reply `floor(position * track_bpm / 60 / 4) + 1`. The pane shows `A is on bar 29, beat 1: the phrase line is bar 33, in 4 bars`, and `press . now` in the last beats before a phrase line and the first ones after it. Resetting with both decks still loaded passes step 1 at once.
+Step 1 spends at most 14 `GetGrid` calls: the first track with an analysed, steady grid (of the first 6) is the seed, then up to 8 candidates, the ones `SimilarTo` names first and then the following library tracks (the indices `SimilarTo` returns are taken as positions in the library list); the first with a tempo within ±6 % is proposed. An old codjd without `GetGrid` or with nothing analysed gets "no tempos to compare: pick any two tracks". **Bars**: with the deck's grid (`GetGrid`: first beat, downbeat offset, beats per bar) bar = `floor((k - offset) / beats_per_bar) + 1` for the beat index `k = floor((position - first_beat) * track_bpm / 60)`; without a grid reply `floor(position * track_bpm / 60 / 4) + 1`. The pane shows `A is on bar 29, beat 1: the phrase line is bar 33, in 4 bars`, and `press Space now` in the last beats before a phrase line and the first ones after it. Resetting with both decks still loaded passes step 1 at once.
 
 ### `:mix new <recipe> [bars]`
 
-Writes a transition for the two tracks on the decks into the active set: **outgoing** is the playing deck on air (the rule of `:cue`: the one that is playing, the louder when both are, the crossfader's side on a tie), **incoming** the other. Both must be tracks of the active set (matched by file path against `SetState.tracks`), else `add the track to the set first: :cue on it or edit`. `:mix new` alone pops up the recipes with their explanations and default bars (`SetRecipes`); `:mix new blend` or `:mix new blend 32` takes the block from `SetRecipeText(recipe, from id, to id, bars)` (a full, commented `mix` block), reads the set with `SetSource`, appends the block after a blank line, checks the whole text with `SetCheck` and saves it with `SetWrite` (author `human`, on the hash it was read at, so a save made meanwhile refuses it). The status line says `added blend Kaiku → Aftertekno (8 bars) as mix 3: :arm 3`. When a `mix <from> -> <to>` block for the same two tracks exists the new one is appended and the note names the older block's line; if `SetCheck` objects to the duplicate, the older block is replaced instead and the note says `replaced ...`. Against an older codjd the commands say `codjd has no recipes: update codjd`.
+Writes a transition for the two tracks on the decks into the active set: **outgoing** is the playing deck on air (the one that is playing, the louder when both are, the crossfader's side on a tie; this rule is about what the room hears, so it does not use the focus), **incoming** the other. Both must be tracks of the active set (matched by file path against `SetState.tracks`), else `add the track to the set first: :cue on it or edit`. `:mix new` alone pops up the recipes with their explanations and default bars (`SetRecipes`); `:mix new blend` or `:mix new blend 32` takes the block from `SetRecipeText(recipe, from id, to id, bars)` (a full, commented `mix` block), reads the set with `SetSource`, appends the block after a blank line, checks the whole text with `SetCheck` and saves it with `SetWrite` (author `human`, on the hash it was read at, so a save made meanwhile refuses it). The status line says `added blend Kaiku → Aftertekno (8 bars) as mix 3: :arm 3`. When a `mix <from> -> <to>` block for the same two tracks exists the new one is appended and the note names the older block's line; if `SetCheck` objects to the duplicate, the older block is replaced instead and the note says `replaced ...`. Against an older codjd the commands say `codjd has no recipes: update codjd`.
 
 **Set warnings.** `SetWarnings(set)` (non-fatal findings of the set) is read when the active set changes and every 3 s: the strip shows a yellow `⚠ 2 warnings (:errors)` next to the red error badge (`⚠2` on a one-line strip) and `:errors` lists them after the errors as `warning: file:line:col: message` in yellow. An older codjd without the method just shows none.
 
@@ -472,19 +492,20 @@ Every cell change is one `PatchAction {"op":"cell",...}`: it applies at once, ne
 
 ## Hold and release
 
-Hold-to-preview cue, hold-to-nudge and the ramps need to know when a key is released. In terminals with the kitty keyboard protocol (kitty, foot, WezTerm, Ghostty, Alacritty) DJ mode asks for key press/repeat/release events while it is open (`DISAMBIGUATE_ESCAPE_CODES | REPORT_EVENT_TYPES | REPORT_ALL_KEYS_AS_ESCAPE_CODES`; letters only report releases with the last flag) and gives the extra flags back when you leave DJ mode, on exit and in the panic hook. While you type in the search box or command line the extra flags are off, so typed text arrives as text.
+Hold-to-preview cue (`c`), hold-to-nudge (`[` `]`) and the pitch ramp (`+` `-`) need to know when a key is released. In terminals with the kitty keyboard protocol (kitty, foot, WezTerm, Ghostty, Alacritty) DJ mode asks for key press/repeat/release events while it is open (`DISAMBIGUATE_ESCAPE_CODES | REPORT_EVENT_TYPES | REPORT_ALL_KEYS_AS_ESCAPE_CODES`; letters only report releases with the last flag) and gives the extra flags back when you leave DJ mode, on exit and in the panic hook. While you type in the search box or command line the extra flags are off, so typed text arrives as text.
 
 Without release events (other terminals, tmux) DJ mode says so in the status line and falls back:
 
-- cue: press starts the preview, press again ends it (on a playing deck a press just stops at the cue point)
-- nudge: a tap bends the tempo for 0.3 s; holding the key keeps it alive through the keyboard's auto-repeat
-- EQ, filter, faders, crossfader, pitch: one step per key event, so holding sweeps at your key repeat rate
+- cue (`c`): press starts the preview, press again ends it (on a playing deck a press just stops at the cue point)
+- nudge (`[` `]`): a tap bends the tempo for 0.3 s; holding the key keeps it alive through the keyboard's auto-repeat
 
-Auto-repeat of a tap key (play, sync, loop, hot cue, beat jump) is ignored.
+- pitch (`+` / `-`): one step per key event, so holding steps at your key repeat rate
+
+Auto-repeat of a tap key (play, sync, loop, marks, motions, counts) is ignored, so holding `w` jumps once; type `8w` for more.
 
 ## Testing without codjd's engine
 
-`examples/fake_codjd.rs` serves the deck API (and a fake set runtime: sets `demo` and `broken`, 3 tracks, 2 mixes, an armed mix that advances) with plausible changing state and logs every call, `examples/dj_e2e.sh` runs codj against it in tmux (sets, capture and recording included, and phase 5: control hints, label selection, `] [ \ ;` edits, the mouse wheel as SGR mouse reports, the jump keys; it also serves a set's text and hash, with conflict detection on stale writes, for the editing methods), and phase 6: the `?` key map, `:help`, hint explanations, `:tutor` (first steps advancing as the fake's state changes, `Tab`, `Esc`, resume, reset, the progress file in an isolated `XDG_STATE_HOME`) and `:mix new` through the fake's `SetRecipes` / `SetRecipeText` / `SetWarnings` / `GetGrid` / `SimilarTo` (`ONLY=6` runs just that phase), and phase 7: the patch decks (`F12`, `:patch new d1`, the grid with `hjkl x 1-9 A-H Enter p u Ctrl-r`, a hinted knob edited with `]`, `:w`, `:patch list|edit|live|unload|load|import`) against the fake's in-memory patch files and four slots with a moving step counter (`ONLY=7` runs just that phase); `examples/mcp_e2e.sh` drives `codj mcp` over JSON-RPC against it (set and patch tools, stale/fresh `base_hash`, the `--live` guardrail), all on an isolated bus (`dbus-run-session`); neither touches the real session bus.
+`examples/fake_codjd.rs` serves the deck API (and a fake set runtime: sets `demo` and `broken`, 3 tracks, 2 mixes, an armed mix that advances) with plausible changing state and logs every call, `examples/dj_e2e.sh` runs codj against it in tmux (sets, capture and recording included, and phase 5: control hints, label selection, `] [ \ ;` edits, the mouse wheel as SGR mouse reports, the beat-jump keys `w` `b`; it also serves a set's text and hash, with conflict detection on stale writes, for the editing methods), and phase 6: the `?` key map, `:help`, hint explanations, `:tutor` (first steps advancing as the fake's state changes, `Tab`, `Esc`, resume, reset, the progress file in an isolated `XDG_STATE_HOME`) and `:mix new` through the fake's `SetRecipes` / `SetRecipeText` / `SetWarnings` / `GetGrid` / `SimilarTo` (`ONLY=6` runs just that phase), and phase 7: the patch decks (`F12`, `:patch new d1`, the grid with `hjkl x 1-9 A-H Enter p u Ctrl-r`, a hinted knob edited with `]`, `:w`, `:patch list|edit|live|unload|load|import`) against the fake's in-memory patch files and four slots with a moving step counter (`ONLY=7` runs just that phase), and phase 8: the vim keys (focus, `4w` `12b` `2}` `3W`, marks, `v` / `8v`, `0` `gg` `G`, `.`, `+` `u` `Ctrl-r`, nudge, `:fader` `:low` `:filter` `:xfade` `:delm`, the status-line count, `Esc` staying and `:q` leaving) with every call checked in what the fake received (`ONLY=8` runs just that phase; `TMUX_SOCK` names the tmux server, `W` the scratch directory, `BIN` the build directory); `examples/mcp_e2e.sh` drives `codj mcp` over JSON-RPC against it (set and patch tools, stale/fresh `base_hash`, the `--live` guardrail), all on an isolated bus (`dbus-run-session`); neither touches the real session bus.
 
 # Configuration
 

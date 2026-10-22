@@ -1,5 +1,6 @@
 //! Capturing cues, loops and grids into the active set, and recording a mix: the command
-//! parsing, the deck choice and the texts. The calls go through `SetCall` like the other set
+//! parsing, the deck choice (the focused deck, unless one is named; `pick_deck`, the deck on
+//! air, is for `:mix new`) and the texts. The calls go through `SetCall` like the other set
 //! commands; codjd writes the file (see "Editing from codj" in `docs/set-language.md`).
 
 use super::Command;
@@ -69,7 +70,7 @@ fn audible(deck: usize, d: &DeckInfo, crossfader: f64) -> f64 {
     d.fader * share
 }
 
-/// The deck a capture means when none is named: the one that is playing; when both play, the one
+/// The deck that is on the air (`:mix new` mixes out of it): the one that is playing; when both play, the one
 /// that is louder (fader times crossfader); on a tie, the one on the crossfader's side (A when
 /// centered). Neither playing: the only loaded deck, else the caller must say a or b.
 pub fn pick_deck(decks: &[DeckInfo], mixer: &MixerInfo) -> Result<u32, String> {

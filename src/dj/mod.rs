@@ -462,6 +462,7 @@ async fn run_call(proxy: &ServerProxy<'_>, call: &DjCall) -> zbus::Result<String
         DjCall::Pause(d) => proxy.dj_pause(*d).await,
         DjCall::Cue { deck, pressed } => proxy.dj_cue(*deck, *pressed).await,
         DjCall::Sync(d) => proxy.dj_sync(*d).await,
+        DjCall::Seek { deck, seconds } => proxy.dj_seek(*deck, *seconds).await,
         DjCall::Nudge { deck, amount } => proxy.dj_nudge(*deck, *amount).await,
         DjCall::BeatJump { deck, beats } => proxy.dj_beat_jump(*deck, *beats).await,
         DjCall::Loop { deck, beats } => proxy.dj_loop(*deck, *beats).await,
@@ -971,10 +972,127 @@ pub enum Command {
     Tutor { reset: bool },
     /// `:patch ...`
     Patch(PatchCmd),
+    /// `:fader 0.5`, `:low kill`, `:filter -0.3`, `:xfade a`: set a control (deck None = the focused one)
+    Mix { ctl: MixCtl, deck: Option<u8>, value: f64 },
+    /// `:delm a` / `:delm!`: clear marks (hot cue slots 0..7) of the focused deck
+    DelMarks(Vec<u8>),
+    /// `:quantize [on|off]`
+    Quantize(Option<bool>),
+    /// `:hp [a|b] [on|off]`: headphone cue (deck None = the focused one)
+    Headphones(Option<u8>, Option<bool>),
+    /// `:focus a|b`
+    Focus(u8),
     /// `:w [name]` with the patch pane open: save the selected slot's patch
     PatchSave(Option<String>),
     Nothing,
     Unknown(String),
+}
+
+/// The controls `:fader`, `:low` ... set
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MixCtl {
+    Fader,
+    Low,
+    Mid,
+    High,
+    Filter,
+    Xfade,
+}
+
+impl MixCtl {
+    fn name(self) -> &'static str {
+        match self {
+            MixCtl::Fader => "fader",
+            MixCtl::Low => "low",
+            MixCtl::Mid => "mid",
+            MixCtl::High => "high",
+            MixCtl::Filter => "filter",
+            MixCtl::Xfade => "xfade",
+        }
+    }
+
+    /// (lowest, neutral, highest)
+    fn range(self) -> (f64, f64, f64) {
+        match self {
+            MixCtl::Fader => (0.0, 1.0, 1.0),
+            _ => (-1.0, 0.0, 1.0),
+        }
+    }
+
+    fn usage(self) -> String {
+        let (lo, _, _) = self.range();
+        match self {
+            MixCtl::Fader => "usage: fader [a|b] <0..1 | off | full>".to_string(),
+            MixCtl::Xfade => "usage: xfade <-1..1 | a | b | center> (-1 is all deck A, 1 all deck B)".to_string(),
+            c => format!("usage: {} [a|b] <{lo}..1 | kill | flat>", c.name()),
+        }
+    }
+}
+
+/// `:fader 0.5`, `:low kill`, `:filter -0.3`, `:xfade a`, with an optional `a` / `b` first
+fn parse_mix_ctl(ctl: MixCtl, words: &[&str]) -> Command {
+    let (deck, rest) = match (ctl, words.first().copied()) {
+        (MixCtl::Xfade, _) => (None, words),
+        (_, Some("a" | "A")) => (Some(0), &words[1..]),
+        (_, Some("b" | "B")) => (Some(1), &words[1..]),
+        _ => (None, words),
+    };
+    let (lo, neutral, hi) = ctl.range();
+    let value = match rest {
+        [w] => match w.to_ascii_lowercase().as_str() {
+            "kill" | "off" | "min" | "mute" => Some(lo),
+            "flat" | "reset" | "center" | "centre" | "unity" | "neutral" => Some(neutral),
+            "full" | "max" | "on" => Some(hi),
+            "a" if ctl == MixCtl::Xfade => Some(-1.0),
+            "b" if ctl == MixCtl::Xfade => Some(1.0),
+            n => n.parse::<f64>().ok().filter(|v| v.is_finite() && (lo..=hi).contains(v)),
+        },
+        _ => None,
+    };
+    match value {
+        Some(value) => Command::Mix { ctl, deck, value },
+        None => Command::Unknown(ctl.usage()),
+    }
+}
+
+/// `:delm a`, `:delm a c`, `:delm a-c`, `:delm abc`, `:delm!` (every mark)
+fn parse_delmarks(all: bool, words: &[&str]) -> Command {
+    const USAGE: &str = "usage: delm <marks a-h> (a, a c, a-c) or delm! for all of them";
+    if all {
+        return if words.is_empty() { Command::DelMarks((0..keys::MARKS).collect()) } else { Command::Unknown(USAGE.into()) };
+    }
+    let mut slots = Vec::new();
+    let slot = |c: char| ('a'..='h').contains(&c).then(|| c as u8 - b'a');
+    for w in words {
+        let cs: Vec<char> = w.chars().collect();
+        if let [a, '-', b] = cs.as_slice() {
+            match (slot(*a), slot(*b)) {
+                (Some(a), Some(b)) if a <= b => slots.extend(a..=b),
+                _ => return Command::Unknown(USAGE.into()),
+            }
+            continue;
+        }
+        for c in cs {
+            match slot(c) {
+                Some(s) => slots.push(s),
+                None => return Command::Unknown(USAGE.into()),
+            }
+        }
+    }
+    if slots.is_empty() {
+        return Command::Unknown(USAGE.into());
+    }
+    slots.sort_unstable();
+    slots.dedup();
+    Command::DelMarks(slots)
+}
+
+fn on_off(w: &str) -> Option<bool> {
+    match w {
+        "on" | "1" | "true" => Some(true),
+        "off" | "0" | "false" => Some(false),
+        _ => None,
+    }
 }
 
 /// What `:patch` asks for; slots are 0-based here (P1 = 0)
@@ -1152,9 +1270,41 @@ pub fn parse_command(cmd: &str) -> Command {
             Some(_) => Command::Unknown("usage: tutor [reset]".into()),
         },
         Some("e") => Command::Editor,
+        Some("fader" | "vol") => parse_mix_ctl(MixCtl::Fader, &words.collect::<Vec<_>>()),
+        Some("low" | "bass") => parse_mix_ctl(MixCtl::Low, &words.collect::<Vec<_>>()),
+        Some("mid") => parse_mix_ctl(MixCtl::Mid, &words.collect::<Vec<_>>()),
+        Some("high" | "treble") => parse_mix_ctl(MixCtl::High, &words.collect::<Vec<_>>()),
+        Some("filter" | "flt") => parse_mix_ctl(MixCtl::Filter, &words.collect::<Vec<_>>()),
+        Some("xfade" | "crossfader") => parse_mix_ctl(MixCtl::Xfade, &words.collect::<Vec<_>>()),
+        Some("delm" | "delmarks") => parse_delmarks(false, &words.collect::<Vec<_>>()),
+        Some("delm!" | "delmarks!") => parse_delmarks(true, &words.collect::<Vec<_>>()),
+        Some("quantize" | "quant") => match words.next() {
+            None => Command::Quantize(None),
+            Some(w) => on_off(w).map(|on| Command::Quantize(Some(on))).unwrap_or_else(|| Command::Unknown("usage: quantize [on|off]".into())),
+        },
+        Some("hp" | "headphones") => {
+            let mut deck = None;
+            let mut on = None;
+            for w in words {
+                match w {
+                    "a" | "A" => deck = Some(0),
+                    "b" | "B" => deck = Some(1),
+                    w => match on_off(w) {
+                        Some(v) => on = Some(v),
+                        None => return Command::Unknown("usage: hp [a|b] [on|off]".into()),
+                    },
+                }
+            }
+            Command::Headphones(deck, on)
+        }
+        Some("focus") => match words.next() {
+            Some("a" | "A") => Command::Focus(0),
+            Some("b" | "B") => Command::Focus(1),
+            _ => Command::Unknown("usage: focus a|b (or h / l)".into()),
+        },
         None => Command::Nothing,
         Some(other) => Command::Unknown(format!(
-            "unknown DJ command: {other} (q: back, patch [new|load|live|edit|list], load a|b|<track>, grid a|b x2|/2|.., set [name], arm <n|next>, disarm, auto on|off, preview <n> [bars], errors, edit, e, ai <request>, help [term], tutor, mix new [recipe], cue <name> [a|b], loopsave <name> [a|b], gridsave [a|b], rec [on|off])"
+            "unknown DJ command: {other} (q: leave DJ mode, fader|low|mid|high|filter [a|b] <value>, xfade <value>, delm <a-h>, delm!, quantize, hp [a|b], focus a|b, patch [new|load|live|edit|list], load a|b|<track>, grid a|b x2|/2|.., set [name], arm <n|next>, disarm, auto on|off, preview <n> [bars], errors, edit, e, ai <request>, help [term], tutor, mix new [recipe], cue <name> [a|b], loopsave <name> [a|b], gridsave [a|b], rec [on|off])"
         )),
     }
 }
@@ -1704,7 +1854,9 @@ impl DjScreen {
         }
         let hint_key = plain
             && match nk.code {
-                KeyCode::Char('f' | ']' | '[' | '\\') => !nk.shift,
+                KeyCode::Char('f') => !nk.shift,
+                // the pane has no use for these, and with nothing picked they would nudge a deck
+                KeyCode::Char(']' | '[' | '\\') => !nk.shift && self.keys.hints().selected.is_some(),
                 KeyCode::Char(';') => true,
                 KeyCode::Esc => self.keys.hints().selected.is_some(),
                 _ => false,
@@ -1827,21 +1979,15 @@ impl DjScreen {
         self.session.set_call(SetCall::Errors(set.name));
     }
 
-    /// the deck to capture from: the one named, else by the rule in `capture::pick_deck`
+    /// the deck to capture from: the one named, else the focused one (it needs a track)
     fn capture_deck(&mut self, named: Option<u8>) -> Option<u32> {
-        if let Some(d) = named {
-            return Some(d as u32);
-        }
-        let (decks, mixer) = {
-            let s = self.session.shared.lock().unwrap();
-            (s.decks.clone(), s.mixer.clone())
-        };
-        match capture::pick_deck(&decks, &mixer) {
-            Ok(d) => Some(d),
-            Err(e) => {
-                self.set_note(e);
-                None
-            }
+        let deck = named.unwrap_or(self.keys.focus());
+        let loaded = self.session.shared.lock().unwrap().decks.get(deck as usize).is_some_and(|d| d.loaded);
+        if loaded {
+            Some(deck as u32)
+        } else {
+            self.set_note(format!("no track on deck {}: load one, or name the other deck (a or b)", deck_letter(deck as u32)));
+            None
         }
     }
 
@@ -1910,9 +2056,10 @@ impl DjScreen {
                 return Outcome::Stay;
             }
         }
-        // while the tutor is open Tab skips its step and Esc pauses it (Shift+Tab still searches)
-        if !self.pane.typing() && key.kind == KeyEventKind::Press && !self.keys.hints().active {
-            let selected = self.keys.hints().selected.is_some();
+        // while the tutor is open Tab skips its step and Esc pauses it (Shift+Tab still browses the
+        // library; while browsing, Tab and Esc go back to the decks as usual)
+        if !self.pane.typing() && !self.pane.browsing() && key.kind == KeyEventKind::Press && !self.keys.hints().active {
+            let selected = self.keys.hints().selected.is_some() || self.keys.has_pending();
             if let Some(t) = self.tutor.as_mut().filter(|t| t.visible) {
                 match key.code {
                     KeyCode::Esc if !selected => {
@@ -1953,7 +2100,6 @@ impl DjScreen {
             return Outcome::Stay;
         };
         match nav {
-            Nav::Exit => return Outcome::Exit,
             // typing switches key-release reporting off: end holds now, their release would
             // never arrive
             Nav::Command => {
@@ -1964,11 +2110,16 @@ impl DjScreen {
                 self.settle(now);
                 self.pane.start_browse()
             }
+            // `/` in vim: straight into the search
+            Nav::SearchNow => {
+                self.settle(now);
+                self.pane.start_search()
+            }
+            Nav::Note(text) => self.set_note(text),
             Nav::LibUp => self.pane.scroll(-1),
             Nav::LibDown => self.pane.scroll(1),
             Nav::LibPageUp => self.pane.scroll(-5),
             Nav::LibPageDown => self.pane.scroll(5),
-            Nav::Load(d) => self.load(d),
             Nav::Editor => self.open_editor(now),
             Nav::Patch => self.open_patch(now),
             Nav::Prompt => self.open_prompt(None, now),
@@ -1980,13 +2131,13 @@ impl DjScreen {
                 }
             }
             Nav::RecordToggle => self.record(None),
-            Nav::NoSelection => self.set_note("no control selected: f shows the hints, type a label to pick one"),
+            Nav::NoSelection => self.set_note("no control picked: f shows the hints, type a label to pick one"),
             Nav::Help => {
                 self.settle(now);
                 self.help = true;
             }
             // handled inside DjKeys, which owns the selection
-            Nav::Hints | Nav::Toggle | Nav::Step(_) | Nav::Reset => {}
+            Nav::Hints | Nav::Toggle | Nav::Reset => {}
             Nav::LoadSmart => self.load_smart(),
         }
         Outcome::Stay
@@ -2059,6 +2210,35 @@ impl DjScreen {
                     self.set_note("no patch pane: F12 or :patch opens it (:w saves the selected slot's patch)");
                 }
             }
+            Command::Mix { ctl, deck, value } => {
+                let d = deck.unwrap_or(self.keys.focus());
+                let slot = match ctl {
+                    MixCtl::Fader => keys::Slot::Ctl(keys::Ctl::Fader(d)),
+                    MixCtl::Low => keys::Slot::Ctl(keys::Ctl::Eq(d, 0)),
+                    MixCtl::Mid => keys::Slot::Ctl(keys::Ctl::Eq(d, 1)),
+                    MixCtl::High => keys::Slot::Ctl(keys::Ctl::Eq(d, 2)),
+                    MixCtl::Filter => keys::Slot::Ctl(keys::Ctl::Filter(d)),
+                    MixCtl::Xfade => keys::Slot::Ctl(keys::Ctl::Crossfader),
+                };
+                self.keys.set_control(slot, value, Instant::now());
+            }
+            Command::DelMarks(slots) => {
+                let deck = self.keys.focus() as u32;
+                let calls = slots.into_iter().map(|slot| DjCall::Hotcue { deck, slot: slot as u32, action: "clear" }).collect();
+                self.session.send(calls);
+            }
+            Command::Quantize(on) => {
+                let now_on = self.session.shared.lock().unwrap().mixer.quantize;
+                let value = if on.unwrap_or(!now_on) { 1.0 } else { 0.0 };
+                self.session.send(vec![DjCall::Set { control: "quantize", deck: 0, value }]);
+            }
+            Command::Headphones(deck, on) => {
+                let d = deck.unwrap_or(self.keys.focus());
+                let now_on = self.session.shared.lock().unwrap().decks.get(d as usize).is_some_and(|i| i.headphones);
+                let value = if on.unwrap_or(!now_on) { 1.0 } else { 0.0 };
+                self.session.send(vec![DjCall::Set { control: "cue", deck: d as u32, value }]);
+            }
+            Command::Focus(d) => self.keys.set_focus(d),
             Command::Nothing => {}
             Command::Unknown(msg) => self.set_note(msg),
         }
@@ -2082,6 +2262,15 @@ impl DjScreen {
         self.poll_knob();
         self.tick_tutor(&decks, &mixer, now);
         self.keys.set_snapshot(&decks, &mixer);
+        let starts = {
+            let s = self.session.shared.lock().unwrap();
+            [0, 1].map(|i| {
+                let d = decks.get(i)?;
+                let (path, g) = s.grids[i].as_ref()?;
+                (*path == d.path && d.track_bpm > 0.0).then(|| g.first_beat_s + g.downbeat_offset as f64 * 60.0 / d.track_bpm)
+            })
+        };
+        self.keys.set_starts(starts);
         self.tick_patch();
         let calls = self.keys.tick(now);
         for c in &calls {
@@ -2125,6 +2314,7 @@ impl DjScreen {
             .max_by_key(|(_, until)| *until)
             .map(|(n, _)| n.as_str());
         let labels = hints::table();
+        let showcmd = self.keys.showcmd();
         let typed = self.keys.hints().typed.clone();
         let chip = self
             .keys
@@ -2211,6 +2401,8 @@ impl DjScreen {
             lib_total: self.pane.all.len(),
             lib_sel: self.pane.sel,
             release_events: self.keys.release_events(),
+            focus_deck: self.keys.focus(),
+            showcmd: &showcmd,
             set: s.set.as_ref().filter(|x| x.is_active()),
             rec: s.rec.filter(|r| r.0).map(|r| (r.1, r.2)),
             overlay: s.overlay.as_deref(),
@@ -2222,7 +2414,6 @@ impl DjScreen {
                 selected: self.keys.hints().selected,
                 chip: chip.as_deref(),
                 loop_len: self.keys.loop_len(),
-                jump_len: self.keys.jump_len(),
                 gain: [self.keys.gain_shown(0, now), self.keys.gain_shown(1, now)],
                 sync_range: self.keys.sync_range(),
             },
@@ -2393,6 +2584,60 @@ mod tests {
         assert_eq!(parse_command("grid a reset"), Command::Grid(0, 0.));
         assert!(matches!(parse_command("grid c x2"), Command::Unknown(_)));
         assert!(matches!(parse_command("qa!"), Command::Unknown(_)));
+    }
+
+    #[test]
+    fn mixer_commands_set_controls_of_the_focused_deck() {
+        let mix = |ctl, deck, value| Command::Mix { ctl, deck, value };
+        assert_eq!(parse_command("fader 0.5"), mix(MixCtl::Fader, None, 0.5));
+        assert_eq!(parse_command("fader b 0"), mix(MixCtl::Fader, Some(1), 0.0));
+        assert_eq!(parse_command("fader off"), mix(MixCtl::Fader, None, 0.0));
+        assert_eq!(parse_command("fader full"), mix(MixCtl::Fader, None, 1.0));
+        assert_eq!(parse_command("low kill"), mix(MixCtl::Low, None, -1.0));
+        assert_eq!(parse_command("low 0"), mix(MixCtl::Low, None, 0.0));
+        assert_eq!(parse_command("low a flat"), mix(MixCtl::Low, Some(0), 0.0));
+        assert_eq!(parse_command("mid -0.5"), mix(MixCtl::Mid, None, -0.5));
+        assert_eq!(parse_command("high kill"), mix(MixCtl::High, None, -1.0));
+        assert_eq!(parse_command("filter -0.3"), mix(MixCtl::Filter, None, -0.3));
+        assert_eq!(parse_command("filter b reset"), mix(MixCtl::Filter, Some(1), 0.0));
+        assert_eq!(parse_command("xfade -1"), mix(MixCtl::Xfade, None, -1.0));
+        assert_eq!(parse_command("xfade a"), mix(MixCtl::Xfade, None, -1.0));
+        assert_eq!(parse_command("xfade b"), mix(MixCtl::Xfade, None, 1.0));
+        assert_eq!(parse_command("xfade center"), mix(MixCtl::Xfade, None, 0.0));
+        assert_eq!(parse_command("xfade 0.25"), mix(MixCtl::Xfade, None, 0.25));
+        // out of range, missing or too many values are usage notes, nothing is sent
+        for bad in ["fader", "fader 2", "fader -0.1", "low 1.5", "filter", "filter x", "xfade 3", "xfade a b", "low kill kill", "fader a"] {
+            assert!(matches!(parse_command(bad), Command::Unknown(_)), "{bad}");
+        }
+        assert!(matches!(parse_command("low"), Command::Unknown(m) if m.contains("usage: low")));
+    }
+
+    #[test]
+    fn delm_clears_marks_like_vims_delmarks() {
+        assert_eq!(parse_command("delm a"), Command::DelMarks(vec![0]));
+        assert_eq!(parse_command("delm a c"), Command::DelMarks(vec![0, 2]));
+        assert_eq!(parse_command("delm abc"), Command::DelMarks(vec![0, 1, 2]));
+        assert_eq!(parse_command("delm b-d"), Command::DelMarks(vec![1, 2, 3]));
+        assert_eq!(parse_command("delmarks h a a"), Command::DelMarks(vec![0, 7]));
+        assert_eq!(parse_command("delm!"), Command::DelMarks((0..8).collect()));
+        assert_eq!(parse_command("delmarks!"), Command::DelMarks((0..8).collect()));
+        for bad in ["delm", "delm z", "delm i", "delm d-b", "delm! a", "delm 1"] {
+            assert!(matches!(parse_command(bad), Command::Unknown(_)), "{bad}");
+        }
+    }
+
+    #[test]
+    fn small_commands_and_leaving_only_by_q() {
+        assert_eq!(parse_command("quantize"), Command::Quantize(None));
+        assert_eq!(parse_command("quant off"), Command::Quantize(Some(false)));
+        assert_eq!(parse_command("hp"), Command::Headphones(None, None));
+        assert_eq!(parse_command("hp b"), Command::Headphones(Some(1), None));
+        assert_eq!(parse_command("hp a off"), Command::Headphones(Some(0), Some(false)));
+        assert_eq!(parse_command("focus b"), Command::Focus(1));
+        assert!(matches!(parse_command("focus"), Command::Unknown(_)));
+        for q in ["q", "q!", "quit", "wq", "x"] {
+            assert_eq!(parse_command(q), Command::Exit, "{q}");
+        }
     }
 
     #[test]

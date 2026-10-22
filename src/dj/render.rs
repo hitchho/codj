@@ -6,7 +6,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Widget},
+    widgets::{Block, BorderType, Borders, Paragraph, Widget},
 };
 
 use super::hints::{self, Target};
@@ -19,7 +19,8 @@ use crate::types::Music;
 pub const ZOOM_S: f64 = 8.0;
 const DECK_COLORS: [Color; 2] = [Color::Cyan, Color::Magenta];
 const CUE_COLORS: [Color; 4] = [Color::Red, Color::Green, Color::Yellow, Color::Blue];
-const HOTCUE_KEYS: [[&str; 4]; 2] = [["1", "2", "3", "4"], ["7", "8", "9", "0"]];
+/// the marks (hot cue slots): `m{a-h}` saves, `'{a-h}` jumps
+const MARK_KEYS: [char; 8] = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
 const DIM: Color = Color::DarkGray;
 const MIN_SIZE: (u16, u16) = (60, 14);
 /// rows of the set strip on a tall screen: title, tracks, progress, three rows of items
@@ -69,6 +70,10 @@ pub struct View<'a> {
     pub lib_total: usize,
     pub lib_sel: usize,
     pub release_events: bool,
+    /// the deck the keys act on (0 = A)
+    pub focus_deck: u8,
+    /// the count and half-typed command, like vim's showcmd (`4`, `m`)
+    pub showcmd: &'a str,
     /// the active set (None: no set runtime, or none active)
     pub set: Option<&'a SetState>,
     /// recording a mix: (beats, events)
@@ -112,9 +117,8 @@ pub struct HintView<'a> {
     pub selected: Option<Target>,
     /// status chip of the selection: "◆ A filter -0.30"
     pub chip: Option<&'a str>,
-    /// beats of the next loop and of a beat jump, per deck
+    /// beats of the next loop (`v`), per deck
     pub loop_len: [f64; 2],
-    pub jump_len: [f64; 2],
     /// trim in dB, per deck
     pub gain: [f64; 2],
     pub sync_range: f64,
@@ -129,7 +133,6 @@ impl Default for HintView<'_> {
             selected: None,
             chip: None,
             loop_len: [hints::DEFAULT_BEATS; 2],
-            jump_len: [hints::DEFAULT_BEATS; 2],
             gain: [0.0; 2],
             sync_range: hints::DEFAULT_SYNC_RANGE,
         }
@@ -240,7 +243,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, v: &View) -> Vec<Spot> {
     if area.width < MIN_SIZE.0 || area.height < MIN_SIZE.1 {
         let msg = format!("DJ mode needs at least {}x{} (now {}x{})", MIN_SIZE.0, MIN_SIZE.1, area.width, area.height);
         buf.set_stringn(area.x, area.y, msg, area.width as usize, Style::default().fg(Color::Yellow));
-        buf.set_stringn(area.x, area.y + 1, "Esc: back", area.width as usize, dim());
+        buf.set_stringn(area.x, area.y + 1, ":q back", area.width as usize, dim());
         return spots;
     }
     let body_h = area.height - 2;
@@ -277,7 +280,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, v: &View) -> Vec<Spot> {
             Rect::new(decks.x + half, decks.y, decks.width - half, decks.height)
         };
         let info = v.decks.get(i).cloned().unwrap_or_default();
-        draw_deck(buf, r, i, &info, v.waves[i], v.release_events, v.doubt[i], &v.hints, &mut spots);
+        draw_deck(buf, r, i, i as u8 == v.focus_deck, &info, v.waves[i], v.release_events, v.doubt[i], &v.hints, &mut spots);
     }
     if let Some(set) = v.set {
         draw_set(buf, set_area, set, v.decks, v.rec, v.learn.warnings);
@@ -312,13 +315,8 @@ pub fn draw(buf: &mut Buffer, area: Rect, v: &View) -> Vec<Spot> {
     }
     draw_hints(buf, &spots, &v.hints);
     if v.learn.help {
-        let half = decks.width / 2;
-        let deck_rects = [
-            Rect::new(decks.x, decks.y, half, decks.height),
-            Rect::new(decks.x + half, decks.y, decks.width - half, decks.height),
-        ];
         let lower = Rect::new(area.x, mixer.y, area.width, lib.bottom().saturating_sub(mixer.y));
-        super::help::draw(buf, deck_rects, lower);
+        super::help::draw(buf, decks, lower, v.focus_deck);
     }
     spots
 }
@@ -770,7 +768,7 @@ fn draw_header(buf: &mut Buffer, area: Rect, v: &View) {
         None => Line::from(vec![
             Span::styled(" DJ ", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
             Span::styled(
-                "  Esc back · Tab library (j/k, a/b load) · : command · ? keys",
+                "  h l focus deck · Tab library (j/k, a/b load) · : command (:q leaves) · ? keys",
                 dim(),
             ),
         ]),
@@ -792,7 +790,12 @@ fn draw_status(buf: &mut Buffer, area: Rect, v: &View) {
     // the selection's chip sits at the right end; the text gives way to it
     let chip = v.hints.chip.filter(|c| c.chars().count() + 8 < w);
     let chip_w = chip.map_or(0, |c| c.chars().count() + 1);
-    let text_w = w - chip_w;
+    // right of the text: the loop mode of the focused deck and the half-typed command
+    let loop_beats = v.decks.get(v.focus_deck as usize).map_or(0.0, |d| d.loop_beats);
+    let mode = if loop_beats > 0.0 && !v.learn.help && !v.hints.active { format!("-- LOOP {} --", trim_beats(loop_beats)) } else { String::new() };
+    let mode_w = if mode.is_empty() { 0 } else { mode.chars().count() + 1 };
+    let cmd_w = if v.showcmd.is_empty() { 0 } else { v.showcmd.chars().count() + 2 };
+    let text_w = w.saturating_sub(chip_w + mode_w + cmd_w);
     if v.learn.help {
         let badge = Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD);
         buf.set_stringn(area.x, area.y, " ? KEYS ", text_w, badge);
@@ -820,8 +823,16 @@ fn draw_status(buf: &mut Buffer, area: Rect, v: &View) {
     } else if let Some(n) = v.note {
         buf.set_stringn(area.x, area.y, n, text_w, Style::default().fg(Color::Yellow));
     } else {
-        let hint = "? keys · f hints ] [ \\ edit · A: z cue x play c sync v loop a/s pitch q/w nudge 1-4 cues e/r jump | B: / . , m  k/l  o/p  7-0  u/i | Alt+qwer uiop eq/filter | g b h n t y faders";
+        let hint = "? keys · h l focus · Space play · c cue · s sync · w b W B } { jump (4w) · ma 'a marks · v loop · - + = pitch · [ ] nudge · f hints · u undo · . repeat";
         buf.set_stringn(area.x, area.y, hint, text_w, dim());
+    }
+    if mode_w > 0 {
+        let x = area.x + text_w as u16 + 1;
+        buf.set_stringn(x, area.y, &mode, mode_w - 1, Style::default().fg(Color::Green).add_modifier(Modifier::BOLD));
+    }
+    if cmd_w > 0 {
+        let x = area.x + (text_w + mode_w) as u16 + 1;
+        buf.set_stringn(x, area.y, v.showcmd, cmd_w - 1, Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD));
     }
     if let Some(c) = chip {
         let x = area.right() - chip_w as u16 + 1;
@@ -833,6 +844,7 @@ fn draw_deck(
     buf: &mut Buffer,
     area: Rect,
     idx: usize,
+    focused: bool,
     d: &DeckInfo,
     wave: WaveView,
     release: bool,
@@ -852,19 +864,27 @@ fn draw_deck(
     } else {
         "⏸ paused"
     };
-    let title = Line::from(vec![
-        Span::styled(format!(" DECK {name} "), Style::default().fg(Color::Black).bg(color).add_modifier(Modifier::BOLD)),
-        Span::styled(format!(" {state} "), Style::default().fg(color)),
-    ]);
+    // the focused deck is the one every key acts on: a bright thick border and a badge
+    let mut title = vec![Span::styled(format!(" DECK {name} "), Style::default().fg(Color::Black).bg(color).add_modifier(Modifier::BOLD))];
+    if focused {
+        title.push(Span::styled(" ▶ FOCUS ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)));
+    }
+    title.push(Span::styled(format!(" {state} "), Style::default().fg(color)));
+    let border = if focused {
+        Style::default().fg(color).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(if d.playing { color } else { DIM })
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(if d.playing { color } else { DIM }))
-        .title(title);
+        .border_type(if focused { BorderType::Thick } else { BorderType::Plain })
+        .border_style(border)
+        .title(Line::from(title));
     let inner = block.inner(area);
     block.render(area, buf);
     let w = inner.width as usize;
     if !d.loaded {
-        let msg = "— empty — pick a track below and press < or > to load";
+        let msg = "— empty — Tab, j/k to pick a track, then a (deck A) or b (deck B)";
         buf.set_stringn(inner.x + 1, inner.y + inner.height / 2, msg, w.saturating_sub(1), dim());
         return;
     }
@@ -931,12 +951,9 @@ fn draw_deck(
     } else {
         Span::styled("HP ○", dim())
     });
-    // jump size and trim, when the line has room
+    // the trim, when the line has room
     let room = inner.width.saturating_sub(2);
-    for (target, text) in [
-        (Target::Jump(idx as u8), format!("jmp {}", hints::fmt_beats(h.jump_len[idx]))),
-        (Target::Slot(Slot::Gain(idx as u8)), format!("gain {:+.1}", h.gain[idx])),
-    ] {
+    for (target, text) in [(Target::Slot(Slot::Gain(idx as u8)), format!("gain {:+.1}", h.gain[idx]))] {
         let col = text_width(&time);
         let len = text.chars().count() as u16;
         if col + 2 + len > room {
@@ -956,7 +973,7 @@ fn draw_deck(
     // phase meter
     lines.push(phase_meter(d, w, color));
     // hot cues
-    lines.push(hotcue_line(d, idx, w));
+    lines.push(hotcue_line(d, w));
 
     // text first, the waveforms get what is left (at least 2 rows if there is room)
     let n_text = lines.len().min(inner.height.saturating_sub(2).max(1) as usize);
@@ -1016,10 +1033,10 @@ fn phase_meter(d: &DeckInfo, w: usize, color: Color) -> Line<'static> {
     Line::from(spans)
 }
 
-fn hotcue_line(d: &DeckInfo, idx: usize, w: usize) -> Line<'static> {
+fn hotcue_line(d: &DeckInfo, w: usize) -> Line<'static> {
     let mut spans = Vec::new();
     for s in 0..4 {
-        let label = HOTCUE_KEYS[idx][s];
+        let label = MARK_KEYS[s];
         match d.hotcue(s) {
             Some(t) => spans.push(Span::styled(
                 format!(" {label} {:>5} ", fmt_short(t)),
@@ -1030,13 +1047,11 @@ fn hotcue_line(d: &DeckInfo, idx: usize, w: usize) -> Line<'static> {
         spans.push(Span::raw(" "));
     }
     if w >= 52 {
-        // slots 5-8 have no key, but cues set elsewhere still show
-        spans.push(Span::styled("more ", dim()));
         for s in 4..8 {
             spans.push(if d.hotcue(s).is_some() {
-                Span::styled("● ", Style::default().fg(Color::Yellow))
+                Span::styled(format!("{}● ", MARK_KEYS[s]), Style::default().fg(Color::Yellow))
             } else {
-                Span::styled("○ ", dim())
+                Span::styled(format!("{}○ ", MARK_KEYS[s]), dim())
             });
         }
     }
@@ -1465,6 +1480,8 @@ mod tests {
             lib_total: 3,
             lib_sel: 1,
             release_events: true,
+            focus_deck: 0,
+            showcmd: "",
             set: None,
             rec: None,
             overlay: None,
@@ -1504,10 +1521,10 @@ mod tests {
         ] {
             assert!(text.contains(want), "missing {want:?}");
         }
-        // hot cues: slot 1 and 3 set, 2 and 4 empty
-        assert!(text.contains(" 1  0:12 "), "{text}");
-        assert!(text.contains(" 3  1:35 "), "{text}");
-        assert!(text.contains(" 2  --"), "{text}");
+        // marks: a and c set, b and d empty
+        assert!(text.contains(" a  0:12 "), "{text}");
+        assert!(text.contains(" c  1:35 "), "{text}");
+        assert!(text.contains(" b  --"), "{text}");
         // a waveform was drawn (bars and the playhead)
         assert!(text.contains('█'));
         assert!(text.contains('│'));
@@ -1807,34 +1824,42 @@ mod tests {
     #[test]
     fn the_key_map_is_drawn_on_the_screen_at_120x35() {
         let text = render(120, 35, help_view);
-        println!("{text}");
         assert_eq!(text.lines().count(), 35);
-        for l in ["DECK A keys", "DECK B keys", "MIXER keys", "everywhere", "? KEYS"] {
+        // one panel for the focused deck, then the mixer and the global keys
+        for l in ["FOCUSED DECK A keys", "MIXER keys", "everywhere", "? KEYS"] {
             assert!(text.contains(l), "{l}\n{text}");
         }
-        // the examples of the task, each on its own line next to its key
+        assert!(!text.contains("DECK B keys") && !text.contains("┌ DECK A keys"), "{text}");
         for l in [
             "sync: match A's tempo and beats to B",
-            "sync: match B's tempo and beats to A",
             "cue: a saved spot; hold to hear it in headphones",
+            "jump 1 beat forward / back (4w: 4 beats)",
+            "mark: save a hot cue here (eight of them)",
+            "loop 4 beats; 8v loops 8; v again leaves",
+            "undo / redo a control change",
             "low: the bass — keep only one bassline at a time",
             "crossfader: which deck the room hears",
-            "hints: pick a control by its label",
+            "hints: label every control, type one to pick it",
             "record: your playing becomes code",
-            "editor: edit the set, vim style",
-            "AI: ask an agent",
-            ":help <term>",
+            "set editor · AI agent",
+            ":help :tutor :mix new · :q leaves",
+            "cancel count / pick (never leaves)",
         ] {
             assert!(text.contains(l), "{l}\n{text}");
         }
-        // deck A and deck B sit side by side: A's keys left, B's right
-        let row = text.lines().find(|l| l.contains("play / pause")).unwrap();
-        assert_eq!(row.matches("play / pause").count(), 2);
-        let (left, right) = row.split_at(60);
-        assert!(left.contains(" x ") && right.contains(" . "), "{row}");
-        // nothing is cut off at the panel edge: every deck line ends inside its panel
-        for l in crate::dj::glossary::DECK_KEYS.iter().flat_map(|e| (0..2).map(move |d| crate::dj::glossary::deck_entry(e, d).1)) {
-            assert!(text.contains(&l) , "truncated: {l}");
+        // nothing is cut off at the panel edge: every deck line fits
+        for l in crate::dj::glossary::DECK_KEYS.iter().map(|e| crate::dj::glossary::deck_entry(e, 0).1) {
+            assert!(text.contains(&l), "truncated: {l}");
+        }
+        // the key map follows the focus: with B focused the sync line is B's
+        let text = render(120, 35, |v| {
+            v.learn.help = true;
+            v.focus_deck = 1;
+        });
+        assert!(text.contains("FOCUSED DECK B keys") && text.contains("sync: match B's tempo and beats to A"), "{text}");
+        // and no key of the old map is on it
+        for gone in ["Alt q/a", "play / pause this deck", "⇧1-4", "7-0"] {
+            assert!(!text.contains(gone), "{gone}");
         }
     }
 
@@ -1843,7 +1868,7 @@ mod tests {
         for (w, h) in [(100, 30), (80, 24), (70, 20), (60, 14)] {
             let text = render(w, h, help_view);
             assert_eq!(text.lines().count(), h as usize);
-            assert!(text.contains("DECK A keys") && text.contains("? KEYS"), "{w}x{h}\n{text}");
+            assert!(text.contains("FOCUSED DECK A keys") && text.contains("? KEYS"), "{w}x{h}\n{text}");
         }
         // a short deck panel says what it left out
         let text = render(80, 24, help_view);
@@ -1855,10 +1880,82 @@ mod tests {
     }
 
     #[test]
+    fn the_focused_deck_is_drawn_apart() {
+        let top = |text: &str| text.lines().nth(1).unwrap().to_string();
+        let halves = |line: &str| (line.chars().take(60).collect::<String>(), line.chars().skip(60).collect::<String>());
+        let a = render(120, 35, |_| {});
+        let line = top(&a);
+        assert_eq!(line.matches("FOCUS").count(), 1, "{line}");
+        let (left, right) = halves(&line);
+        assert!(left.contains("DECK A") && left.contains("▶ FOCUS") && !right.contains("FOCUS"), "{line}");
+        // a thick border for the focused deck, a plain one for the other
+        assert!(left.starts_with('┏') && right.starts_with('┌'), "{line}");
+        let b = render(120, 35, |v| v.focus_deck = 1);
+        let line = top(&b);
+        let (left, right) = halves(&line);
+        assert!(right.contains("DECK B") && right.contains("▶ FOCUS") && !left.contains("FOCUS"), "{line}");
+        assert!(right.starts_with('┏') && left.starts_with('┌'), "{line}");
+        // the focus is also bright in colour: bold border cells
+        let focused_bold = |focus: u8| {
+            let decks = [deck_a(), deck_b()];
+            let mixer = MixerInfo::default();
+            let lib = lib();
+            let mut v = test_view(&decks, &mixer, &lib);
+            v.focus_deck = focus;
+            let mut term = Terminal::new(TestBackend::new(120, 35)).unwrap();
+            term.draw(|f| {
+                let area = f.area();
+                draw(f.buffer_mut(), area, &v);
+            })
+            .unwrap();
+            let buf = term.backend().buffer().clone();
+            (buf[(0, 1)].modifier.contains(Modifier::BOLD), buf[(60, 1)].modifier.contains(Modifier::BOLD))
+        };
+        assert_eq!(focused_bold(0), (true, false));
+        assert_eq!(focused_bold(1), (false, true));
+    }
+
+    #[test]
+    fn showcmd_and_the_loop_mode_are_in_the_status_line() {
+        let status = |f: &dyn Fn(&mut View)| {
+            let text = render(120, 35, |v| f(v));
+            text.lines().last().unwrap().to_string()
+        };
+        let plain = status(&|v| v.focus_deck = 1);
+        assert!(!plain.contains("LOOP") && plain.contains("h l focus"), "{plain}");
+        // the half-typed command sits at the right end
+        let s = status(&|v| {
+            v.focus_deck = 1;
+            v.showcmd = "42m";
+        });
+        assert!(s.contains("42m"), "{s}");
+        assert!(s.trim_end().ends_with("42m"), "{s}");
+        // deck A loops: the mode shows while A has the focus, not while B does
+        let s = status(&|v| v.focus_deck = 0);
+        assert!(s.contains("-- LOOP 4 --"), "{s}");
+        // with the chip and the count together nothing overlaps
+        let labels = leak_labels();
+        let s = status(&|v| {
+            v.showcmd = "4";
+            v.hints = HintView { labels, selected: Some(Target::Slot(Slot::Ctl(Ctl::Crossfader))), chip: Some("◆ crossfader -0.25"), ..HintView::default() };
+        });
+        assert!(s.contains("-- LOOP 4 --") && s.contains(" 4 ") && s.contains("◆ crossfader -0.25"), "{s}");
+    }
+
+    #[test]
+    fn hot_cue_slots_are_labelled_with_marks() {
+        let text = render(120, 35, |_| {});
+        assert!(text.contains(" a  0:12 ") && text.contains(" c  1:35 ") && text.contains(" b  --"), "{text}");
+        assert!(text.contains("e○") && text.contains("h○"), "{text}");
+        assert!(!text.contains(" 7  ") && !text.contains("pick a track below and press <"), "{text}");
+    }
+
+    #[test]
     fn explanation_next_to_the_chip_and_in_the_hint_status() {
         let sel = Target::Slot(Slot::Ctl(Ctl::Eq(1, 0)));
         let labels = leak_labels();
         let text = render(120, 35, |v| {
+            v.focus_deck = 1;
             v.hints = HintView { labels, selected: Some(sel), chip: Some("◆ B low -1.00"), ..HintView::default() };
             v.learn.explain = Some(crate::dj::glossary::explain(sel));
         });
@@ -1868,6 +1965,7 @@ mod tests {
         assert!(expl < chip && status[expl..chip].trim_end().ends_with("bassline at a time"), "{status}");
         // a note does not hide it: they share the line
         let text = render(120, 35, |v| {
+            v.focus_deck = 1;
             v.hints = HintView { labels, selected: Some(sel), chip: Some("◆ B low -1.00"), ..HintView::default() };
             v.learn.explain = Some(crate::dj::glossary::explain(sel));
             v.note = Some("loading Kaiku onto deck B");
@@ -2098,6 +2196,8 @@ mod tests {
             lib_total: lib.len(),
             lib_sel: 0,
             release_events: true,
+            focus_deck: 0,
+            showcmd: "",
             set: None,
             rec: None,
             overlay: None,
@@ -2120,7 +2220,7 @@ mod tests {
         for (t, _) in hints::table().into_iter().filter(|(t, _)| !patchy(t)) {
             assert!(spots.iter().any(|s| s.target == t), "no spot for {t:?}");
         }
-        assert_eq!(spots.len(), 22);
+        assert_eq!(spots.len(), 20);
         let (with, _) = render_full(120, 35, |v| {
             v.hints = HintView { active: true, labels: leak_labels(), ..HintView::default() };
         });
@@ -2131,7 +2231,7 @@ mod tests {
             assert_eq!(a.chars().count(), b.chars().count());
         }
         assert!(with.contains("HINTS"));
-        for l in ["A  ", "TA", "TS", "GA", "XA", "CA", "VA", "ZA", "BA", "BS", "BD"] {
+        for l in ["A  ", "TA", "TS", "GA", "XA", "CA", "ZA", "BA", "BS", "BD"] {
             assert!(with.contains(l), "label {l} missing");
         }
     }
