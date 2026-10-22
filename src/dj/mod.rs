@@ -2014,7 +2014,12 @@ impl DjScreen {
             (Some(path), Some(m)) => {
                 let name = m.title.clone();
                 self.session.send(vec![DjCall::Load { deck: deck as u32, path }]);
-                self.set_note(format!("loading {name} onto deck {}", if deck == 0 { "A" } else { "B" }));
+                // the deck you just loaded is the one you work on next, like vim's :e
+                self.keys.set_focus(deck);
+                self.set_note(format!(
+                    "loading {name} onto deck {} · focused: Space plays, c cues, s syncs",
+                    if deck == 0 { "A" } else { "B" }
+                ));
             }
             _ => self.set_note("nothing selected in the library"),
         }

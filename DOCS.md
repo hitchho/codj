@@ -125,7 +125,7 @@ Soulseek integration allows searching and downloading music from the soulseek p2
 |---|----|
 |`j` / `k`, `Ctrl-d` / `Ctrl-u`, `gg` / `G`|Move|
 |`/`|Search (regex, `artist:` `title:` `genre:`); `Enter` keeps the filter and goes back to the list, `Esc` clears it|
-|`a` / `b`|Load the highlighted track onto deck A / B|
+|`a` / `b`|Load the highlighted track onto deck A / B and focus that deck|
 |`Enter`|Load it onto the deck that is not playing|
 |`:`|Command line|
 |`Tab` / `Esc`|Back to the deck keys (`Esc` does not leave DJ mode; `:q` does)|
@@ -427,7 +427,7 @@ A guided first mix with your own library, like vimtutor. A pane shares the botto
 |#|Step|Keys|Done when (polled `DjDecks` / `DjMixer`)|
 |-|----|----|----------------------------------------|
 |1|Choose two tracks: codj proposes a pair from the library with tempos within ±6 % and marks them `★A` / `★B`|`Shift+Tab` browses the library, `a` loads the highlighted track on A, `b` on B, `Tab` comes back (after A is loaded the highlight moves to the second track)|both decks loaded, with different files|
-|2|Play deck A: what BPM, beat and bar are, and the phase meter|`Space` (A has the focus)|A playing|
+|2|Play deck A: what BPM, beat and bar are, and the phase meter|`h Space` (h focuses A; loading a deck focuses it)|A playing|
 |3|Listen to B in headphones: what cue is for|`F2`, and `:xfade a` so the room only hears A|B's headphone send on, or 45 s (with one output, `internal` mode, there is nothing to hear apart; the step says so)|
 |4|Sync B to A: what sync does, the ±16 % limit, what a yellow `?` next to the BPM means, `:grid`|`l s` (focus B, sync)|B synced|
 |5|Start B on a phrase: phrases of 16 / 32 bars, quantize. The pane counts A's bars and says when to press|`Space` (B has the focus)|B playing|

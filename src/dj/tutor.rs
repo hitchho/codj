@@ -103,7 +103,7 @@ impl Step {
     pub fn keys(self) -> &'static [&'static str] {
         match self {
             Step::Pick => &["Shift+Tab  browse the library: j k move, a loads on A, b on B", "/  searches it"],
-            Step::PlayA => &["Space  play A (A has the focus; Space again pauses)"],
+            Step::PlayA => &["h Space  focus A and play it (loading a deck focuses it; Space again pauses)"],
             Step::HearB => &["F2  headphones on B (F1 for A)", ":xfade a  crossfader to A: only A in the room"],
             Step::SyncB => &["l s  focus B and sync it to A (h s syncs A to B)"],
             Step::Phrase => &["Space  play B (it has the focus) on the phrase line (bar 1, 17, 33 ...)"],
@@ -530,8 +530,9 @@ mod tests {
             }
         };
         let long = Duration::from_secs(60);
-        // 2: play A (A has the focus)
-        let calls = type_keys(&mut keys, " ");
+        // 2: h Space plays A, whichever deck was loaded last
+        keys.set_focus(1);
+        let calls = type_keys(&mut keys, "h ");
         assert_eq!(calls, vec![DjCall::Play(0)]);
         apply(&calls, &mut decks, &mut m);
         assert!(is_done(Step::PlayA, &decks, &m, long));
