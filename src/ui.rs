@@ -2450,6 +2450,7 @@ impl<'a> UI<'a> {
             ("q  Q", "queue the track · show the queue"),
             ("m", "queue 5 similar-sounding tracks"),
             (":dj  or  M", "DJ mode: two decks, mixing, sets"),
+            (":tutor", "a guided first mix (opens DJ mode)"),
             (":slsk <query>", "search Soulseek and download"),
             (":set", "settings"),
             (":q  ZZ", "quit (music keeps playing in codjd)"),
@@ -3736,6 +3737,17 @@ impl<'a> UI<'a> {
         if !commands.is_empty() {
             let command_name = commands.remove(0);
             let command_args = commands;
+            // DJ-mode commands work from here too: switch to DJ mode and run them there
+            if matches!(command_name.as_str(), "tutor" | "patch") {
+                self.clear_command();
+                self.change_list_mode(ListMode::Select);
+                self.leave_command_region();
+                self.enter_dj().await;
+                if let Some(dj) = self.dj.as_mut() {
+                    dj.run_command(command.trim());
+                }
+                return Ok(false);
+            }
             // vim's :help opens the key list
             if matches!(command_name.as_str(), "h" | "help") {
                 self.help_open = true;

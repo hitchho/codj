@@ -2012,7 +2012,7 @@ impl DjScreen {
         self.session.send(calls);
     }
 
-    fn run_command(&mut self, cmd: &str) -> Outcome {
+    pub fn run_command(&mut self, cmd: &str) -> Outcome {
         match parse_command(cmd) {
             Command::Exit => return Outcome::Exit,
             Command::Load(d) => self.load(d),
