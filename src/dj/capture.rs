@@ -97,7 +97,14 @@ pub fn pick_deck(decks: &[DeckInfo], mixer: &MixerInfo) -> Result<u32, String> {
 
 /// The reply of codjd after `ok `, shown to the user: arrows as arrows
 pub fn pretty_reply(detail: &str) -> String {
-    detail.trim().replace(" -> ", " → ")
+    let text = detail.trim().replace(" -> ", " → ");
+    // codjd counts mixes from 0, the screen from 1 (`:arm 1` is the first mix)
+    if let Some((n, rest)) = text.strip_prefix("mix ").and_then(|t| t.split_once(':')) {
+        if let Ok(n) = n.parse::<usize>() {
+            return format!("mix {}:{rest}", n + 1);
+        }
+    }
+    text
 }
 
 /// Recording state for the strip: `● REC 12.5 bars · 34 events`
@@ -171,7 +178,9 @@ mod tests {
 
     #[test]
     fn texts() {
-        assert_eq!(pretty_reply("mix 2: aft -> smk, 16 bars, 9 items"), "mix 2: aft → smk, 16 bars, 9 items");
+        assert_eq!(pretty_reply("mix 2: aft -> smk, 16 bars, 9 items"), "mix 3: aft → smk, 16 bars, 9 items");
+        assert_eq!(pretty_reply("mix 0: a -> b, 2 bars, 1 items"), "mix 1: a → b, 2 bars, 1 items");
+        assert_eq!(pretty_reply("mixed: fine"), "mixed: fine");
         assert_eq!(rec_text(50.0, 34, false), "● REC 12.5 bars · 34 events");
         assert_eq!(rec_text(0.0, 1, false), "● REC 0.0 bars · 1 event");
         assert_eq!(rec_text(50.0, 34, true), "● REC 12.5 · 34 ev");

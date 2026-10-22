@@ -132,7 +132,7 @@ cmd cue\ mid\ c; cap cap_cue_bad_deck    # usage note, no call
 cmd loopsave\ brk; cap cap_loop_none      # no active loop: daemon's reply as an error
 cmd gridsave\ b; cap cap_grid
 keys F9; sleep 1.6; cap cap_recording      # strip shows the red REC badge, counting
-keys F9; sleep 0.8; cap cap_recorded       # "recorded mix 2: aft → smk, 16 bars, 9 items"
+keys F9; sleep 0.8; cap cap_recorded       # "recorded mix 3: aft → smk, 16 bars, 9 items"
 cmd rec\ on; sleep 1; cap cap_rec_on
 cmd rec\ off; sleep 0.5
 cmd rec; sleep 0.5; cmd rec; sleep 0.5     # toggle on, toggle off

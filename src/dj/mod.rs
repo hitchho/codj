@@ -2869,7 +2869,7 @@ mod tests {
         assert_eq!(parse_command("rec"), Command::Record(None));
         assert_eq!(parse_command("rec off"), Command::Record(Some(false)));
         assert!(matches!(parse_command("cue"), Command::Unknown(_)));
-        assert_eq!(SetCall::Record(false).done_with("mix 2: aft -> smk, 16 bars, 9 items"), "recorded mix 2: aft → smk, 16 bars, 9 items");
+        assert_eq!(SetCall::Record(false).done_with("mix 2: aft -> smk, 16 bars, 9 items"), "recorded mix 3: aft → smk, 16 bars, 9 items");
         assert_eq!(SetCall::Cue(0, "drop".into()).done_with("cue drop -> aft bar 33"), "cue drop → aft bar 33");
         assert_eq!(SetCall::Cue(1, "drop".into()).name(), "SetCue");
     }

@@ -366,7 +366,7 @@ Playing by hand turns into set code: codjd writes the active set's file itself (
 |`:cue <name> [a\|b]`|Capture the deck's position as cue `name` (`cue drop bar 33` in that track's block; a track not yet in the set is added). Status line: `cue drop → aft bar 33`|
 |`:loopsave <name> [a\|b]`|Capture the deck's active loop as loop `name`|
 |`:gridsave [a\|b]`|Write the deck's current grid (after `:grid` corrections) into the set as a `grid` line|
-|`:rec` / `:rec on` / `:rec off`, `F9`|Start / stop recording a mix. While recording every control change on either deck (keys, MCP, D-Bus) is logged; stopping writes the `mix` block and says e.g. `recorded mix 2: aft → smk, 16 bars, 9 items`|
+|`:rec` / `:rec on` / `:rec off`, `F9`|Start / stop recording a mix. While recording every control change on either deck (keys, MCP, D-Bus) is logged; stopping writes the `mix` block and says e.g. `recorded mix 3: aft → smk, 16 bars, 9 items` (mixes count from 1 on the screen, like `:arm 1`)|
 
 Names are set-language identifiers (letters, digits, `_`, `-`, starting with a letter or `_`). Without `a` or `b` the command uses the focused deck (`h` / `l`); an empty focused deck says so and asks for the other one by name.
 
