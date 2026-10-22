@@ -211,7 +211,7 @@ pub enum Finding {
     #[default]
     Searching,
     Found(Proposal),
-    /// no tempos known (an old codjd, nothing analysed): any two tracks will do
+    /// no close pair: tempos too far apart, unknown (an old codjd, nothing analysed) or in doubt
     Nothing,
 }
 
@@ -374,7 +374,7 @@ pub fn live_lines(step: Step, decks: &[DeckInfo], mixer: &MixerInfo, grids: [Opt
                     lines.push(format!("★A {} ({:.1} BPM)", p.a.title, p.a.bpm));
                     lines.push(format!("★B {} ({:.1} BPM)", p.b.title, p.b.bpm));
                 }
-                Finding::Nothing => lines.push("no tempos to compare: pick any two tracks".to_string()),
+                Finding::Nothing => lines.push("no two tracks within 6 % found: pick any two, sync bends one to the other".to_string()),
             }
             lines.push(format!("{} A loaded   {} B loaded", tick(a.loaded), tick(b.loaded)));
             lines
