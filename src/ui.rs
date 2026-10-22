@@ -288,6 +288,8 @@ pub struct UI<'a> {
     search_bufr: Input,
     /// command buffer, used to input commands
     command_bufr: Input,
+    /// `Ctrl-w` was pressed: the next j/k/h/l moves between panels
+    pending_window: bool,
     /// vim count typed before a motion (`5j`)
     count: Option<usize>,
     /// the last `/` search, for `n` / `N`
@@ -782,6 +784,16 @@ impl Region {
             }
             return Ok(false);
         }
+        // Ctrl-w j / k / h / l: move between panels (the same moves as Alt + j / k)
+        if ui.pending_window && key.kind == KeyEventKind::Press {
+            ui.pending_window = false;
+            if let KeyCode::Char(c @ ('j' | 'k' | 'h' | 'l' | 'w')) = key.code {
+                let c = if c == 'w' { 'j' } else { c };
+                let alt = KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT);
+                Region::handle_global(ui, &alt).await;
+            }
+            return Ok(false);
+        }
         if key.code == KeyCode::Char('?') && key.kind == KeyEventKind::Press && !ui.typing() {
             ui.help_open = true;
             return Ok(false);
@@ -971,21 +983,8 @@ impl Region {
         if key.kind == event::KeyEventKind::Press {
             ui.run_global_script(key, ui.region.clone());
             match key.modifiers {
-                KeyModifiers::NONE => {
-                    if let KeyCode::Char(c) = key.code {
-                        match ui.mode {
-                            ListMode::Search | ListMode::Command => {}
-                            // letters are being typed into the soulseek name filter
-                            _ if ui.soulseek_filtering => {}
-                            _ => match c {
-                                'm' => ui.toggle_mute().await,
-                                'p' => ui.toggle_play().await,
-                                'n' => ui.play_next().await,
-                                _ => {}
-                            },
-                        }
-                    }
-                }
+                // plain letters belong to the region (list, queue, ...): no globals here; they
+                // used to fire together with the list's own m / n
                 KeyModifiers::ALT => {
                     if let ListMode::Select = ui.mode {
                         if let KeyCode::Char(c) = key.code {
@@ -1036,8 +1035,12 @@ impl Region {
                     if let KeyCode::Char(c) = key.code {
                         match c {
                             'l' => ui.toggle_lyrics(),
-                            'p' => ui.toggle_playlists(),
+                            // next / previous track, like vim's Ctrl-n / Ctrl-p
+                            'n' => ui.play_next().await,
+                            'p' => ui.play_preivous().await,
                             's' => ui.toggle_soulseek(),
+                            // Ctrl-w then j/k: the panel below / above, like vim windows
+                            'w' => ui.pending_window = true,
                             _ => {}
                         }
                     }
@@ -1045,7 +1048,6 @@ impl Region {
                 KeyModifiers::SHIFT => {
                     if let KeyCode::Char(c) = key.code {
                         match c {
-                            'N' => ui.play_preivous().await,
                             'D' => ui.download_lyrics(),
                             _ => {}
                         }
@@ -1364,6 +1366,7 @@ impl<'a> UI<'a> {
             mode: ListMode::default(),
             search_bufr: Input::default(),
             command_bufr: Input::default(),
+            pending_window: false,
             count: None,
             last_search: None,
             completion: None,
@@ -2453,6 +2456,9 @@ impl<'a> UI<'a> {
             (":tutor", "a guided first mix (opens DJ mode)"),
             (":slsk <query>", "search Soulseek and download"),
             (":set", "settings"),
+            ("Ctrl-n Ctrl-p", "next / previous track"),
+            ("Ctrl-w j k", "move between panels"),
+            (":lyrics :playlists :mute", "panels, mute"),
             (":q  ZZ", "quit (music keeps playing in codjd)"),
         ];
         let area = frame.area();
@@ -3748,6 +3754,17 @@ impl<'a> UI<'a> {
                 }
                 return Ok(false);
             }
+            match command_name.as_str() {
+                "lyrics" => {
+                    self.toggle_lyrics();
+                    return Ok(false);
+                }
+                "playlists" | "pl" => {
+                    self.toggle_playlists();
+                    return Ok(false);
+                }
+                _ => {}
+            }
             // vim's :help opens the key list
             if matches!(command_name.as_str(), "h" | "help") {
                 self.help_open = true;
@@ -4800,7 +4817,7 @@ fn sort_label(sort: &Sort) -> &'static str {
 
 /// `:` commands, for completion (the main name of each; aliases still work when typed)
 const COMMANDS: &[&str] = &[
-    "dj", "tutor", "patch", "slsk", "set", "dupes", "help", "q", "reload", "pause", "resume", "toggle_mute",
+    "dj", "tutor", "patch", "slsk", "set", "dupes", "help", "lyrics", "playlists", "mute", "q", "reload", "pause", "resume", "toggle_mute",
     "create_playlist", "add_to_playlist", "rename_playlist", "remove_playlist", "slsk_connect",
     "slsk_disconnect",
 ];

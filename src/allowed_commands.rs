@@ -81,7 +81,7 @@ impl FromStr for CommandName {
             "create_playlist" => Ok(Self::CreatePlaylist),
             "rename_playlist" => Ok(Self::RenamePlaylist),
             "remove_playlist" => Ok(Self::RemovePlaylist),
-            "toggle_mute" => Ok(Self::ToggleMute),
+            "toggle_mute" | "mute" => Ok(Self::ToggleMute),
             "pause" => Ok(Self::Pause),
             "reload" => Ok(Self::Reload),
             "resume" => Ok(Self::Resume),

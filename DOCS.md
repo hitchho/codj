@@ -2,10 +2,11 @@
 
 |Region|Mode|Keybind|Desc|
 |------|----|-----|------|
-|Any|Normal|`m`|Toggle mute|
-|Any|Normal|`p`|Toggle `play` for the currently playing song|
-|Any|Normal|`Alt + j`|Select the region `bellow`|
-|Any|Normal|`Alt + k`|Select the region `above`|
+|Any|Normal|`?`, `:help`|Every key of the normal view on the screen|
+|Any|Normal|`Space`|Pause / continue|
+|Any|Normal|`Ctrl + n` / `Ctrl + p`|Next / previous track|
+|Any|Normal|`Ctrl + w` then `j` / `k`|Select the panel below / above (also `Alt + j` / `Alt + k`)|
+|Any|Normal|`:mute`, `:lyrics`, `:playlists`|Mute, the lyrics panel, the playlists panel|
 |List|Normal|`j`|Scroll down|
 |List|Normal|`k`|Scroll up|
 |Any|Any|`Space`|Pause / continue (except while typing in search, the command line or a filter)|
