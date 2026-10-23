@@ -1097,8 +1097,8 @@ pub enum Browse {
     /// `q`: add the highlighted track to the player's queue
     Queue,
     Help,
-    /// `t` or `T`: a transition with the highlighted track; the deck keys take the next keys
-    Transition,
+    /// a key the library has no use for: back on the decks, the deck keys take it
+    Pass,
 }
 
 /// What a `:` command asks for
@@ -1565,8 +1565,11 @@ impl Pane {
             KeyCode::Char('b') | KeyCode::Char('>') => return Browse::Load(1),
             KeyCode::Enter => return Browse::LoadFree,
             KeyCode::Char('?') => return Browse::Help,
-            KeyCode::Char('t' | 'T') => return Browse::Transition,
             KeyCode::Esc | KeyCode::Tab | KeyCode::BackTab => self.focus = Focus::Decks,
+            KeyCode::Char(_) | KeyCode::Left | KeyCode::Right | KeyCode::F(_) => {
+                self.focus = Focus::Decks;
+                return Browse::Pass;
+            }
             _ => {}
         }
         Browse::Nothing
@@ -2492,17 +2495,20 @@ impl DjScreen {
         }
         // a half-typed `t` in the library goes on with the deck keys: its menu is up
         if self.pane.browsing() && !self.keys.has_pending() {
-            match self.pane.browse_key(key) {
+            let browsed = self.pane.browse_key(key);
+            let pass = browsed == Browse::Pass;
+            match browsed {
                 Browse::Load(d) => self.load(d),
                 Browse::LoadFree => self.load_smart(),
                 Browse::Queue => self.queue_selected(),
                 Browse::Help => self.help = true,
-                Browse::Transition => {
-                    self.keys.on_key(key, now);
-                }
+                // h l f t Space...: the decks get the key, with the library left behind
+                Browse::Pass => {}
                 Browse::Nothing => {}
             }
-            return Outcome::Stay;
+            if !pass {
+                return Outcome::Stay;
+            }
         }
         if self.pane.typing() {
             return match self.pane.handle_typing(key) {
