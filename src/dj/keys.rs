@@ -215,6 +215,8 @@ pub enum Pending {
     GoMark,
     /// `g`
     G,
+    /// `t` (at the next phrase line) or `T` (at the outro): a transition, its technique next
+    T { outro: bool },
 }
 
 impl Pending {
@@ -223,6 +225,8 @@ impl Pending {
             Pending::Mark => 'm',
             Pending::GoMark => '\'',
             Pending::G => 'g',
+            Pending::T { outro: false } => 't',
+            Pending::T { outro: true } => 'T',
         }
     }
 }
@@ -273,6 +277,9 @@ pub enum Nav {
     Help,
     /// `gt`: automix from the other (playing) deck into the focused one, like vim's next tab
     AutoMix,
+    /// `t{technique}` / `T{technique}`: the DJ's transition into the focused deck: a recipe
+    /// (None: codj chooses), a length in bars (the count), at the outro instead of the next phrase
+    Transition { recipe: Option<&'static str>, bars: Option<u32>, outro: bool },
     /// a one-line message for the status line
     Note(&'static str),
 }
@@ -407,6 +414,7 @@ pub fn bind(k: &NKey) -> Option<Binding> {
             ']' => Some(Act(A::Jump(PHRASE_BEATS))),
             '[' => Some(Act(A::Jump(-PHRASE_BEATS))),
             'g' | '4' => Some(Act(A::Seek(SeekTo::Outro))),
+            't' => Some(Pend(Pending::T { outro: true })),
             '=' => Some(Pitch(1)),
             'r' => Some(Act(A::ResetDeck)),
             '/' => Some(Nav(N::Help)),
@@ -425,6 +433,7 @@ pub fn bind(k: &NKey) -> Option<Binding> {
         'v' => Act(A::Loop),
         '0'..='9' => Digit(c as u8 - b'0'),
         'g' => Pend(Pending::G),
+        't' => Pend(Pending::T { outro: false }),
         'm' => Pend(Pending::Mark),
         '\'' | '`' => Pend(Pending::GoMark),
         '-' => Pitch(-1),
@@ -438,6 +447,22 @@ pub fn bind(k: &NKey) -> Option<Binding> {
         ']' => Bracket(1),
         '[' => Bracket(-1),
         '\\' => Nav(N::Reset),
+        _ => return None,
+    })
+}
+
+/// The technique a letter after `t` names: `Some(None)` is `tt`, codj's own choice
+pub fn technique(c: char) -> Option<Option<&'static str>> {
+    Some(match c {
+        'b' => Some("blend"),
+        's' => Some("bassswap"),
+        'e' => Some("eq-swap"),
+        'f' => Some("filter-blend"),
+        'o' => Some("echo-out"),
+        'r' => Some("loop-roll"),
+        'c' => Some("cut"),
+        'k' => Some("brake"),
+        't' => None,
         _ => return None,
     })
 }
@@ -1190,6 +1215,10 @@ impl DjKeys {
                 'g' => self.run(Act::Seek(SeekTo::Start), count, now, true),
                 't' => Some(Nav::AutoMix),
                 _ => None,
+            },
+            Pending::T { outro } => match technique(c) {
+                Some(recipe) => Some(Nav::Transition { recipe, bars: count, outro }),
+                None => Some(Nav::Note("transitions: tb blend · ts bass swap · te EQ swap · tf filter · to echo-out · tr roll · tc cut · tk brake · tt codj picks")),
             },
         }
     }
@@ -2051,11 +2080,11 @@ mod tests {
             assert_eq!(bind(&normalize(&alt(c, KeyEventKind::Press))), None, "Alt+{c}");
         }
         // the old deck letters that have no meaning now
-        for c in "zxaqeridjkopyntz,<>".chars() {
+        for c in "zxaqeridjkopynz,<>".chars() {
             assert_eq!(bind(&normalize(&press(c))), None, "{c}");
         }
         // capitals and shifted symbols of the old map: A B load, Shift+digit clears
-        for c in "ACDEFHIJKLMNOPQSTUVXYZ!@#%^&*()_|".chars() {
+        for c in "ACDEFHIJKLMNOPQSUVXYZ!@#%^&*()_|".chars() {
             assert_eq!(bind(&normalize(&press(c))), None, "{c}");
         }
         // ctrl combinations never reach the decks (Ctrl-r is redo, nothing else)
@@ -2576,6 +2605,28 @@ mod tests {
         let after = k.tick(t0 + ms(2100));
         assert!(sets(&after).is_empty() || sets(&after).iter().all(|(_, d, _)| *d == 0), "{after:?}");
         assert!((k.target(Slot::Rate(0), t0 + ms(2100)) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn t_then_a_letter_is_a_transition_and_a_count_its_length() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        assert_eq!(k.on_key(&press('t'), t0), None);
+        assert_eq!(k.showcmd(), "t", "half typed, like vim");
+        assert_eq!(k.on_key(&press('b'), t0 + ms(50)), Some(Nav::Transition { recipe: Some("blend"), bars: None, outro: false }));
+        // a count is the length, a capital T is at the outro
+        k.on_key(&press('1'), t0 + ms(100));
+        k.on_key(&press('6'), t0 + ms(110));
+        k.on_key(&KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT), t0 + ms(120));
+        assert_eq!(k.on_key(&press('r'), t0 + ms(130)), Some(Nav::Transition { recipe: Some("loop-roll"), bars: Some(16), outro: true }));
+        // tt: codj chooses; an unknown letter says what the letters are
+        k.on_key(&press('t'), t0 + ms(200));
+        assert_eq!(k.on_key(&press('t'), t0 + ms(210)), Some(Nav::Transition { recipe: None, bars: None, outro: false }));
+        k.on_key(&press('t'), t0 + ms(300));
+        assert!(matches!(k.on_key(&press('q'), t0 + ms(310)), Some(Nav::Note(n)) if n.contains("tb blend")));
+        for (c, r) in [('s', "bassswap"), ('e', "eq-swap"), ('f', "filter-blend"), ('o', "echo-out"), ('c', "cut"), ('k', "brake")] {
+            assert_eq!(technique(c), Some(Some(r)));
+        }
     }
 
     #[test]

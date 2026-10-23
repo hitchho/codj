@@ -59,6 +59,8 @@ pub const DECK_KEYS: &[Entry] = &[
     e("} {", "jump a phrase (16 bars) forward / back"),
     e("0 gg", "back to the start of the track"),
     e("gt", "automix: {other} hands over to {self}, beat-matched"),
+    e("t{x}", "transition: b s e f o r c k t (16tb: 16 bars)"),
+    e("T{x}", "the same, starting at the outro"),
     e("G $", "to the outro: 32 bars before the end"),
     e("m{a-h}", "mark: save a hot cue here (eight of them)"),
     e("'{a-h}", "jump to a mark (` works too)"),

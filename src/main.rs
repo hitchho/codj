@@ -177,6 +177,7 @@ pub trait Server {
     /// automix (the player's beat-matched transitions): mix from `from` (playing) into the
     /// track loaded paused on `to`; "ok <what> · bar <n>", then the mix as set text
     async fn dj_auto_mix(&self, from: u32, to: u32) -> Result<String>;
+    async fn dj_transition(&self, from: u32, to: u32, recipe: &str, bars: u32, at_outro: bool) -> Result<String>;
     /// the player's automix on or off
     async fn automix(&self, on: bool) -> Result<String>;
     /// (on, next title, seconds to the transition: 0 while mixing, -1 none coming, "blend · 32 bars")

@@ -154,7 +154,9 @@ pub fn describe_error(what: &str, e: &zbus::Error) -> String {
 /// Like [`describe_error`] for the set runtime, which is newer than the deck API
 pub fn describe_set_error(what: &str, e: &zbus::Error) -> String {
     let text = e.to_string();
-    if text.contains("UnknownMethod") || text.contains("Unknown method") || text.contains("No such method") {
+    if (text.contains("UnknownMethod") || text.contains("Unknown method") || text.contains("No such method")) && what.starts_with("Dj") {
+        format!("this codjd is older than codj ({what}): `codjd -r` switches it to the installed build")
+    } else if text.contains("UnknownMethod") || text.contains("Unknown method") || text.contains("No such method") {
         "codjd has no set runtime: update codjd".to_string()
     } else {
         describe_error(what, e)
@@ -188,6 +190,8 @@ pub enum SetCall {
     MixNew(MixNewReq),
     /// `gt`: `DjAutoMix` from the first deck into the second
     AutoMix(u32, u32),
+    /// `t{technique}`: `DjTransition` (from, to, recipe or "auto", bars or 0, at the outro)
+    Transition(u32, u32, &'static str, u32, bool),
 }
 
 /// A call to the patch decks. Like the set calls they run one after another in their own task.
@@ -351,6 +355,7 @@ impl SetCall {
             SetCall::Recipes => "SetRecipes",
             SetCall::MixNew(_) => "SetRecipeText",
             SetCall::AutoMix(..) => "DjAutoMix",
+            SetCall::Transition(..) => "DjTransition",
         }
     }
 
@@ -361,7 +366,7 @@ impl SetCall {
             SetCall::Use(n) => format!("set {n} active"),
             SetCall::New(n) => format!("set {n} made and active: :mix new writes a mix, F9 records, F10 edits"),
             SetCall::Arm(m) => format!("armed mix {}", m + 1),
-            SetCall::Disarm => "disarmed".into(),
+            SetCall::Disarm => "cancelled: no mix or transition is planned now".into(),
             SetCall::Auto(on) => format!("auto {}", if *on { "on" } else { "off" }),
             SetCall::Preview(m, bars) => format!("previewing mix {} from {bars} bars before", m + 1),
             SetCall::Load(t) => format!("loaded track {}", t + 1),
@@ -374,6 +379,7 @@ impl SetCall {
             SetCall::AudioRec(on) => if *on { "recording the room" } else { "recording saved" }.into(),
             SetCall::Recipes | SetCall::MixNew(_) => String::new(),
             SetCall::AutoMix(_, to) => format!("automix into deck {}", deck_letter(*to)),
+            SetCall::Transition(_, to, ..) => format!("transition into deck {}", deck_letter(*to)),
         }
     }
 
@@ -388,6 +394,9 @@ impl SetCall {
             // the first line says what it chose; the set text follows (for saving, not for the status line)
             SetCall::AutoMix(_, to) => {
                 format!("automix into deck {}: {}", deck_letter(*to), detail.lines().next().unwrap_or("").trim())
+            }
+            SetCall::Transition(_, to, ..) => {
+                format!("into deck {}: {} · F8 cancels", deck_letter(*to), detail.lines().next().unwrap_or("").trim())
             }
             _ => text,
         }
@@ -513,6 +522,7 @@ async fn run_set_call(proxy: &ServerProxy<'_>, call: &SetCall) -> zbus::Result<S
         SetCall::Record(on) => SetReply::Status(proxy.set_record(*on).await?),
         SetCall::AudioRec(on) => SetReply::Status(proxy.record_audio(*on).await?),
         SetCall::AutoMix(from, to) => SetReply::Status(proxy.dj_auto_mix(*from, *to).await?),
+        SetCall::Transition(from, to, recipe, bars, outro) => SetReply::Status(proxy.dj_transition(*from, *to, recipe, *bars, *outro).await?),
     })
 }
 
@@ -1828,6 +1838,24 @@ impl DjScreen {
     /// then onto the other, so a load never cuts the track the room hears
     /// `gt`: mix from the other deck (on air) into the focused one (loaded, paused), the way the
     /// player's automix would
+    /// `t{technique}` / `T{technique}`: the DJ's transition from the playing deck into the focused one
+    fn transition(&mut self, recipe: Option<&'static str>, bars: Option<u32>, outro: bool) {
+        let to = self.keys.focus();
+        let from = 1 - to;
+        let decks = self.session.shared.lock().unwrap().decks.clone();
+        let letter = |d: u8| if d == 0 { 'A' } else { 'B' };
+        let (Some(f), Some(t)) = (decks.get(from as usize), decks.get(to as usize)) else { return };
+        if !t.loaded {
+            self.set_note(format!("a transition goes into the focused deck {}: load a track there first (Tab, a/b)", letter(to)));
+        } else if t.playing {
+            self.set_note(format!("deck {} is playing: focus the paused deck you want to bring in (h/l)", letter(to)));
+        } else if !f.playing {
+            self.set_note(format!("deck {} is not playing: a transition goes from the playing deck into the focused one", letter(from)));
+        } else {
+            self.session.set_call(SetCall::Transition(from as u32, to as u32, recipe.unwrap_or("auto"), bars.unwrap_or(0), outro));
+        }
+    }
+
     fn auto_mix(&mut self) {
         let to = self.keys.focus();
         let from = 1 - to;
@@ -2402,13 +2430,11 @@ impl DjScreen {
             Nav::Prompt => self.open_prompt(None, now),
             Nav::SetArmNext => self.set_arm(ArmTarget::Next),
             Nav::SetAuto => self.set_auto(None),
-            Nav::SetDisarm => {
-                if self.active_set().is_some() {
-                    self.session.set_call(SetCall::Disarm);
-                }
-            }
+            // F8: a set's armed mix, and a planned transition (t, gt) that has not started
+            Nav::SetDisarm => self.session.set_call(SetCall::Disarm),
             Nav::RecordToggle => self.record(None),
             Nav::AutoMix => self.auto_mix(),
+            Nav::Transition { recipe, bars, outro } => self.transition(recipe, bars, outro),
             Nav::NoSelection => self.set_note("no control picked: f shows the hints, type a label to pick one"),
             Nav::Help => {
                 self.settle(now);
