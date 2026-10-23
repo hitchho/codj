@@ -110,6 +110,7 @@ The client captures the mouse, so selecting text in the terminal needs `Shift` h
 |`:slsk`|Open the soulseek panel|
 |`:dupes` | `:duplicates`|Show every copy of a song, or (default) only the best one: lossless over lossy, then the bigger file. Copies are the same title and artist with about the same length; untagged files are never merged. The list title says how many are hidden|
 |`:dj`|Open the live [DJ mode](#dj-mode) (`?` explains every key there, `:tutor` teaches a first mix) (also `Shift + m` in the list)|
+|`:automix` / `:automix on\|off`|[Automix](#automix), the beat-matched transitions between tracks, off / on (toggles without an argument)|
 |`:settings` | `:set`|Open the soulseek settings panel: `j`/`k` move, `Enter` edits, `Space` toggles, `Esc` closes. Changes are saved to your config file right away (comments kept); ranking settings apply to the current results immediately|
 
 # Soulseek
@@ -129,6 +130,19 @@ Soulseek integration allows searching and downloading music from the soulseek p2
 |`Enter`|Load it onto the focused deck (`h` / `l`); onto the other one if the focused deck is playing|
 |`:`|Command line|
 |`Tab` / `Esc`|Back to the deck keys (`Esc` does not leave DJ mode; `:q` does)|
+
+## Automix
+
+Press play and leave it: near the end of each track codjd loads the next one (what `Ctrl-n` would play: the queue first, then the list) on its second deck and mixes into it on the beat, like a DJ. You never type or set anything; the play bar's bottom-left corner says what is coming and when, `next: CRIA · blend in 1:12`, then `mixing into CRIA · blend` while it runs, and the playing track, the list cursor and MPRIS move to the new track the moment it starts.
+
+| the two tracks | transition |
+|---|---|
+| tempos within 6 % | `blend`: 32 bars, beatmatched, the bass swaps halfway |
+| within 12 % | `filter-blend`: 16 bars, beatmatched, the old track muffled while the new one opens up |
+| further apart | an 8 bar crossfade on the beat, not beatmatched |
+| a track without a beat grid (`codjd fetch-models` gives grids) | an 8 second crossfade |
+
+The mix starts about 32 bars before the end, on a phrase line (where music changes: bar 1, 17, 33 ...). Repeat one and no-repeat never mix. Picking a track, `Ctrl-n`, a seek or stop drop a transition (a running one lands on the new track first); a pause during one lands it too. It never touches a deck you loaded in DJ mode and stays out of the way while a set is in use. `:automix` turns it off and on (`[player] automix = false` in codjd's config makes off the default). In DJ mode `gt` runs the same thing between the decks.
 
 ## Registration
 
@@ -215,6 +229,7 @@ DJ mode is vim for decks. **One deck has the focus** (A at the start) and every 
 |`w` / `b`|Jump 1 beat forward / back, `4w` 4 beats, `12b` 12 beats back (beat phase is kept)|
 |`W` / `B`|Jump a bar (4 beats) forward / back, `2W` two bars. A bar is taken as 4 beats, codjd reports no time signature|
 |`}` / `{`|Jump a phrase (16 bars, 64 beats) forward / back, `2}` two phrases|
+|`gt`|[Automix](#automix) from the other deck (playing) into the focused one (loaded, paused): codjd picks the transition for the two tempos (a 32 bar blend, a 16 bar filter blend, or a crossfade) and starts it on the playing deck's next 8 bar phrase. Like vim's `gt` (next tab): on to the next track. The status line says what it chose (`automix into deck B: blend · 32 bars · bar 97`)|
 |`0` or `gg`|Go to the start of the track (the first downbeat when the grid is known, else 0 s). A `0` after other digits is part of a count (`10w`)|
 |`G` or `$`|Go to the outro: 32 bars before the end (60 s before the end without a grid). Seeking does not keep the beat phase, jumps do|
 |`m{a-h}`|Mark: save a hot cue at the playhead (eight slots, `a` to `h`; beat-snapped with quantize)|
@@ -244,7 +259,7 @@ DJ mode is vim for decks. **One deck has the focus** (A at the start) and every 
 |Mouse wheel|Edits the picked control (up = +); with nothing picked it scrolls the library. Clicks do nothing in DJ mode|
 |`Esc`|Closes the set error overlay if open; else drops a half-typed count or mark; cancels the hints if they are up; clears the picked control. It never leaves DJ mode|
 
-Nothing else is bound on the decks: no letter, digit or `Alt` combination plays, and there is no `x` / `d` that could unload a track in the middle of a set.
+Nothing else is bound on the decks: no other letter, digit or `Alt` combination plays (`gt` is two keys on purpose, so a stray key never starts a mix), and there is no `x` / `d` that could unload a track in the middle of a set.
 
 **Commands** (`:` then Enter; the mixer is set here and through the hints):
 

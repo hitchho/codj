@@ -174,6 +174,13 @@ pub trait Server {
     /// corrects a deck's detected tempo by a factor (2, 0.5, 1.5, 0.6667; 0 resets), saved per
     /// track; replies "ok <bpm>" or an error
     async fn dj_grid_scale(&self, deck: u32, factor: f64) -> Result<String>;
+    /// automix (the player's beat-matched transitions): mix from `from` (playing) into the
+    /// track loaded paused on `to`; "ok <what> · bar <n>", then the mix as set text
+    async fn dj_auto_mix(&self, from: u32, to: u32) -> Result<String>;
+    /// the player's automix on or off
+    async fn automix(&self, on: bool) -> Result<String>;
+    /// (on, next title, seconds to the transition: 0 while mixing, -1 none coming, "blend · 32 bars")
+    async fn automix_state(&self) -> Result<(bool, String, f64, String)>;
     /// (bpm, first_beat_s, downbeat_offset, beats_per_bar, confidence, variable, octave_doubt,
     /// analyzed)
     async fn get_grid(&self, path: &str) -> Result<(f64, f64, u32, u32, f64, bool, bool, bool)>;

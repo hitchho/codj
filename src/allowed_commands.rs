@@ -30,6 +30,8 @@ pub enum CommandName {
     Settings,
     Duplicates,
     Dj,
+    /// `:automix [on|off]`: the player's beat-matched transitions
+    Automix,
 }
 
 impl CommandName {
@@ -66,6 +68,7 @@ impl CommandName {
             CommandName::Settings => 0,
             CommandName::Duplicates => 0,
             CommandName::Dj => 0,
+            CommandName::Automix => 0,
         }
     }
 }
@@ -92,6 +95,7 @@ impl FromStr for CommandName {
             "settings" | "set" => Ok(Self::Settings),
             "dupes" | "duplicates" => Ok(Self::Duplicates),
             "dj" => Ok(Self::Dj),
+            "automix" => Ok(Self::Automix),
             _ => Err(std::io::Error::other(format!(
                 "Unkown command variant {}",
                 s

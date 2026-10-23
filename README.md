@@ -22,7 +22,7 @@ The first five minutes, all vim keys:
 | `?` | every key on the screen, `:help` the same |
 | `j` `k` `5j` `gg` `G` | move |
 | `/` then `Enter`, `n` `N` | search (regex), next / previous match |
-| `Enter`, `Space` | play, pause |
+| `Enter`, `Space` | play, pause (tracks blend into each other on the beat: `:automix` toggles it) |
 | `:slsk <artist>` | search Soulseek and download (first time: `:set`, fill in a username) |
 | `:dj` | DJ mode: two decks; `Tab` then `j`/`k` and `a`/`b` loads a track onto deck A/B |
 | `:tutor` | a guided first mix with your own tracks (opens DJ mode) |
@@ -40,6 +40,7 @@ ___
 ![Show Case](./assets/mplayer_wide_showcase.png "show case 4")
 
 # Features
+- automix: press play and the tracks blend into each other on the beat, like a DJ (a streaming app's crossfade, but beatmatched): close tempos get a long blend with a bass swap, further apart a filter blend, a track without a beat grid a plain crossfade. The play bar shows what is coming (`next: CRIA · blend in 1:12`); on by default, `:automix` toggles it; in DJ mode `gt` does the same from the playing deck into the focused one. Needs a codjd with automix, see [Automix](./DOCS.md#automix)
 - vim-style keys: `j`/`k`, `gg`/`G`, `h`/`l` seek, `H`/`L` volume, `ZZ` / `:q` to quit
 - regex search over title, artist and file name (`/`, then `n`/`N`); no match? `Enter` searches Soulseek
 - play queue (`q` to queue, `Shift+Q` to open it)

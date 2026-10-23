@@ -316,6 +316,8 @@ pub struct UI<'a> {
     pub geometry: ViewGeometry,
     /// Used for event checking
     pub internal_clock: Interval,
+    /// `AutomixState`, polled with the clock: (on, next title, seconds to the transition, what)
+    automix: (bool, String, f64, String),
     /// Lua scripts
     pub scripts: Option<Functions>,
     /// Lua interpreter
@@ -1408,6 +1410,7 @@ impl<'a> UI<'a> {
             fps_controller: FPSController::default(),
             geometry: ViewGeometry::default(Rect::default()),
             internal_clock: tokio::time::interval(Duration::from_secs(1)),
+            automix: (false, String::new(), -1., String::new()),
             lua,
             soulseek_ranked: Vec::new(),
             soulseek_shown: Vec::new(),
@@ -2384,10 +2387,14 @@ impl<'a> UI<'a> {
         ])
         .dim()
         .right_aligned();
-        Block::bordered()
+        let mut block = Block::bordered()
             .title(Line::from(title))
             .title(right)
-            .title_bottom(hint)
+            .title_bottom(hint);
+        if let Some(next) = automix_label(&self.automix) {
+            block = block.title_bottom(Line::from(vec![Span::from(" "), Span::from(next), Span::from(" ")]).left_aligned());
+        }
+        block
             .border_style(Style::new().fg(border))
             .render(self.geometry.bar_geo(), frame.buffer_mut());
 
@@ -2531,6 +2538,7 @@ impl<'a> UI<'a> {
             ("q  Q", "queue the track · show the queue"),
             ("m", "queue 5 similar-sounding tracks"),
             (":dj  or  M", "DJ mode: two decks, mixing, sets"),
+            (":automix", "beat-matched transitions between tracks on / off"),
             (":tutor", "a guided first mix (opens DJ mode)"),
             (":slsk <query>", "search Soulseek and download"),
             (":set", "settings"),
@@ -3685,6 +3693,10 @@ impl<'a> UI<'a> {
                 let time = Box::pin(self.state.proxy.played_duration()).await.unwrap();
                 self.state.batch.played_duration =
                     Duration::from_secs_f32(time);
+                // an older codjd has no automix: nothing to show
+                self.automix = Box::pin(self.state.proxy.automix_state())
+                    .await
+                    .unwrap_or((false, String::new(), -1., String::new()));
             },
             _ = futures::future::ready(()) => {
             },
@@ -4001,6 +4013,22 @@ impl<'a> UI<'a> {
             }
             CommandName::Settings => self.open_settings(),
             CommandName::Dj => self.enter_dj().await,
+            CommandName::Automix => {
+                let on = match args.first().map(String::as_str) {
+                    Some("on") => true,
+                    Some("off") => false,
+                    _ => !self.automix.0,
+                };
+                let note = match self.state.proxy.automix(on).await {
+                    Ok(r) if r == "ok" => {
+                        self.automix.0 = on;
+                        if on { "automix on: tracks blend into each other on the beat" } else { "automix off: tracks play to their end" }.to_string()
+                    }
+                    Ok(r) => format!("automix: {r}"),
+                    Err(_) => "automix: this codjd has none, update codjd".to_string(),
+                };
+                self.list_note = Some((note, Instant::now()));
+            }
             CommandName::Duplicates => {
                 self.music_list.show_duplicates = !self.music_list.show_duplicates;
                 let selected = self.selected_path();
@@ -4944,9 +4972,38 @@ fn sort_label(sort: &Sort) -> &'static str {
     }
 }
 
+/// The play bar's note of the coming transition: `next: CRIA · blend in 1:12`, `mixing into CRIA ·
+/// blend`; None when automix is off or nothing is coming
+fn automix_label((on, title, secs, what): &(bool, String, f64, String)) -> Option<String> {
+    if !on || title.is_empty() || *secs < 0. {
+        return None;
+    }
+    // "blend · 32 bars" -> "blend"
+    let what = what.split(" · ").next().unwrap_or(what);
+    if *secs <= 0. {
+        return Some(format!("mixing into {title} · {what}"));
+    }
+    let s = secs.ceil() as u64;
+    Some(format!("next: {title} · {what} in {}:{:02}", s / 60, s % 60))
+}
+
+#[cfg(test)]
+mod automix_label_tests {
+    use super::automix_label;
+
+    #[test]
+    fn says_what_comes_and_when() {
+        let st = |on, t: &str, s, w: &str| (on, t.to_string(), s, w.to_string());
+        assert_eq!(automix_label(&st(true, "CRIA", 71.2, "blend · 32 bars")).as_deref(), Some("next: CRIA · blend in 1:12"));
+        assert_eq!(automix_label(&st(true, "CRIA", 0., "crossfade · 8 s")).as_deref(), Some("mixing into CRIA · crossfade"));
+        assert_eq!(automix_label(&st(true, "", -1., "")), None);
+        assert_eq!(automix_label(&st(false, "CRIA", 10., "blend · 32 bars")), None);
+    }
+}
+
 /// `:` commands, for completion (the main name of each; aliases still work when typed)
 const COMMANDS: &[&str] = &[
-    "dj", "tutor", "patch", "slsk", "set", "dupes", "help", "lyrics", "playlists", "mute", "q", "reload", "pause", "resume", "toggle_mute",
+    "dj", "automix", "tutor", "patch", "slsk", "set", "dupes", "help", "lyrics", "playlists", "mute", "q", "reload", "pause", "resume", "toggle_mute",
     "create_playlist", "add_to_playlist", "rename_playlist", "remove_playlist", "slsk_connect",
     "slsk_disconnect", "pl new ", "pl add ", "pl mv ", "pl rm ",
 ];
@@ -4963,6 +5020,7 @@ mod completion_tests {
     #[test]
     fn completes_command_names() {
         assert_eq!(complete_command("d"), ["dj", "dupes"]);
+        assert_eq!(complete_command("au"), ["automix"]);
         assert_eq!(complete_command("t"), ["tutor", "toggle_mute"]);
         assert_eq!(complete_command("sl"), ["slsk", "slsk_connect", "slsk_disconnect"]);
         assert!(complete_command("zz").is_empty());

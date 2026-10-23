@@ -732,6 +732,20 @@ impl Fake {
         })
     }
 
+    async fn dj_auto_mix(&self, from: u32, to: u32) -> String {
+        self.log(format!("DjAutoMix {from} {to}"));
+        "ok blend · 32 bars · bar 97\nset \"automix\"\n".into()
+    }
+
+    async fn automix(&self, on: bool) -> String {
+        self.log(format!("Automix {on}"));
+        "ok".into()
+    }
+
+    async fn automix_state(&self) -> (bool, String, f64, String) {
+        (true, "Next Song".into(), 72., "blend · 32 bars".into())
+    }
+
     async fn dj_sync(&self, deck: u32) -> String {
         self.log(format!("DjSync {deck}"));
         self.loaded(deck, |s, i| {
