@@ -401,9 +401,11 @@ cmd fader\ a\ 0.2
 keys u; sleep 0.6                                  # undo: fader A goes back
 cmd delm\ a                                        # DjHotcue 1 0 clear
 cmd delm!                                          # all eight on B
+keys g t; sleep 0.8; cap vim_automix               # gt: DjAutoMix from A (playing) into B (paused, focused)
 cmd focus\ a; cap vim_focus_cmd
 keys '?'; sleep 0.4; cap vim_help; keys '?'; sleep 0.3   # the key map, any key closes it
-cmd q; sleep 0.4; cap vim_left                     # :q leaves
+cmd q; sleep 1.5; cap vim_left                     # :q leaves; the play bar shows the coming automix
+cmd automix; sleep 0.4; cap vim_automix_off        # :automix toggles it (the fake says it is on)
 $T kill-server
 kill $FAKE
 echo "== vim calls received by the fake"; cat "$W/calls-vim.log"
@@ -444,6 +446,11 @@ chk ":fader a names the deck" '^DjSet fader 0 0.2000$'
 chkn "u took the fader back" '^DjSet fader 0 ' 2
 chk ":delm a clears the mark on the focus" '^DjHotcue 1 0 clear$'
 chkn ":delm! clears all eight" '^DjHotcue 1 . clear$' 8
+chk "gt mixes from A into the focused B" '^DjAutoMix 0 1$'
+chkcap "gt says what automix chose" vim_automix 'automix into deck B: blend · 32 bars · bar 97'
+chk ":automix in the normal view toggles it off" '^Automix false$'
+chkcap "the play bar shows the coming transition" vim_left 'next: Next Song · blend in 1:12'
+chkcap ":automix says so" vim_automix_off 'automix off'
 chkcap "loading B focused B" vim_load_focus 'DECK B  ▶ FOCUS'
 chkcap "h focused A" vim_focus_a 'DECK A  ▶ FOCUS'
 chkcap "the focus moved to B" vim_focus_b 'DECK B  ▶ FOCUS'

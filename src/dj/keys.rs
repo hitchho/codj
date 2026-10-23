@@ -271,6 +271,8 @@ pub enum Nav {
     NoSelection,
     /// `?`: the key map on the screen, every key explained
     Help,
+    /// `gt`: automix from the other (playing) deck into the focused one, like vim's next tab
+    AutoMix,
     /// a one-line message for the status line
     Note(&'static str),
 }
@@ -1195,6 +1197,7 @@ impl DjKeys {
             }
             Pending::G => match c {
                 'g' => self.run(Act::Seek(SeekTo::Start), count, now, true),
+                't' => Some(Nav::AutoMix),
                 _ => None,
             },
         }
@@ -2251,6 +2254,18 @@ mod tests {
         // play and pause follow the polled state of the focused deck
         k.set_snapshot(&[deck(false), deck(true)], &MixerInfo::default());
         assert_eq!(typed(&mut k, " ", t0 + ms(7000)), vec![DjCall::Pause(1)]);
+    }
+
+    #[test]
+    fn gt_asks_for_an_automix_and_sends_nothing_itself() {
+        let t0 = Instant::now();
+        let mut k = DjKeys::new(true);
+        k.set_snapshot(&[DeckInfo { playing: true, ..loaded_a(vec![], 0.0) }, loaded_a(vec![], 0.0)], &MixerInfo::default());
+        assert_eq!(k.on_key(&press('g'), t0), None);
+        assert_eq!(k.showcmd(), "g");
+        assert_eq!(k.on_key(&press('t'), t0 + ms(100)), Some(Nav::AutoMix));
+        assert_eq!(k.showcmd(), "");
+        assert_eq!(k.tick(t0 + ms(200)), vec![]);
     }
 
     #[test]

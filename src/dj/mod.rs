@@ -182,6 +182,8 @@ pub enum SetCall {
     Recipes,
     /// `:mix new <recipe> [bars]`
     MixNew(MixNewReq),
+    /// `gt`: `DjAutoMix` from the first deck into the second
+    AutoMix(u32, u32),
 }
 
 /// A call to the patch decks. Like the set calls they run one after another in their own task.
@@ -344,6 +346,7 @@ impl SetCall {
             SetCall::AudioRec(_) => "RecordAudio",
             SetCall::Recipes => "SetRecipes",
             SetCall::MixNew(_) => "SetRecipeText",
+            SetCall::AutoMix(..) => "DjAutoMix",
         }
     }
 
@@ -366,6 +369,7 @@ impl SetCall {
             SetCall::Record(false) => "recording stopped".into(),
             SetCall::AudioRec(on) => if *on { "recording the room" } else { "recording saved" }.into(),
             SetCall::Recipes | SetCall::MixNew(_) => String::new(),
+            SetCall::AutoMix(_, to) => format!("automix into deck {}", deck_letter(*to)),
         }
     }
 
@@ -377,6 +381,10 @@ impl SetCall {
             SetCall::Record(true) => format!("recording: {text}"),
             SetCall::AudioRec(true) => format!("● recording the room to {} · :rec audio stops", home_short(detail.trim())),
             SetCall::AudioRec(false) => format!("saved {}", home_short(detail.trim())),
+            // the first line says what it chose; the set text follows (for saving, not for the status line)
+            SetCall::AutoMix(_, to) => {
+                format!("automix into deck {}: {}", deck_letter(*to), detail.lines().next().unwrap_or("").trim())
+            }
             _ => text,
         }
     }
@@ -500,6 +508,7 @@ async fn run_set_call(proxy: &ServerProxy<'_>, call: &SetCall) -> zbus::Result<S
         SetCall::GridSave(d) => SetReply::Status(proxy.set_grid_capture(*d).await?),
         SetCall::Record(on) => SetReply::Status(proxy.set_record(*on).await?),
         SetCall::AudioRec(on) => SetReply::Status(proxy.record_audio(*on).await?),
+        SetCall::AutoMix(from, to) => SetReply::Status(proxy.dj_auto_mix(*from, *to).await?),
     })
 }
 
@@ -1759,6 +1768,25 @@ impl DjScreen {
 
     /// load the highlighted track onto the focused deck (`h` / `l`), unless that one is playing:
     /// then onto the other, so a load never cuts the track the room hears
+    /// `gt`: mix from the other deck (on air) into the focused one (loaded, paused), the way the
+    /// player's automix would
+    fn auto_mix(&mut self) {
+        let to = self.keys.focus();
+        let from = 1 - to;
+        let decks = self.session.shared.lock().unwrap().decks.clone();
+        let letter = |d: u8| if d == 0 { 'A' } else { 'B' };
+        let (Some(f), Some(t)) = (decks.get(from as usize), decks.get(to as usize)) else { return };
+        if !t.loaded {
+            self.set_note(format!("gt mixes into the focused deck {}: load a track there first (Enter)", letter(to)));
+        } else if t.playing {
+            self.set_note(format!("deck {} is playing: gt mixes into a paused deck (focus it with h/l)", letter(to)));
+        } else if !f.playing {
+            self.set_note(format!("deck {} is not playing: gt mixes from the playing deck into the focused one", letter(from)));
+        } else {
+            self.session.set_call(SetCall::AutoMix(from as u32, to as u32));
+        }
+    }
+
     fn load_smart(&mut self) {
         let playing = |i: usize| self.session.shared.lock().unwrap().decks[i].playing;
         let focus = self.keys.focus();
@@ -2321,6 +2349,7 @@ impl DjScreen {
                 }
             }
             Nav::RecordToggle => self.record(None),
+            Nav::AutoMix => self.auto_mix(),
             Nav::NoSelection => self.set_note("no control picked: f shows the hints, type a label to pick one"),
             Nav::Help => {
                 self.settle(now);

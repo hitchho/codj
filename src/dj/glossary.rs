@@ -58,6 +58,7 @@ pub const DECK_KEYS: &[Entry] = &[
     e("W B", "jump a bar forward / back (2W: 2 bars)"),
     e("} {", "jump a phrase (16 bars) forward / back"),
     e("0 gg", "back to the start of the track"),
+    e("gt", "automix: {other} hands over to {self}, beat-matched"),
     e("G $", "to the outro: 32 bars before the end"),
     e("m{a-h}", "mark: save a hot cue here (eight of them)"),
     e("'{a-h}", "jump to a mark (` works too)"),
@@ -255,6 +256,12 @@ pub const TERMS: &[Term] = &[
         &["recipes"],
         "a ready-made transition shape for :mix new",
         "A recipe is a ready-made transition (a blend, a cut, a filter fade ...). :mix new alone lists them; :mix new <recipe> [bars] turns one into a commented mix block in the active set that you can edit and arm.",
+    ),
+    t(
+        "automix",
+        &["auto mix", "gt"],
+        "the player's own beat-matched transitions",
+        "Automix mixes one track into the next by itself, like a streaming app's crossfade but on the beat: close tempos get a long blend, further apart a filter blend, a track without a steady grid a plain crossfade. In the normal view it is on by default (:automix toggles it); in DJ mode gt does it from the playing deck into the focused one.",
     ),
     t(
         "quantize",
@@ -548,7 +555,7 @@ mod tests {
     fn every_term_is_complete() {
         let wanted = [
             "bpm", "beat", "bar", "phrase", "downbeat", "sync", "phase", "cue", "hot cue", "loop", "eq", "low", "mid", "high", "kill",
-            "bass swap", "filter", "fader", "crossfader", "headphones", "cue send", "gain", "key", "set", "mix", "recipe", "quantize",
+            "bass swap", "filter", "fader", "crossfader", "headphones", "cue send", "gain", "key", "set", "mix", "recipe", "quantize", "automix",
             "patch", "node", "oscillator", "envelope", "adsr", "patch filter", "sequencer", "step", "pattern", "gate", "velocity", "knob", "live/cue",
             "live", "swing",
         ];
