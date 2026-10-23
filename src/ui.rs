@@ -2539,6 +2539,7 @@ impl<'a> UI<'a> {
             ("m", "queue 5 similar-sounding tracks"),
             (":dj  or  M", "DJ mode: two decks, mixing, sets"),
             (":automix", "beat-matched transitions between tracks on / off"),
+            (":autoplay", "never run out: queue tracks that blend, on / off"),
             (":tutor", "a guided first mix (opens DJ mode)"),
             (":slsk <query>", "search Soulseek and download"),
             (":set", "settings"),
@@ -4029,6 +4030,22 @@ impl<'a> UI<'a> {
                 };
                 self.list_note = Some((note, Instant::now()));
             }
+            CommandName::Autoplay => {
+                let current = self.state.proxy.autoplay_state().await.map(|s| s.0).unwrap_or(false);
+                let on = match args.first().map(String::as_str) {
+                    Some("on") => true,
+                    Some("off") => false,
+                    _ => !current,
+                };
+                let note = match self.state.proxy.autoplay(on).await {
+                    Ok(r) if r == "ok" => {
+                        if on { "autoplay on: when the queue runs low, tracks that blend are queued for you" } else { "autoplay off: the list plays in order" }.to_string()
+                    }
+                    Ok(r) => format!("autoplay: {r}"),
+                    Err(_) => "autoplay: this codjd has none, update codjd".to_string(),
+                };
+                self.list_note = Some((note, Instant::now()));
+            }
             CommandName::Duplicates => {
                 self.music_list.show_duplicates = !self.music_list.show_duplicates;
                 let selected = self.selected_path();
@@ -5003,7 +5020,7 @@ mod automix_label_tests {
 
 /// `:` commands, for completion (the main name of each; aliases still work when typed)
 const COMMANDS: &[&str] = &[
-    "dj", "automix", "tutor", "patch", "slsk", "set", "dupes", "help", "lyrics", "playlists", "mute", "q", "reload", "pause", "resume", "toggle_mute",
+    "dj", "automix", "autoplay", "tutor", "patch", "slsk", "set", "dupes", "help", "lyrics", "playlists", "mute", "q", "reload", "pause", "resume", "toggle_mute",
     "create_playlist", "add_to_playlist", "rename_playlist", "remove_playlist", "slsk_connect",
     "slsk_disconnect", "pl new ", "pl add ", "pl mv ", "pl rm ",
 ];
@@ -5020,7 +5037,7 @@ mod completion_tests {
     #[test]
     fn completes_command_names() {
         assert_eq!(complete_command("d"), ["dj", "dupes"]);
-        assert_eq!(complete_command("au"), ["automix"]);
+        assert_eq!(complete_command("au"), ["automix", "autoplay"]);
         assert_eq!(complete_command("t"), ["tutor", "toggle_mute"]);
         assert_eq!(complete_command("sl"), ["slsk", "slsk_connect", "slsk_disconnect"]);
         assert!(complete_command("zz").is_empty());

@@ -32,6 +32,8 @@ pub enum CommandName {
     Dj,
     /// `:automix [on|off]`: the player's beat-matched transitions
     Automix,
+    /// `:autoplay [on|off]`: codjd queues tracks that blend when the queue runs low
+    Autoplay,
 }
 
 impl CommandName {
@@ -69,6 +71,7 @@ impl CommandName {
             CommandName::Duplicates => 0,
             CommandName::Dj => 0,
             CommandName::Automix => 0,
+            CommandName::Autoplay => 0,
         }
     }
 }
@@ -96,6 +99,7 @@ impl FromStr for CommandName {
             "dupes" | "duplicates" => Ok(Self::Duplicates),
             "dj" => Ok(Self::Dj),
             "automix" => Ok(Self::Automix),
+            "autoplay" => Ok(Self::Autoplay),
             _ => Err(std::io::Error::other(format!(
                 "Unkown command variant {}",
                 s

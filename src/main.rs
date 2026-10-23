@@ -181,6 +181,8 @@ pub trait Server {
     async fn automix(&self, on: bool) -> Result<String>;
     /// (on, next title, seconds to the transition: 0 while mixing, -1 none coming, "blend · 32 bars")
     async fn automix_state(&self) -> Result<(bool, String, f64, String)>;
+    async fn autoplay(&self, on: bool) -> Result<String>;
+    async fn autoplay_state(&self) -> Result<(bool, String)>;
     /// (bpm, first_beat_s, downbeat_offset, beats_per_bar, confidence, variable, octave_doubt,
     /// analyzed)
     async fn get_grid(&self, path: &str) -> Result<(f64, f64, u32, u32, f64, bool, bool, bool)>;

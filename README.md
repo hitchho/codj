@@ -22,7 +22,7 @@ The first five minutes, all vim keys:
 | `?` | every key on the screen, `:help` the same |
 | `j` `k` `5j` `gg` `G` | move |
 | `/` then `Enter`, `n` `N` | search (regex), next / previous match |
-| `Enter`, `Space` | play, pause (tracks blend into each other on the beat: `:automix` toggles it) |
+| `Enter`, `Space` | play, pause (tracks blend into each other on the beat: `:automix` toggles it; `:autoplay` never lets the music run out) |
 | `:slsk <artist>` | search Soulseek and download (first time: `:set`, fill in a username) |
 | `:dj` | DJ mode: two decks; `Tab` then `j`/`k` and `a`/`b` loads a track onto deck A/B |
 | `:tutor` | a guided first mix with your own tracks (opens DJ mode) |

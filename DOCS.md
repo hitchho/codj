@@ -111,6 +111,7 @@ The client captures the mouse, so selecting text in the terminal needs `Shift` h
 |`:dupes` | `:duplicates`|Show every copy of a song, or (default) only the best one: lossless over lossy, then the bigger file. Copies are the same title and artist with about the same length; untagged files are never merged. The list title says how many are hidden|
 |`:dj`|Open the live [DJ mode](#dj-mode) (`?` explains every key there, `:tutor` teaches a first mix) (also `Shift + m` in the list)|
 |`:automix` / `:automix on\|off`|[Automix](#automix), the beat-matched transitions between tracks, off / on (toggles without an argument)|
+|`:autoplay` / `:autoplay on\|off`|Never run out of music: while it plays and fewer than two tracks are queued, codjd queues the library track that blends best after the last one (tempo within 4 %, a compatible key, a steady beat grid, not played lately; then within 8 % in any key). The picks are ordinary queue entries (`Shift+Q` shows them; remove or move them freely). Off by default (`[player] autoplay = true` in codjd's config)|
 |`:settings` | `:set`|Open the soulseek settings panel: `j`/`k` move, `Enter` edits, `Space` toggles, `Esc` closes. Changes are saved to your config file right away (comments kept); ranking settings apply to the current results immediately|
 
 # Soulseek
@@ -142,7 +143,7 @@ Press play and leave it: near the end of each track codjd loads the next one (wh
 | further apart | an 8 bar crossfade on the beat, not beatmatched |
 | a track without a beat grid (`codjd fetch-models` gives grids) | an 8 second crossfade |
 
-The mix starts about 32 bars before the end, on a phrase line (where music changes: bar 1, 17, 33 ...). Repeat one and no-repeat never mix. Picking a track, `Ctrl-n`, a seek or stop drop a transition (a running one lands on the new track first); a pause during one lands it too. It never touches a deck you loaded in DJ mode and stays out of the way while a set is in use. `:automix` turns it off and on (`[player] automix = false` in codjd's config makes off the default). In DJ mode `gt` runs the same thing between the decks.
+The mix starts about 32 bars before the end, on a phrase line (where music changes: bar 1, 17, 33 ...). Repeat one and no-repeat never mix. Picking a track, `Ctrl-n`, a seek or stop drop a transition (a running one lands on the new track first); a pause during one lands it too. It never touches a deck you loaded in DJ mode and stays out of the way while a set is in use. With `:autoplay` on as well, the queue never runs dry: codjd keeps queuing tracks that blend, so automix always has a next track. `:automix` turns it off and on (`[player] automix = false` in codjd's config makes off the default). In DJ mode `gt` runs the same thing between the decks.
 
 ## Registration
 
