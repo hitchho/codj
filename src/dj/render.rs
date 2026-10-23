@@ -801,7 +801,7 @@ fn draw_header(buf: &mut Buffer, area: Rect, v: &View) {
             // the longest help that fits beside the badge and the link state; `? keys` always stays
             let room = (area.width as usize).saturating_sub(4 + 10 + if v.audio_rec.is_some() { 14 } else { 0 });
             let help = [
-                "  h l focus deck · Tab library (j/k, a/b load) · : command (:q leaves) · ? keys",
+                "  j k ⏎ library · t+letter transition · h l focus · : command (:q leaves) · ? keys",
                 "  h l focus · Tab library · :q leaves · ? keys",
                 "  ? keys · :q leaves",
             ]

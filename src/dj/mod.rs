@@ -190,8 +190,9 @@ pub enum SetCall {
     MixNew(MixNewReq),
     /// `gt`: `DjAutoMix` from the first deck into the second
     AutoMix(u32, u32),
-    /// `t{technique}`: `DjTransition` (from, to, recipe or "auto", bars or 0, at the outro)
-    Transition(u32, u32, &'static str, u32, bool),
+    /// `t{technique}`: `DjTransition` (from, to, recipe or "auto", bars or 0, at the outro, a
+    /// track to load onto `to` first or "")
+    Transition(u32, u32, &'static str, u32, bool, String),
 }
 
 /// A call to the patch decks. Like the set calls they run one after another in their own task.
@@ -522,7 +523,7 @@ async fn run_set_call(proxy: &ServerProxy<'_>, call: &SetCall) -> zbus::Result<S
         SetCall::Record(on) => SetReply::Status(proxy.set_record(*on).await?),
         SetCall::AudioRec(on) => SetReply::Status(proxy.record_audio(*on).await?),
         SetCall::AutoMix(from, to) => SetReply::Status(proxy.dj_auto_mix(*from, *to).await?),
-        SetCall::Transition(from, to, recipe, bars, outro) => SetReply::Status(proxy.dj_transition(*from, *to, recipe, *bars, *outro).await?),
+        SetCall::Transition(from, to, recipe, bars, outro, path) => SetReply::Status(proxy.dj_transition(*from, *to, recipe, *bars, *outro, path).await?),
     })
 }
 
@@ -1692,6 +1693,8 @@ pub struct DjScreen {
     edit_request: Option<std::path::PathBuf>,
     /// the in-TUI set editor, while open
     editor: Option<editor::Editor>,
+    /// the editor set aside by a jump to another pane (F11, F12), its unsaved text kept
+    parked_editor: Option<editor::Editor>,
     /// the AI prompt box and the agent run behind it
     prompt: Option<prompt::Prompt>,
     /// the conversation the prompt box continues (one per DJ session, `:ai new` resets it)
@@ -1733,6 +1736,7 @@ impl DjScreen {
             note,
             edit_request: None,
             editor: None,
+            parked_editor: None,
             prompt: None,
             ai_session: None,
             agent: Default::default(),
@@ -1838,22 +1842,27 @@ impl DjScreen {
     /// then onto the other, so a load never cuts the track the room hears
     /// `gt`: mix from the other deck (on air) into the focused one (loaded, paused), the way the
     /// player's automix would
-    /// `t{technique}` / `T{technique}`: the DJ's transition from the playing deck into the focused one
+    /// `t{technique}` / `T{technique}`: the DJ's transition from the playing deck into the other
+    /// one, bringing in the highlighted library track (loaded there first unless that deck holds
+    /// it already, cued by hand or not)
     fn transition(&mut self, recipe: Option<&'static str>, bars: Option<u32>, outro: bool) {
-        let to = self.keys.focus();
-        let from = 1 - to;
         let decks = self.session.shared.lock().unwrap().decks.clone();
-        let letter = |d: u8| if d == 0 { 'A' } else { 'B' };
-        let (Some(f), Some(t)) = (decks.get(from as usize), decks.get(to as usize)) else { return };
-        if !t.loaded {
-            self.set_note(format!("a transition goes into the focused deck {}: load a track there first (Tab, a/b)", letter(to)));
-        } else if t.playing {
-            self.set_note(format!("deck {} is playing: focus the paused deck you want to bring in (h/l)", letter(to)));
-        } else if !f.playing {
-            self.set_note(format!("deck {} is not playing: a transition goes from the playing deck into the focused one", letter(from)));
-        } else {
-            self.session.set_call(SetCall::Transition(from as u32, to as u32, recipe.unwrap_or("auto"), bars.unwrap_or(0), outro));
+        let playing = |i: usize| decks.get(i).is_some_and(|d| d.playing);
+        let (from, to) = match (playing(0), playing(1)) {
+            (true, false) => (0u8, 1u8),
+            (false, true) => (1, 0),
+            (false, false) => return self.set_note("nothing is playing: Space starts the focused deck, then t brings in the next"),
+            (true, true) => return self.set_note("both decks are playing: a transition needs one of them free"),
+        };
+        let held = decks.get(to as usize).map(|d| d.path.clone()).unwrap_or_default();
+        let highlighted = self.pane.selected_path().unwrap_or_default();
+        // what the free deck holds is the target when the highlight is on it (or there is none)
+        let path = if highlighted.is_empty() || highlighted == held { String::new() } else { highlighted };
+        if path.is_empty() && held.is_empty() {
+            return self.set_note("highlight a track first (j/k or /), then t brings it in");
         }
+        self.keys.set_focus(to);
+        self.session.set_call(SetCall::Transition(from as u32, to as u32, recipe.unwrap_or("auto"), bars.unwrap_or(0), outro, path));
     }
 
     fn auto_mix(&mut self) {
@@ -1889,8 +1898,54 @@ impl DjScreen {
     }
 
     /// `:e` / F10: the editor pane on the active set
+    /// F10 / F11 / F12 jump straight between the editor, the AI box and the patch decks, from
+    /// any of them (the one left is set aside: the editor keeps its unsaved text, a running agent
+    /// keeps running); the key of the open pane still closes it, by that pane's own rules. F9
+    /// records from anywhere. True when the key was taken here.
+    fn pane_jump(&mut self, key: &KeyEvent, now: Instant) -> bool {
+        if key.kind != KeyEventKind::Press || !key.modifiers.is_empty() {
+            return false;
+        }
+        let prompt_open = self.prompt.as_ref().is_some_and(|p| p.visible);
+        let editor_open = self.editor.is_some();
+        let in_pane = editor_open || prompt_open || self.patch.open;
+        let target = match key.code {
+            // recording is a deck thing, but it must not need closing a pane first
+            KeyCode::F(9) if editor_open || prompt_open => {
+                self.record(None);
+                return true;
+            }
+            KeyCode::F(10) if !editor_open && in_pane => 10,
+            KeyCode::F(11) if !prompt_open && in_pane => 11,
+            KeyCode::F(12) if !self.patch.open && in_pane => 12,
+            _ => return false,
+        };
+        // set the open pane aside
+        if let Some(ed) = self.editor.take() {
+            self.parked_editor = Some(ed);
+        }
+        if let Some(p) = self.prompt.as_mut() {
+            p.visible = false;
+        }
+        if self.patch.open {
+            self.patch.open = false;
+        }
+        match target {
+            10 => self.open_editor(now),
+            11 => self.open_prompt(None, now),
+            _ => self.open_patch(now),
+        }
+        true
+    }
+
     fn open_editor(&mut self, now: Instant) {
         if self.editor.is_some() {
+            return;
+        }
+        // back to the editor set aside by a jump, with its text as it was
+        if let Some(ed) = self.parked_editor.take() {
+            self.settle(now);
+            self.editor = Some(ed);
             return;
         }
         let Some((set, _)) = self.active_set() else { return };
@@ -2310,6 +2365,9 @@ impl DjScreen {
 
     /// Handles a key; performance keys are queued for the next [`tick`]
     pub fn handle_key(&mut self, key: &KeyEvent, now: Instant) -> Outcome {
+        if self.pane_jump(key, now) {
+            return Outcome::Stay;
+        }
         match editor::key_focus(self.editor.is_some(), self.prompt.as_ref().is_some_and(|p| p.visible)) {
             editor::KeyFocus::Editor => {
                 if let Some(ed) = self.editor.as_mut() {
@@ -2434,6 +2492,7 @@ impl DjScreen {
             Nav::SetDisarm => self.session.set_call(SetCall::Disarm),
             Nav::RecordToggle => self.record(None),
             Nav::AutoMix => self.auto_mix(),
+            Nav::Queue => self.queue_selected(),
             Nav::Transition { recipe, bars, outro } => self.transition(recipe, bars, outro),
             Nav::NoSelection => self.set_note("no control picked: f shows the hints, type a label to pick one"),
             Nav::Help => {

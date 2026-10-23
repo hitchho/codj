@@ -89,7 +89,8 @@ pub const MIXER_KEYS: &[Entry] = &[
 ];
 
 pub const GLOBAL_KEYS: &[Entry] = &[
-    e("Tab", "library: j k move, a b load"),
+    e("j k ⏎ q", "library: move, load, queue"),
+    e("Tab", "browse: Ctrl-d gg G, a b load"),
     e("/", "search the library"),
     e(":", ":help :tutor :mix new · :q leaves"),
     e("F9", "record: your playing becomes code"),

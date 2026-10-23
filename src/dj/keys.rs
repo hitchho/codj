@@ -277,6 +277,8 @@ pub enum Nav {
     Help,
     /// `gt`: automix from the other (playing) deck into the focused one, like vim's next tab
     AutoMix,
+    /// `q`: the highlighted library track to the player's queue
+    Queue,
     /// `t{technique}` / `T{technique}`: the DJ's transition into the focused deck: a recipe
     /// (None: codj chooses), a length in bars (the count), at the outro instead of the next phrase
     Transition { recipe: Option<&'static str>, bars: Option<u32>, outro: bool },
@@ -434,6 +436,10 @@ pub fn bind(k: &NKey) -> Option<Binding> {
         '0'..='9' => Digit(c as u8 - b'0'),
         'g' => Pend(Pending::G),
         't' => Pend(Pending::T { outro: false }),
+        // the library is always under the hand: no Tab to pick the next track
+        'j' => Nav(N::LibDown),
+        'k' => Nav(N::LibUp),
+        'q' => Nav(N::Queue),
         'm' => Pend(Pending::Mark),
         '\'' | '`' => Pend(Pending::GoMark),
         '-' => Pitch(-1),
@@ -2080,7 +2086,7 @@ mod tests {
             assert_eq!(bind(&normalize(&alt(c, KeyEventKind::Press))), None, "Alt+{c}");
         }
         // the old deck letters that have no meaning now
-        for c in "zxaqeridjkopynz,<>".chars() {
+        for c in "zxaeriopynz,<>".chars() {
             assert_eq!(bind(&normalize(&press(c))), None, "{c}");
         }
         // capitals and shifted symbols of the old map: A B load, Shift+digit clears
