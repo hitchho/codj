@@ -101,6 +101,9 @@ struct Shared {
     audio_rec: Option<(bool, String, f64, u64, String)>,
     /// codjd has no `RecordAudioState`
     audio_rec_missing: bool,
+    /// the player's queue ("title — artist") and its coming transition, for the UP NEXT box
+    queue: Vec<String>,
+    up_next: Option<(bool, String, f64, String)>,
     /// feedback of a set command (list, "armed mix 2"), shown like a note
     /// (text, shown until, made at)
     info: Option<(String, Instant, Instant)>,
@@ -652,6 +655,20 @@ async fn poll_patches(proxy: &ServerProxy<'_>, shared: &Arc<Mutex<Shared>>, tick
     }
 }
 
+/// Reads the player's queue and its coming automix transition, once a second
+async fn poll_queue(proxy: &ServerProxy<'_>, shared: &Arc<Mutex<Shared>>, tick: u32) {
+    if tick % REC_POLL_IDLE != 0 {
+        return;
+    }
+    let queue = tokio::time::timeout(CALL_TIMEOUT, proxy.get_queue()).await.ok().and_then(|r| r.ok());
+    let next = tokio::time::timeout(CALL_TIMEOUT, proxy.automix_state()).await.ok().and_then(|r| r.ok());
+    let mut s = shared.lock().unwrap();
+    if let Some(q) = queue {
+        s.queue = q.iter().map(|m| if m.artist.is_empty() { m.title.clone() } else { format!("{} — {}", m.title, m.artist) }).collect();
+    }
+    s.up_next = next;
+}
+
 fn is_unknown_method(text: &str) -> bool {
     text.contains("UnknownMethod") || text.contains("Unknown method") || text.contains("No such method")
 }
@@ -713,6 +730,8 @@ impl Session {
             rec_missing: false,
             audio_rec: None,
             audio_rec_missing: false,
+            queue: Vec::new(),
+            up_next: None,
             rec_poll_now: false,
             info: None,
             overlay: None,
@@ -745,6 +764,7 @@ impl Session {
                     poll_set(&proxy, &shared, tick).await;
                     poll_warnings(&proxy, &shared, tick).await;
                     poll_recording(&proxy, &shared, tick).await;
+                    poll_queue(&proxy, &shared, tick).await;
                     poll_patches(&proxy, &shared, tick).await;
                     tick = tick.wrapping_add(1);
                     let both = tokio::time::timeout(CALL_TIMEOUT, async {
@@ -1031,6 +1051,8 @@ pub enum Browse {
     Nothing,
     Load(u8),
     LoadFree,
+    /// `q`: add the highlighted track to the player's queue
+    Queue,
     Help,
 }
 
@@ -1481,6 +1503,7 @@ impl Pane {
             KeyCode::Char('/') => self.start_search(),
             KeyCode::Char(':') => self.start_command(),
             KeyCode::Char('a') | KeyCode::Char('<') => return Browse::Load(0),
+            KeyCode::Char('q') => return Browse::Queue,
             KeyCode::Char('b') | KeyCode::Char('>') => return Browse::Load(1),
             KeyCode::Enter => return Browse::LoadFree,
             KeyCode::Char('?') => return Browse::Help,
@@ -1781,6 +1804,23 @@ impl DjScreen {
             // the knob you reach for without thinking: volume, as in the normal view
             self.session.send(vec![DjCall::VolumeStep(dir as f64 * 0.02)]);
         }
+    }
+
+    /// `q` in the library: the highlighted track goes to the end of the player's queue
+    fn queue_selected(&mut self) {
+        let Some(m) = self.pane.selected().cloned() else {
+            self.set_note("nothing selected in the library");
+            return;
+        };
+        let conn = self.session.conn.clone();
+        let index = m.index as u32;
+        tokio::spawn(async move {
+            if let Ok(p) = ServerProxy::new(&conn).await {
+                let _ = p.queue_add(index, false).await;
+            }
+        });
+        self.session.shared.lock().unwrap().queue.push(m.title.clone());
+        self.set_note(format!("queued {} · automix mixes into it when its turn comes", m.title));
     }
 
     /// load the highlighted track onto the focused deck (`h` / `l`), unless that one is playing:
@@ -2320,6 +2360,7 @@ impl DjScreen {
             match self.pane.browse_key(key) {
                 Browse::Load(d) => self.load(d),
                 Browse::LoadFree => self.load_smart(),
+                Browse::Queue => self.queue_selected(),
                 Browse::Help => self.help = true,
                 Browse::Nothing => {}
             }
@@ -2662,6 +2703,8 @@ impl DjScreen {
             mix_vals,
             grid: grid_view,
         };
+        let queue = s.queue.clone();
+        let up_next = s.up_next.as_ref().and_then(crate::ui::automix_label);
         let view = View {
             decks: &s.decks,
             mixer: &s.mixer,
@@ -2681,6 +2724,8 @@ impl DjScreen {
             showcmd: &showcmd,
             set: s.set.as_ref().filter(|x| x.is_active()),
             rec: s.rec.filter(|r| r.0).map(|r| (r.1, r.2)),
+            queue: &queue,
+            up_next: up_next.as_deref(),
             audio_rec: s.audio_rec.as_ref().filter(|r| r.0).map(|r| r.2),
             overlay: s.overlay.as_deref(),
             panel,

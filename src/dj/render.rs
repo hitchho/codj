@@ -80,6 +80,9 @@ pub struct View<'a> {
     pub rec: Option<(f64, u32)>,
     /// seconds of the audio recording while it runs
     pub audio_rec: Option<f64>,
+    /// the player's queue, and its coming transition (`next: CRIA · blend in 1:12`)
+    pub queue: &'a [String],
+    pub up_next: Option<&'a str>,
     /// the set's errors, drawn over the decks
     pub overlay: Option<&'a [String]>,
     /// an editor or prompt pane replaces the set strip and the library; it is drawn by the
@@ -1369,6 +1372,51 @@ fn draw_mixer(buf: &mut Buffer, area: Rect, v: &View, spots: &mut Vec<Spot>) {
 }
 
 fn draw_library(buf: &mut Buffer, area: Rect, v: &View) {
+    // what plays next sits beside the library: the coming transition, then the queue
+    let has_next = v.up_next.is_some() || !v.queue.is_empty();
+    if has_next && area.width >= 100 {
+        let box_w = 38.min(area.width / 3);
+        let lib = Rect { width: area.width - box_w, ..area };
+        draw_library_list(buf, lib, v, None);
+        draw_up_next(buf, Rect::new(area.x + lib.width, area.y, box_w, area.height), v);
+        return;
+    }
+    draw_library_list(buf, area, v, v.up_next);
+}
+
+/// The UP NEXT box: the coming automix transition, then the rest of the queue
+fn draw_up_next(buf: &mut Buffer, area: Rect, v: &View) {
+    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(DIM)).title(" UP NEXT · q queues ");
+    let inner = block.inner(area);
+    block.render(area, buf);
+    let w = inner.width.saturating_sub(1) as usize;
+    let mut y = inner.y;
+    if let Some(next) = v.up_next {
+        // "next: CRIA · blend in 1:12": the title, then the transition on its own line
+        let next = next.strip_prefix("next: ").unwrap_or(next);
+        let (title, how) = next.rsplit_once(" · ").unwrap_or((next, ""));
+        buf.set_stringn(inner.x + 1, y, trunc(title, w), w, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+        y += 1;
+        if !how.is_empty() && y < inner.bottom() {
+            buf.set_stringn(inner.x + 1, y, trunc(&format!("  {how}"), w), w, Style::default().fg(Color::Yellow));
+            y += 1;
+        }
+    }
+    // the first queued track is the one `next:` names
+    let skip = usize::from(v.up_next.is_some_and(|n| v.queue.first().is_some_and(|q| n.contains(q.split(" — ").next().unwrap_or(q)))));
+    for (i, q) in v.queue.iter().enumerate().skip(skip) {
+        if y >= inner.bottom() {
+            break;
+        }
+        buf.set_stringn(inner.x + 1, y, trunc(&format!("{} {q}", i + 1), w), w, Style::default());
+        y += 1;
+    }
+    if v.up_next.is_none() && v.queue.is_empty() {
+        buf.set_stringn(inner.x + 1, inner.y, "nothing queued", w, dim());
+    }
+}
+
+fn draw_library_list(buf: &mut Buffer, area: Rect, v: &View, next: Option<&str>) {
     let searching = v.focus == Focus::Search;
     let browsing = v.focus == Focus::Library;
     let filter = if v.search.is_empty() { String::new() } else { format!(" /{}", v.search) };
@@ -1376,7 +1424,7 @@ fn draw_library(buf: &mut Buffer, area: Rect, v: &View) {
         format!(" Library {}/{} — /{}█ (Enter done · Esc clear) ", v.lib.len(), v.lib_total, v.input)
     } else if browsing {
         let long = format!(
-            " LIBRARY {}/{}{} · j/k move · / search · a or b load onto deck · Enter focused deck · Tab/Esc decks ",
+            " LIBRARY {}/{}{} · j/k move · / search · a or b load onto deck · Enter focused deck · q queue · Tab/Esc decks ",
             v.lib.len(),
             v.lib_total,
             filter
@@ -1387,7 +1435,11 @@ fn draw_library(buf: &mut Buffer, area: Rect, v: &View) {
             format!(" LIBRARY {}/{}{} · j/k · / search · a b load · Enter focused deck · Esc ", v.lib.len(), v.lib_total, filter)
         }
     } else {
-        format!(" Library {}{} · Tab to browse ", v.lib_total, filter)
+        match next {
+            // no room for the box: the coming track in the title
+            Some(n) => format!(" Library {}{} · Tab to browse · {n} ", v.lib_total, filter),
+            None => format!(" Library {}{} · Tab to browse ", v.lib_total, filter),
+        }
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1544,6 +1596,8 @@ mod tests {
             set: None,
             rec: None,
             audio_rec: None,
+            queue: &[],
+            up_next: None,
             overlay: None,
             panel: None,
             hints: HintView::default(),
@@ -1925,6 +1979,24 @@ mod tests {
     }
 
     #[test]
+    fn up_next_shows_the_coming_transition_and_the_queue() {
+        let queue: &'static [String] = Box::leak(vec!["CRIA — ØTTA".to_string(), "CARLOTA — Raël".to_string()].into_boxed_slice());
+        let wide = render(120, 35, |v| {
+            v.queue = queue;
+            v.up_next = Some("next: CRIA · blend in 1:12");
+        });
+        assert!(wide.contains("UP NEXT") && wide.contains("CRIA") && wide.contains("blend in 1:12") && wide.contains("2 CARLOTA"), "{wide}");
+        // narrow: no box, the coming track rides in the library title
+        let narrow = render(80, 30, |v| {
+            v.queue = queue;
+            v.up_next = Some("next: CRIA · blend in 1:12");
+        });
+        assert!(!narrow.contains("UP NEXT") && narrow.contains("next: CRIA"), "{narrow}");
+        let none = render(120, 35, |_| {});
+        assert!(!none.contains("UP NEXT"));
+    }
+
+    #[test]
     fn an_audio_recording_shows_its_time_in_the_header() {
         let text = render(80, 30, |v| v.audio_rec = Some(754.0));
         let head = text.lines().next().unwrap();
@@ -2303,6 +2375,8 @@ mod tests {
             set: None,
             rec: None,
             audio_rec: None,
+            queue: &[],
+            up_next: None,
             overlay: None,
             panel: None,
             hints: HintView::default(),

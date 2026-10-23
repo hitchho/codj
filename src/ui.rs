@@ -4991,7 +4991,7 @@ fn sort_label(sort: &Sort) -> &'static str {
 
 /// The play bar's note of the coming transition: `next: CRIA · blend in 1:12`, `mixing into CRIA ·
 /// blend`; None when automix is off or nothing is coming
-fn automix_label((on, title, secs, what): &(bool, String, f64, String)) -> Option<String> {
+pub(crate) fn automix_label((on, title, secs, what): &(bool, String, f64, String)) -> Option<String> {
     if !on || title.is_empty() || *secs < 0. {
         return None;
     }

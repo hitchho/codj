@@ -248,6 +248,7 @@ DJ mode is vim for decks. **One deck has the focus** (A at the start) and every 
 |`Tab`|Browse the [library](#library-vim-keys) with vim keys (`j` / `k`, `a` / `b` load); `Tab` or `Esc` come back. The same while the [tutor](#learning) is open|
 |`/`|Straight into the library search (same regex and `artist:`/`title:`/`genre:` filters as the list); `Enter` keeps the filter and browses, `Esc` clears it|
 |`Up` / `Down`, `PageUp` / `PageDown`|Move in the library without leaving the decks|
+|`q`|In the library: add the highlighted track to the player's queue. The **UP NEXT** box beside the library (100 columns and up; else the library title) shows the coming automix transition (`CRIA` · `blend in 1:12`) and the rest of the queue|
 |`Enter`|Load the highlighted track onto the focused deck; when that one is playing, onto the other (never over a playing deck: with both playing it says so and loads nothing)|
 |`:`|DJ command line, see below|
 |`?`|[The key map on the screen](#learning), every key explained (`q` or `Esc` closes it; on a small screen `j` `k` `Ctrl-d` `Ctrl-u` `g` `G` scroll it)|
