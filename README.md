@@ -10,6 +10,7 @@
 cargo install --path .                    # codj, this repo
 cargo install --path ../mplayer-server    # codjd, the daemon (github.com/yassinebenarbia/mplayer-server)
 codjd fetch-models                        # once: the beat-detection model (83 MB)
+codjd -r                                  # after an update: restart codjd on the new build, the music plays on
 codj                                      # starts codjd if it isn't running; plays ~/Music
 ```
 
