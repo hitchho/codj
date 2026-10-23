@@ -61,6 +61,9 @@ pub struct AgentSettings {
     /// MCP tool names the agent may use (without the `mcp__codj__` prefix); unset = all set tools
     /// (plus the live ones when `live`)
     pub mcp_tools: Option<Vec<String>>,
+    /// what the command prints: "stream-json" (Claude Code's event lines: text, tool calls,
+    /// results, a closing summary) or "text"; default stream-json for `claude`, text otherwise
+    pub output: Option<String>,
 }
 
 /// `[knob]`: a hardware knob (rotary encoder sending volume keys): volume, jog wheel. Off unless `device`

@@ -146,7 +146,7 @@ export CODJ_FAKE_LOG=$W/calls-edit.log
 rm -f "$W"/calls-edit.log
 AGENT=$(cd "$(dirname "$0")" && pwd)/fake_agent.sh
 mkdir -p "$HOME/.config/codj"
-printf '[agent]\ncommand = "%s"\n' "$AGENT" > "$HOME/.config/codj/config.toml"
+printf '[agent]\ncommand = "%s"\noutput = "stream-json"\n' "$AGENT" > "$HOME/.config/codj/config.toml"
 "$BIN/examples/fake_codjd" 2>"$W/fake4.err" & FAKE=$!
 sleep 1
 S=djedit
@@ -177,6 +177,11 @@ keys Escape; sleep 0.5; cap edit_closed
 cmd ai\ make\ it\ longer
 sleep 1.3; cap ai_running
 sleep 3.5; cap ai_review
+aichk() { if grep -q -- "$3" "$W/cap-$2.txt"; then echo "ok   $1"; else echo "FAIL $1 ($2: $3)"; AIFAIL=1; fi; }
+aichk "the agent's events show while it runs" ai_running '-- agent ready: fake-agent'
+aichk "each tool call" ai_running '→ set_source name=demo'
+aichk "with its result" ai_running '✓ 9 lines'
+aichk "the summary stays above the diff" ai_review '-- done: 4 turns'
 keys n; sleep 1.2; cap ai_undone
 keys Escape; sleep 0.5; cap ai_closed
 keys Space; sleep 0.5                  # deck keys are live again
@@ -465,7 +470,7 @@ chkno ":q left DJ mode" vim_left 'FOCUS'
 [ "$P8" = 0 ] && echo "PHASE 8 OK" || { echo "PHASE 8 FAILED"; return 1; }
 }
 
-RC=0
+RC=${AIFAIL:-0}
 case "${ONLY:-}" in ""|7) phase_7 || RC=1;; esac
 case "${ONLY:-}" in ""|8) phase_8 || RC=1;; esac
 exit $RC

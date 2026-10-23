@@ -140,6 +140,8 @@ pub struct AgentCmd {
     /// contents of the MCP config file, to be written at `mcp_path`
     pub mcp_json: String,
     pub mcp_path: PathBuf,
+    /// stdout is stream-json event lines, shown as text, tool calls and results
+    pub stream_json: bool,
 }
 
 impl AgentCmd {
@@ -215,6 +217,10 @@ pub fn build_agent_cmd(cfg: &AgentSettings, exe: &Path, mcp_path: &Path, prompt:
             "--allowedTools".into(),
             tools.join(","),
         ]);
+        // the agent's work as events (text, each tool call and its result), not just its last words
+        if cfg.output.as_deref().is_none_or(|o| o == "stream-json") {
+            args.extend(["--output-format".to_string(), "stream-json".into(), "--verbose".into()]);
+        }
         // one conversation across prompts: the first names the session, the rest resume it
         if let Some(sess) = session {
             args.extend([if sess.turns == 0 { "--session-id" } else { "--resume" }.to_string(), sess.id.clone()]);
@@ -236,7 +242,13 @@ pub fn build_agent_cmd(cfg: &AgentSettings, exe: &Path, mcp_path: &Path, prompt:
         ("CODJ_MCP_LIVE".to_string(), if live { "1" } else { "0" }.to_string()),
         ("CODJ_MCP_TOOLS".to_string(), tools.join(",")),
     ];
-    Ok(AgentCmd { program, args, stdin, env, mcp_json: mcp_config_json(exe, live), mcp_path: mcp_path.to_path_buf() })
+    let stream_json = match cfg.output.as_deref() {
+        Some("stream-json") => true,
+        Some("text") => false,
+        Some(other) => return Err(format!("[agent] output = \"{other}\": use \"stream-json\" or \"text\"")),
+        None => is_claude(&program),
+    };
+    Ok(AgentCmd { program, args, stdin, env, mcp_json: mcp_config_json(exe, live), mcp_path: mcp_path.to_path_buf(), stream_json })
 }
 
 // ---------------------------------------------------------------- the preamble
@@ -425,6 +437,86 @@ pub fn clean_line(s: &str) -> String {
     out
 }
 
+// ---------------------------------------------------------------- agent events
+
+/// A tool name as the pane shows it: codj's own without the MCP prefix
+fn tool_name(name: &str) -> &str {
+    name.strip_prefix("mcp__codj__").unwrap_or(name)
+}
+
+/// One line of at most `n` characters
+fn one_line(s: &str, n: usize) -> String {
+    let flat: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() > n { format!("{}…", flat.chars().take(n.saturating_sub(1)).collect::<String>()) } else { flat }
+}
+
+/// The interesting arguments of a tool call, short: names and values, never whole texts
+fn tool_args(input: &serde_json::Value) -> String {
+    let Some(map) = input.as_object() else { return String::new() };
+    let parts: Vec<String> = map
+        .iter()
+        .filter_map(|(k, v)| match v {
+            serde_json::Value::String(s) if s.len() <= 40 && !s.contains('\n') => Some(format!("{k}={s}")),
+            serde_json::Value::String(s) => Some(format!("{k}=<{} lines>", s.lines().count())),
+            serde_json::Value::Number(n) => Some(format!("{k}={n}")),
+            serde_json::Value::Bool(b) => Some(format!("{k}={b}")),
+            _ => None,
+        })
+        .collect();
+    one_line(&parts.join(" "), 70)
+}
+
+/// What one stream-json line (Claude Code's `--output-format stream-json`, which grok's headless
+/// `streaming-messages-json` copies) shows in the pane: the agent's text, `→ tool args` for each
+/// call, `✓`/`✗` and the first line of each result, and a closing summary. A line that is not
+/// JSON is shown as it is.
+pub fn stream_event_lines(line: &str) -> Vec<(String, bool)> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+        let l = clean_line(line);
+        return if l.trim().is_empty() { vec![] } else { vec![(l, false)] };
+    };
+    let content = |v: &serde_json::Value| v["message"]["content"].as_array().cloned().unwrap_or_default();
+    match v["type"].as_str() {
+        Some("system") if v["subtype"] == "init" => {
+            let model = v["model"].as_str().unwrap_or("?");
+            let tools = v["tools"].as_array().map_or(0, |t| t.len());
+            vec![(format!("-- agent ready: {model}, {tools} tools"), false)]
+        }
+        Some("assistant") => content(&v)
+            .iter()
+            .flat_map(|c| match c["type"].as_str() {
+                Some("text") => c["text"].as_str().unwrap_or("").lines().map(|l| (clean_line(l), false)).collect::<Vec<_>>(),
+                Some("tool_use") => {
+                    let name = tool_name(c["name"].as_str().unwrap_or("?"));
+                    vec![(format!("→ {name} {}", tool_args(&c["input"])).trim_end().to_string(), false)]
+                }
+                _ => vec![],
+            })
+            .collect(),
+        Some("user") => content(&v)
+            .iter()
+            .filter(|c| c["type"] == "tool_result")
+            .map(|c| {
+                let text = match &c["content"] {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Array(parts) => parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join(" "),
+                    _ => String::new(),
+                };
+                let err = c["is_error"].as_bool().unwrap_or(false);
+                (format!("  {} {}", if err { "✗" } else { "✓" }, one_line(&clean_line(&text), 80)).trim_end().to_string(), err)
+            })
+            .collect(),
+        Some("result") => {
+            let turns = v["num_turns"].as_u64().unwrap_or(0);
+            let secs = v["duration_ms"].as_f64().unwrap_or(0.) / 1000.;
+            let cost = v["total_cost_usd"].as_f64().map(|c| format!(", ${c:.2}")).unwrap_or_default();
+            let failed = v["is_error"].as_bool().unwrap_or(false);
+            vec![(format!("-- {}: {turns} turns, {secs:.1} s{cost}", if failed { "failed" } else { "done" }), failed)]
+        }
+        _ => vec![],
+    }
+}
+
 // ---------------------------------------------------------------- daemon + child tasks
 
 #[derive(Debug)]
@@ -513,9 +605,16 @@ async fn run_child(cmd: AgentCmd, tx: mpsc::UnboundedSender<PromptEvent>, mut ki
     if let Some(out) = child.stdout.take() {
         let tx = tx.clone();
         readers.push(tokio::spawn(async move {
+            let stream = cmd.stream_json;
             let mut lines = BufReader::new(out).lines();
             while let Ok(Some(l)) = lines.next_line().await {
-                let _ = tx.send(PromptEvent::Line { text: clean_line(&l), err: false });
+                if stream {
+                    for (text, err) in stream_event_lines(&l) {
+                        let _ = tx.send(PromptEvent::Line { text, err });
+                    }
+                } else {
+                    let _ = tx.send(PromptEvent::Line { text: clean_line(&l), err: false });
+                }
             }
         }));
     }
@@ -818,6 +917,10 @@ impl Prompt {
                         self.phase = Phase::Done;
                     } else {
                         self.review = review_lines(&self.changes);
+                        // the run's summary (turns, time, cost) stays in sight above the diff
+                        if let Some((summary, _)) = self.out.iter().rev().find(|(l, _)| l.starts_with("-- done:") || l.starts_with("-- failed:")) {
+                            self.review.insert(0, summary.clone());
+                        }
                         self.review_scroll = 0;
                         self.status = format!("{} set(s) changed", self.changes.len());
                         self.phase = Phase::Review;
@@ -906,7 +1009,43 @@ mod tests {
             live: Some(live),
             prompt_via: via.map(str::to_string),
             mcp_tools: tools.map(|t| t.iter().map(|s| s.to_string()).collect()),
+            output: None,
         }
+    }
+
+    #[test]
+    fn stream_json_events_become_readable_lines() {
+        let l = |s: &str| stream_event_lines(s);
+        assert_eq!(l(r#"{"type":"system","subtype":"init","model":"claude-opus-5-5","tools":["a","b","c"]}"#), [("-- agent ready: claude-opus-5-5, 3 tools".to_string(), false)]);
+        let both = l(r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Reading the set.\nThen fixing it."},{"type":"tool_use","name":"mcp__codj__set_source","input":{"name":"claude-trio"}}]}}"#);
+        assert_eq!(both, [("Reading the set.".to_string(), false), ("Then fixing it.".into(), false), ("→ set_source name=claude-trio".into(), false)]);
+        // a whole set text is never dumped into the pane
+        let write = l(r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"mcp__codj__set_write","input":{"name":"x","text":"set \"x\"\ntrack a \"f\"\n","base_hash":"abc"}}]}}"#);
+        assert_eq!(write[0].0, "→ set_write name=x text=<2 lines> base_hash=abc");
+        assert_eq!(l(r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok 3f2a","is_error":false}]}}"#), [("  ✓ ok 3f2a".to_string(), false)]);
+        assert_eq!(l(r#"{"type":"user","message":{"content":[{"type":"tool_result","content":[{"type":"text","text":"set changed since you read it"}],"is_error":true}]}}"#), [("  ✗ set changed since you read it".to_string(), true)]);
+        assert_eq!(l(r#"{"type":"result","subtype":"success","num_turns":4,"duration_ms":12345,"total_cost_usd":0.0712,"is_error":false}"#), [("-- done: 4 turns, 12.3 s, $0.07".to_string(), false)]);
+        // not JSON: shown as it is; unknown event types: nothing
+        assert_eq!(l("plain words"), [("plain words".to_string(), false)]);
+        assert!(l(r#"{"type":"stream_event"}"#).is_empty());
+    }
+
+    #[test]
+    fn claude_streams_events_and_other_commands_print_text() {
+        let c = build_agent_cmd(&cfg(None, false, None, None), Path::new("/c"), Path::new("/m"), "p", None).unwrap();
+        assert!(c.stream_json && c.args.windows(2).any(|w| w == ["--output-format", "stream-json"]) && c.args.contains(&"--verbose".to_string()));
+        let o = build_agent_cmd(&cfg(Some("my-agent"), false, None, None), Path::new("/c"), Path::new("/m"), "p", None).unwrap();
+        assert!(!o.stream_json && !o.args.contains(&"--output-format".to_string()));
+        let mut forced = cfg(Some("my-agent"), false, None, None);
+        forced.output = Some("stream-json".into());
+        assert!(build_agent_cmd(&forced, Path::new("/c"), Path::new("/m"), "p", None).unwrap().stream_json);
+        let mut text = cfg(None, false, None, None);
+        text.output = Some("text".into());
+        let t = build_agent_cmd(&text, Path::new("/c"), Path::new("/m"), "p", None).unwrap();
+        assert!(!t.stream_json && !t.args.contains(&"stream-json".to_string()));
+        let mut bad = cfg(None, false, None, None);
+        bad.output = Some("xml".into());
+        assert!(build_agent_cmd(&bad, Path::new("/c"), Path::new("/m"), "p", None).is_err());
     }
 
     fn key(code: KeyCode) -> KeyEvent {

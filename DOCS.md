@@ -419,6 +419,8 @@ If somebody else saved first (vim, an agent, a capture) `:w` is refused with "se
 
 `:ai make the second mix longer` (or `F11`, type, `Enter`) runs the agent from `[agent]` in the config as a child process. codj holds no AI keys: the command brings its own login.
 
+**What the agent is doing.** With `claude` the pane shows the agent's work as it happens, from Claude Code's `--output-format stream-json` events: its text, every tool call as `→ set_write name=claude-trio text=<12 lines> base_hash=3f2a…` (whole texts are never dumped), each result as `✓ ok 9c1e…` or `✗ set changed since you read it` (red), and a closing `-- done: 4 turns, 12.3 s, $0.07`, which stays above the diff in the review. `output = "text"` under `[agent]` shows the plain output instead; `output = "stream-json"` reads events from another command that prints them (grok's headless `--output-format streaming-messages-json` copies the format).
+
 **One conversation.** With `claude` as the command, the prompts of one DJ session are one conversation: the first runs with `--session-id <uuid>`, later ones with `--resume <uuid>`, so "make it shorter" knows what "it" is. Every prompt still carries the current decks and sets. The box's title says which turn it is; `:ai new` forgets the conversation and the next prompt starts another (so does leaving and opening DJ mode). Other agent commands run one prompt at a time, as before.
 
 What it gets: a preamble (the active set's name and file, its tracks and mixes, both decks' track / BPM / key / position, and the rules: edit sets only through the codj MCP set tools, `set_check` before `set_write`, never touch audio unless live) followed by your text, on stdin or as the last argument (`prompt_via`). codj's MCP server is attached:
