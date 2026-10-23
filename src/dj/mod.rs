@@ -193,6 +193,10 @@ pub enum SetCall {
     /// `t{technique}`: `DjTransition` (from, to, recipe or "auto", bars or 0, at the outro, a
     /// track to load onto `to` first or "")
     Transition(u32, u32, &'static str, u32, bool, String),
+    /// `:automix [on|off]`: transitions on the beat between tracks; no word toggles
+    Automix(Option<bool>),
+    /// `:autoplay [on|off]`: queue tracks that blend when the queue runs low; no word toggles
+    Autoplay(Option<bool>),
 }
 
 /// A call to the patch decks. Like the set calls they run one after another in their own task.
@@ -357,6 +361,8 @@ impl SetCall {
             SetCall::MixNew(_) => "SetRecipeText",
             SetCall::AutoMix(..) => "DjAutoMix",
             SetCall::Transition(..) => "DjTransition",
+            SetCall::Automix(_) => "Automix",
+            SetCall::Autoplay(_) => "Autoplay",
         }
     }
 
@@ -381,6 +387,7 @@ impl SetCall {
             SetCall::Recipes | SetCall::MixNew(_) => String::new(),
             SetCall::AutoMix(_, to) => format!("automix into deck {}", deck_letter(*to)),
             SetCall::Transition(_, to, ..) => format!("transition into deck {}", deck_letter(*to)),
+            SetCall::Automix(_) | SetCall::Autoplay(_) => String::new(),
         }
     }
 
@@ -399,6 +406,10 @@ impl SetCall {
             SetCall::Transition(_, to, ..) => {
                 format!("into deck {}: {} · F8 cancels", deck_letter(*to), detail.lines().next().unwrap_or("").trim())
             }
+            SetCall::Automix(_) if detail == "on" => "automix on: tracks blend into each other on the beat".into(),
+            SetCall::Automix(_) => "automix off: tracks play to their end".into(),
+            SetCall::Autoplay(_) if detail == "on" => "autoplay on: when the queue runs low, tracks that blend are queued".into(),
+            SetCall::Autoplay(_) => "autoplay off: the list plays in order".into(),
             _ => text,
         }
     }
@@ -524,7 +535,27 @@ async fn run_set_call(proxy: &ServerProxy<'_>, call: &SetCall) -> zbus::Result<S
         SetCall::AudioRec(on) => SetReply::Status(proxy.record_audio(*on).await?),
         SetCall::AutoMix(from, to) => SetReply::Status(proxy.dj_auto_mix(*from, *to).await?),
         SetCall::Transition(from, to, recipe, bars, outro, path) => SetReply::Status(proxy.dj_transition(*from, *to, recipe, *bars, *outro, path).await?),
+        // the reply says which way it went, so a toggle can show it
+        SetCall::Automix(on) => {
+            let on = match on {
+                Some(on) => *on,
+                None => !proxy.automix_state().await?.0,
+            };
+            SetReply::Status(with_switch(proxy.automix(on).await?, on))
+        }
+        SetCall::Autoplay(on) => {
+            let on = match on {
+                Some(on) => *on,
+                None => !proxy.autoplay_state().await?.0,
+            };
+            SetReply::Status(with_switch(proxy.autoplay(on).await?, on))
+        }
     })
+}
+
+/// `ok` becomes `ok on` / `ok off`; anything else is codjd's reason
+fn with_switch(reply: String, on: bool) -> String {
+    if reply == "ok" { format!("ok {}", if on { "on" } else { "off" }) } else { reply }
 }
 
 /// The connection to codjd for one DJ session: tasks end when this is dropped
@@ -1073,6 +1104,10 @@ pub enum Browse {
 pub enum Command {
     /// back to the normal view
     Exit,
+    /// `:automix [on|off]`
+    Automix(Option<bool>),
+    /// `:autoplay [on|off]`
+    Autoplay(Option<bool>),
     Load(u8),
     /// correct a deck's detected tempo by a factor; 0 resets
     Grid(u8, f64),
@@ -1363,6 +1398,15 @@ pub fn parse_command(cmd: &str) -> Command {
                 (Some(d), Some(f)) => Command::Grid(d, f),
                 _ => Command::Unknown("usage: grid a|b x2|/2|x1.5|/1.5|reset".into()),
             }
+        }
+        Some(w @ ("automix" | "autoplay")) => {
+            let on = match words.next() {
+                None => None,
+                Some("on") => Some(true),
+                Some("off") => Some(false),
+                Some(_) => return Command::Unknown(format!("usage: {w} [on|off]")),
+            };
+            if w == "automix" { Command::Automix(on) } else { Command::Autoplay(on) }
         }
         Some("set") => {
             let name = words.collect::<Vec<_>>().join(" ");
@@ -2529,6 +2573,8 @@ impl DjScreen {
     pub fn run_command(&mut self, cmd: &str) -> Outcome {
         match parse_command(cmd) {
             Command::Exit => return Outcome::Exit,
+            Command::Automix(on) => self.session.set_call(SetCall::Automix(on)),
+            Command::Autoplay(on) => self.session.set_call(SetCall::Autoplay(on)),
             Command::Load(d) => self.load(d),
             Command::Grid(d, f) => self.session.grid_scale(d, f),
             Command::SetList => self.session.set_call(SetCall::List),
@@ -3016,6 +3062,10 @@ mod tests {
         assert_eq!(parse_command("grid a reset"), Command::Grid(0, 0.));
         assert!(matches!(parse_command("grid c x2"), Command::Unknown(_)));
         assert!(matches!(parse_command("qa!"), Command::Unknown(_)));
+        assert_eq!(parse_command("automix"), Command::Automix(None));
+        assert_eq!(parse_command("autoplay on"), Command::Autoplay(Some(true)));
+        assert_eq!(parse_command("automix off"), Command::Automix(Some(false)));
+        assert!(matches!(parse_command("autoplay maybe"), Command::Unknown(_)));
     }
 
     #[test]
