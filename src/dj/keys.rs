@@ -459,6 +459,8 @@ pub enum DjCall {
     Set { control: &'static str, deck: u32, value: f64 },
     /// a patch knob: `PatchAction {"op":"knob",...}` on the slot
     PatchKnob { slot: u32, name: String, value: f64 },
+    /// the player's volume (codjd's `Volume`, the master) up or down by `delta`, 0..1
+    VolumeStep(f64),
 }
 
 impl DjCall {
@@ -476,6 +478,7 @@ impl DjCall {
             DjCall::Hotcue { .. } => "DjHotcue",
             DjCall::Set { .. } => "DjSet",
             DjCall::PatchKnob { .. } => "PatchAction",
+            DjCall::VolumeStep(_) => "Volume",
         }
     }
 }
@@ -866,18 +869,6 @@ impl DjKeys {
     /// Seconds a paused deck moves per jog detent
     pub fn jog_seconds(&self) -> f64 {
         JOG_STEPS[(self.jog_level as usize).min(JOG_STEPS.len() - 1)]
-    }
-
-    /// Knob press on the jog wheel: cues a paused deck at the spot it was scrubbed to. A
-    /// playing deck is left alone (a stray press must not stop the room); false then.
-    pub fn jog_press(&mut self) -> bool {
-        let deck = self.focus;
-        if !self.decks.get(deck as usize).is_some_and(|d| d.loaded && !d.playing) {
-            return false;
-        }
-        self.out.push(DjCall::Cue { deck: deck as u32, pressed: true });
-        self.out.push(DjCall::Cue { deck: deck as u32, pressed: false });
-        true
     }
 
     /// Knob press: resets the selection; false when there is none
@@ -2626,9 +2617,6 @@ mod tests {
             other => panic!("{other:?}"),
         }).collect();
         assert_eq!(jumps, [1.0, 1.0, 2.0, 4.0, -1.0]);
-        // the press cues the paused deck where the scrub left it
-        assert!(k.jog_press());
-        assert_eq!(k.tick(t0 + ms(700)), [DjCall::Cue { deck: 0, pressed: true }, DjCall::Cue { deck: 0, pressed: false }]);
         // playing: the turn bends the tempo once, the bend ends when the knob stops
         k.set_snapshot(&[gridded(true), deck(false)], &MixerInfo::default());
         k.jog(1, t0 + ms(1000));
@@ -2638,9 +2626,6 @@ mod tests {
         assert_eq!(k.tick(t0 + ms(1250)), [DjCall::Nudge { deck: 0, amount: -JOG_BEND }]);
         assert!(k.tick(t0 + ms(1400)).is_empty());
         assert_eq!(k.tick(t0 + ms(1500)), [DjCall::Nudge { deck: 0, amount: 0.0 }]);
-        // a stray press never cues a playing deck
-        assert!(!k.jog_press());
-        assert!(k.tick(t0 + ms(1600)).is_empty());
         // the focused deck is the one that moves
         k.set_focus(1);
         k.jog(1, t0 + ms(2000));

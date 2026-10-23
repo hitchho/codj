@@ -548,6 +548,11 @@ async fn run_call(proxy: &ServerProxy<'_>, call: &DjCall) -> zbus::Result<String
         DjCall::PatchKnob { slot, name, value } => {
             proxy.patch_action(*slot, &serde_json::json!({"op": "knob", "name": name, "value": value}).to_string()).await
         }
+        DjCall::VolumeStep(delta) => {
+            let now = proxy.get_volume().await? as f64;
+            let v = ((now + delta).clamp(0., 1.) * 100.).round() / 100.;
+            proxy.volume(v as f32).await.map(|_| "ok".to_string())
+        }
     }
 }
 
@@ -1661,6 +1666,8 @@ pub struct DjScreen {
     agent: crate::parser::AgentSettings,
     /// the hardware knob while DJ mode is open (dropping it releases the device)
     knob: Option<crate::knob::Knob>,
+    /// a knob press switched the knob from volume to the jog wheel
+    knob_jog: bool,
     /// the `?` key map is up
     help: bool,
     /// how far the `?` key map is scrolled
@@ -1696,6 +1703,7 @@ impl DjScreen {
             ai_session: None,
             agent: Default::default(),
             knob: None,
+            knob_jog: false,
             help: false,
             help_scroll: 0,
             tutor: None,
@@ -1730,9 +1738,10 @@ impl DjScreen {
     }
 
     /// What the knob did: turning edits the picked control, scrolls the library while browsing,
-    /// else is the focused deck's jog wheel (scrub when paused, bend when playing). Pressing
-    /// resets the picked control, loads the highlighted track while browsing, else cues a paused
-    /// deck. Notes show in the status line. Nothing acts while a text box or pane has the keyboard.
+    /// else turns the volume, or with the jog wheel switched on (a press) is the focused deck's
+    /// jog wheel (scrub when paused, bend when playing). Pressing resets the picked control,
+    /// loads the highlighted track while browsing, else switches between volume and jog wheel.
+    /// Notes show in the status line. Nothing acts while a text box or pane has the keyboard.
     fn poll_knob(&mut self) {
         use crate::knob::{KnobAction, Msg};
         let Some(knob) = self.knob.as_ref() else { return };
@@ -1746,8 +1755,13 @@ impl DjScreen {
                     if !self.keys.press(t) {
                         if self.pane.browsing() {
                             self.load_smart();
-                        } else if !self.keys.jog_press() {
-                            self.set_note("knob press cues a paused deck (the focused one is playing or empty)");
+                        } else {
+                            self.knob_jog = !self.knob_jog;
+                            self.set_note(if self.knob_jog {
+                                "knob: jog wheel (scrubs a paused deck, bends a playing one) · press again for volume"
+                            } else {
+                                "knob: volume · press for the jog wheel"
+                            });
                         }
                     }
                 }
@@ -1761,8 +1775,11 @@ impl DjScreen {
         }
         if self.pane.browsing() {
             self.pane.scroll(-dir as isize);
-        } else {
+        } else if self.knob_jog {
             self.keys.jog(dir, now);
+        } else {
+            // the knob you reach for without thinking: volume, as in the normal view
+            self.session.send(vec![DjCall::VolumeStep(dir as f64 * 0.02)]);
         }
     }
 
