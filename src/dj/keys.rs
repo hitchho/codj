@@ -457,6 +457,41 @@ pub fn bind(k: &NKey) -> Option<Binding> {
     })
 }
 
+/// The length a digit in the `t` menu picks, in bars: the steps 4 8 16 32
+pub fn step_bars(c: char) -> Option<u32> {
+    Some(match c {
+        '1' => 4,
+        '2' => 8,
+        '3' => 16,
+        '4' => 32,
+        _ => return None,
+    })
+}
+
+/// The `t` menu: one line per technique, then the length steps
+pub fn technique_menu(outro: bool, bars: Option<u32>) -> (String, Vec<String>) {
+    let when = if outro { "at the outro" } else { "at the next phrase" };
+    let len = bars.map_or("its own length".to_string(), |b| format!("{b} bars"));
+    let title = format!(" transition {when} · {len} · Esc cancels ");
+    let mut lines: Vec<String> = [
+        ('b', "blend", "both play, faders cross"),
+        ('s', "bass swap", "the low end changes hands on a bar line"),
+        ('e', "EQ swap", "highs, mids, lows hand over one by one"),
+        ('f', "filter blend", "one rises out of a filter, the other sinks"),
+        ('o', "echo-out", "the old one echoes away, the new one drops"),
+        ('r', "loop roll", "the old one rolls tighter, then the new one lands"),
+        ('c', "cut", "straight in on the downbeat"),
+        ('k', "brake", "the old one spins down"),
+        ('t', "codj picks", "the technique that fits these two tracks"),
+    ]
+    .iter()
+    .map(|(k, name, what)| format!("{k}  {name} · {what}"))
+    .collect();
+    lines.push(String::new());
+    lines.push("length: 1 = 4 bars · 2 = 8 · 3 = 16 · 4 = 32, then the letter (t2s: bass swap over 8)".into());
+    (title, lines)
+}
+
 /// The technique a letter after `t` names: `Some(None)` is `tt`, codj's own choice
 pub fn technique(c: char) -> Option<Option<&'static str>> {
     Some(match c {
@@ -1222,6 +1257,12 @@ impl DjKeys {
                 't' => Some(Nav::AutoMix),
                 _ => None,
             },
+            // a digit in the menu is a length step; the menu stays up for the technique
+            Pending::T { outro } if step_bars(c).is_some() => {
+                self.pending = Some(Pending::T { outro });
+                self.count = step_bars(c);
+                None
+            }
             Pending::T { outro } => match technique(c) {
                 Some(recipe) => Some(Nav::Transition { recipe, bars: count, outro }),
                 None => Some(Nav::Note("transitions: tb blend · ts bass swap · te EQ swap · tf filter · to echo-out · tr roll · tc cut · tk brake · tt codj picks")),
@@ -1256,6 +1297,11 @@ impl DjKeys {
     }
 
     /// Something half-typed that Esc would cancel
+    /// The command waiting for its next key, and the count typed before it
+    pub fn pending(&self) -> Option<(Pending, Option<u32>)> {
+        self.pending.map(|p| (p, self.count))
+    }
+
     pub fn has_pending(&self) -> bool {
         self.count.is_some() || self.pending.is_some()
     }
@@ -2132,6 +2178,17 @@ mod tests {
         // a count is capped
         let calls = typed(&mut k, "99999w", t0);
         assert_eq!(calls, vec![DjCall::BeatJump { deck: 0, beats: 9999.0 }]);
+    }
+
+    #[test]
+    fn a_digit_in_the_t_menu_is_a_length_step() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        assert_eq!(k.on_key(&press('t'), t0), None);
+        assert_eq!(k.on_key(&press('2'), t0 + ms(50)), None);
+        assert_eq!(k.pending(), Some((Pending::T { outro: false }, Some(8))));
+        assert_eq!(k.on_key(&press('s'), t0 + ms(100)), Some(Nav::Transition { recipe: Some("bassswap"), bars: Some(8), outro: false }));
+        assert_eq!(k.pending(), None);
     }
 
     #[test]

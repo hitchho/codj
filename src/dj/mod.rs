@@ -1097,6 +1097,8 @@ pub enum Browse {
     /// `q`: add the highlighted track to the player's queue
     Queue,
     Help,
+    /// `t` or `T`: a transition with the highlighted track; the deck keys take the next keys
+    Transition,
 }
 
 /// What a `:` command asks for
@@ -1563,6 +1565,7 @@ impl Pane {
             KeyCode::Char('b') | KeyCode::Char('>') => return Browse::Load(1),
             KeyCode::Enter => return Browse::LoadFree,
             KeyCode::Char('?') => return Browse::Help,
+            KeyCode::Char('t' | 'T') => return Browse::Transition,
             KeyCode::Esc | KeyCode::Tab | KeyCode::BackTab => self.focus = Focus::Decks,
             _ => {}
         }
@@ -2487,12 +2490,16 @@ impl DjScreen {
                 return outcome;
             }
         }
-        if self.pane.browsing() {
+        // a half-typed `t` in the library goes on with the deck keys: its menu is up
+        if self.pane.browsing() && !self.keys.has_pending() {
             match self.pane.browse_key(key) {
                 Browse::Load(d) => self.load(d),
                 Browse::LoadFree => self.load_smart(),
                 Browse::Queue => self.queue_selected(),
                 Browse::Help => self.help = true,
+                Browse::Transition => {
+                    self.keys.on_key(key, now);
+                }
                 Browse::Nothing => {}
             }
             return Outcome::Stay;
@@ -2765,6 +2772,11 @@ impl DjScreen {
         let labels = hints::table();
         let showcmd = self.keys.showcmd();
         let typed = self.keys.hints().typed.clone();
+        // `t` waits for a technique: show what the letters are
+        let t_menu = match self.keys.pending() {
+            Some((keys::Pending::T { outro }, bars)) => Some(keys::technique_menu(outro, bars)),
+            _ => None,
+        };
         let chip = self
             .keys
             .hints()
@@ -2876,7 +2888,7 @@ impl DjScreen {
             learn: render::LearnView {
                 help: self.help,
                 help_scroll: self.help_scroll,
-                popup: s.popup.as_ref().map(|(t, l)| (t.as_str(), l.as_slice())),
+                popup: s.popup.as_ref().map(|(t, l)| (t.as_str(), l.as_slice())).or(t_menu.as_ref().map(|(t, l)| (t.as_str(), l.as_slice()))),
                 marks: &marks,
                 explain: explain.as_deref(),
                 warnings: s.warnings.len(),
