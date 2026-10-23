@@ -162,11 +162,13 @@ pub struct Session {
     pub id: String,
     /// prompts sent in it so far
     pub turns: u32,
+    /// the conversation itself when codj runs the agent loop (`[agent] provider`)
+    pub history: super::native::History,
 }
 
 impl Session {
     pub fn new() -> Session {
-        Session { id: uuid_v4(), turns: 0 }
+        Session { id: uuid_v4(), turns: 0, history: Default::default() }
     }
 }
 
@@ -445,12 +447,20 @@ fn tool_name(name: &str) -> &str {
 }
 
 /// One line of at most `n` characters
+pub fn one_line_pub(s: &str, n: usize) -> String {
+    one_line(s, n)
+}
+
 fn one_line(s: &str, n: usize) -> String {
     let flat: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
     if flat.chars().count() > n { format!("{}…", flat.chars().take(n.saturating_sub(1)).collect::<String>()) } else { flat }
 }
 
 /// The interesting arguments of a tool call, short: names and values, never whole texts
+pub fn tool_args_line(input: &serde_json::Value) -> String {
+    tool_args(input)
+}
+
 fn tool_args(input: &serde_json::Value) -> String {
     let Some(map) = input.as_object() else { return String::new() };
     let parts: Vec<String> = map
@@ -678,6 +688,8 @@ pub struct Prompt {
     /// lines scrolled back from the end (0 = follow)
     back: usize,
     prompt: String,
+    /// the DJ's words alone (the native loop's user turn; `prompt` is its system message)
+    request: String,
     before: Snapshot,
     changes: Vec<SetChange>,
     review: Vec<String>,
@@ -708,6 +720,7 @@ impl Prompt {
             out: Vec::new(),
             back: 0,
             prompt: String::new(),
+            request: String::new(),
             before: Snapshot::new(),
             changes: Vec::new(),
             review: Vec::new(),
@@ -739,8 +752,9 @@ impl Prompt {
     }
 
     /// Starts the agent with the full prompt (request + preamble). The sets are read first.
-    pub fn start(&mut self, full_prompt: String) {
+    pub fn start(&mut self, full_prompt: String, request: String) {
         self.prompt = full_prompt;
+        self.request = request;
         self.phase = Phase::Starting;
         self.out.clear();
         self.back = 0;
@@ -754,6 +768,28 @@ impl Prompt {
     }
 
     fn launch(&mut self) {
+        // codj's own loop on a chat API, when `[agent] provider` / `base_url` asks for one
+        match super::native::endpoint(&self.agent) {
+            Ok(Some(ep)) => {
+                self.out.push((format!("$ {}", ep.label), false));
+                let (ktx, krx) = oneshot::channel();
+                self.kill = Some(ktx);
+                self.phase = Phase::Running;
+                self.status = "running".into();
+                let history = self.session.as_ref().map(|s| s.history.clone()).unwrap_or_default();
+                let allowed = allowed_tools(self.agent.mcp_tools.as_deref(), self.agent.live.unwrap_or(false));
+                let request = self.request.clone();
+                tokio::spawn(super::native::run(ep, self.agent.clone(), self.prompt.clone(), request, history, allowed, self.tx.clone(), krx));
+                return;
+            }
+            Err(e) => {
+                self.out.push((e, true));
+                self.phase = Phase::Done;
+                self.status = "not started".into();
+                return;
+            }
+            Ok(None) => {}
+        }
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("codj"));
         let mcp_path = std::env::temp_dir().join(format!("codj-agent-{}-{}.json", std::process::id(), self.out.len() + self.before.len()));
         match build_agent_cmd(&self.agent, &exe, &mcp_path, &self.prompt, self.session.as_ref()) {
@@ -1010,6 +1046,7 @@ mod tests {
             prompt_via: via.map(str::to_string),
             mcp_tools: tools.map(|t| t.iter().map(|s| s.to_string()).collect()),
             output: None,
+            ..Default::default()
         }
     }
 
@@ -1114,7 +1151,7 @@ mod tests {
         let wrapped = build_agent_cmd(&cfg(Some("/usr/bin/claude -p"), false, None, None), Path::new("/c"), Path::new("/m"), "p", None).unwrap();
         assert!(wrapped.args.contains(&"--mcp-config".to_string()), "a path to claude counts as claude");
         // a conversation: the first prompt names the session, later ones resume it
-        let first = Session { id: "4f2c9a1e-0b7d-4c3e-9f10-2a3b4c5d6e7f".into(), turns: 0 };
+        let first = Session { id: "4f2c9a1e-0b7d-4c3e-9f10-2a3b4c5d6e7f".into(), turns: 0, history: Default::default() };
         let c = build_agent_cmd(&cfg(None, false, None, None), Path::new("/c"), Path::new("/m"), "p", Some(&first)).unwrap();
         let at = |c: &AgentCmd, f: &str| c.args.iter().position(|a| a == f);
         assert_eq!(c.args[at(&c, "--session-id").unwrap() + 1], first.id);

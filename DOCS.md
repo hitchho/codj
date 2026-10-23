@@ -419,6 +419,21 @@ If somebody else saved first (vim, an agent, a capture) `:w` is refused with "se
 
 `:ai make the second mix longer` (or `F11`, type, `Enter`) runs the agent from `[agent]` in the config as a child process. codj holds no AI keys: the command brings its own login.
 
+**Which AI.** By default `:ai` runs Claude Code (`claude -p`, your Claude login). For any other model, codj runs its own agent loop on an OpenAI-compatible chat API, with the same codj tools and the same `--live` guardrail:
+
+```toml
+[agent]
+provider = "openrouter"                 # one key, most models: OPENROUTER_API_KEY
+model = "anthropic/claude-sonnet-4.5"   # any OpenRouter model name (this is the default)
+
+# provider = "openai"                   # OPENAI_API_KEY, model e.g. "gpt-4.1"
+# base_url = "http://127.0.0.1:11434/v1"  # any OpenAI-compatible API: a local server, another router
+# model = "qwen3"
+# api_key_env = "MY_ROUTER_KEY"         # the variable holding its key; keys never go in the config
+```
+
+The loop asks the model, runs every tool call of its reply against codj's MCP server and returns the results by call id, and asks again until the model answers without a tool call; it stops after 20 turns or when the model repeats the same call three times. The prompts of a DJ session are one conversation (`:ai new` starts another); the system message carries the current decks and sets afresh each time. API errors read as words in red: `no credits left`, `rate limited`, `the API key was refused`. `provider = "codex"` / `"grok"` are not supported yet. `examples/native_agent_e2e.sh` tests the loop against a fake API on localhost.
+
 **What the agent is doing.** With `claude` the pane shows the agent's work as it happens, from Claude Code's `--output-format stream-json` events: its text, every tool call as `→ set_write name=claude-trio text=<12 lines> base_hash=3f2a…` (whole texts are never dumped), each result as `✓ ok 9c1e…` or `✗ set changed since you read it` (red), and a closing `-- done: 4 turns, 12.3 s, $0.07`, which stays above the diff in the review. `output = "text"` under `[agent]` shows the plain output instead; `output = "stream-json"` reads events from another command that prints them (grok's headless `--output-format streaming-messages-json` copies the format).
 
 **One conversation.** With `claude` as the command, the prompts of one DJ session are one conversation: the first runs with `--session-id <uuid>`, later ones with `--resume <uuid>`, so "make it shorter" knows what "it" is. Every prompt still carries the current decks and sets. The box's title says which turn it is; `:ai new` forgets the conversation and the next prompt starts another (so does leaving and opening DJ mode). Other agent commands run one prompt at a time, as before.

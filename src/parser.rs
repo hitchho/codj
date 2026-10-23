@@ -64,6 +64,15 @@ pub struct AgentSettings {
     /// what the command prints: "stream-json" (Claude Code's event lines: text, tool calls,
     /// results, a closing summary) or "text"; default stream-json for `claude`, text otherwise
     pub output: Option<String>,
+    /// codj's own agent loop on a chat API instead of a command: "openrouter", "openai", or
+    /// unset with `base_url` for any other OpenAI-compatible API; "claude" (or unset) = the command
+    pub provider: Option<String>,
+    /// the model name the API knows, e.g. "anthropic/claude-sonnet-4.5" on OpenRouter
+    pub model: Option<String>,
+    /// an OpenAI-compatible endpoint, e.g. "http://127.0.0.1:11434/v1"
+    pub base_url: Option<String>,
+    /// the environment variable with the API key (the key itself never goes in the config)
+    pub api_key_env: Option<String>,
 }
 
 /// `[knob]`: a hardware knob (rotary encoder sending volume keys): volume, jog wheel. Off unless `device`

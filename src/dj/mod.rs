@@ -18,6 +18,7 @@ pub mod mixnew;
 pub mod patch;
 pub mod patchdef;
 pub mod patchview;
+pub mod native;
 pub mod prompt;
 pub mod tutor;
 pub mod render;
@@ -1902,7 +1903,7 @@ impl DjScreen {
         let session = self.ai_session.get_or_insert_with(prompt::Session::new);
         if let Some(p) = self.prompt.as_mut() {
             p.set_session(session.clone());
-            p.start(full);
+            p.start(full, request.clone());
             session.turns += 1;
         }
     }

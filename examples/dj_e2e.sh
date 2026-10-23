@@ -33,7 +33,11 @@ case "$DBUS_SESSION_BUS_ADDRESS" in *"/run/user/"*) echo "that looks like the re
 W=${W:-/tmp/codj-dj-e2e}
 BIN=${BIN:-$(dirname "$0")/../target/debug}
 export HOME=$W/home XDG_CACHE_HOME=$W/cache XDG_CONFIG_HOME=$W/config XDG_STATE_HOME=$W/state XDG_DATA_HOME=$W/data
-mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" "$XDG_DATA_HOME"
+mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_STATE_HOME" "$XDG_DATA_HOME" "$W/bin"
+# a misread config must never reach a real agent CLI (it would use the account): `claude` only fails
+printf '#!/bin/sh\necho "the test reached claude: the config was not read" >&2\nexit 99\n' > "$W/bin/claude"
+chmod +x "$W/bin/claude"
+export PATH="$W/bin:$PATH"
 rm -f "$W"/calls.log "$W"/cap-*
 export CODJ_FAKE_ISOLATED=1 CODJ_FAKE_LOG=$W/calls.log
 T="tmux -L ${TMUX_SOCK:-codjdje2e}"
