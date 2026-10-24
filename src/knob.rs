@@ -114,14 +114,52 @@ impl Drop for Knob {
 /// How often the thread looks at the stop flag while the device is quiet
 const POLL_MS: i32 = 40;
 
+/// How often a missing knob is looked for again
+const RETRY: Duration = Duration::from_secs(2);
+
+/// Opens the device and reads it; when it is missing or goes away (unplugged, a wireless
+/// keyboard asleep or reconnecting) waits and opens it again, so the knob comes back by itself.
+/// Says once what is wrong, not on every retry.
 fn run(needle: &str, codes: Codes, grab: bool, tx: &Sender<Msg>, stop: &AtomicBool) {
-    let mut dev = match find_device(needle, &codes) {
-        Ok(d) => d,
-        Err(e) => {
-            let _ = tx.send(Msg::Note(format!("knob: {e}")));
-            return;
+    let mut said: Option<String> = None;
+    while !stop.load(Ordering::SeqCst) {
+        match find_device(needle, &codes) {
+            Ok(dev) => {
+                if said.take().is_some() {
+                    let _ = tx.send(Msg::Note("knob: back".into()));
+                }
+                match read(dev, codes, grab, tx, stop) {
+                    Read::Stopped => return,
+                    Read::Gone => said = Some("knob: the device went away, waiting for it".into()),
+                }
+                if let Some(n) = &said {
+                    let _ = tx.send(Msg::Note(n.clone()));
+                }
+            }
+            Err(e) => {
+                let note = format!("knob: {e}");
+                if said.as_ref() != Some(&note) {
+                    let _ = tx.send(Msg::Note(note.clone()));
+                    said = Some(note);
+                }
+            }
         }
-    };
+        let until = Instant::now() + RETRY;
+        while Instant::now() < until {
+            if stop.load(Ordering::SeqCst) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(POLL_MS as u64));
+        }
+    }
+}
+
+enum Read {
+    Stopped,
+    Gone,
+}
+
+fn read(mut dev: RawDevice, codes: Codes, grab: bool, tx: &Sender<Msg>, stop: &AtomicBool) -> Read {
     let mut grabbed = false;
     if grab {
         let types_letters = dev.supported_keys().is_some_and(|k| k.contains(KeyCode::KEY_A));
@@ -144,14 +182,13 @@ fn run(needle: &str, codes: Codes, grab: bool, tx: &Sender<Msg>, stop: &AtomicBo
             if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
                 continue;
             }
-            break;
+            return Read::Gone;
         }
         if n == 0 {
             continue;
         }
         if p.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
-            let _ = tx.send(Msg::Note("knob: the device went away".into()));
-            break;
+            return Read::Gone;
         }
         match dev.fetch_events() {
             Ok(events) => {
@@ -162,21 +199,19 @@ fn run(needle: &str, codes: Codes, grab: bool, tx: &Sender<Msg>, stop: &AtomicBo
                     }
                     if let Some(action) = codes.map(ev.code(), ev.value()) {
                         if tx.send(Msg::Action(action, Instant::now())).is_err() {
-                            return;
+                            return Read::Stopped;
                         }
                     }
                 }
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(5)),
-            Err(_) => {
-                let _ = tx.send(Msg::Note("knob: the device went away".into()));
-                break;
-            }
+            Err(_) => return Read::Gone,
         }
     }
     if grabbed {
         let _ = dev.ungrab();
     }
+    Read::Stopped
 }
 
 /// The first input device whose name contains `needle` (case-insensitive) and that has one of
@@ -275,7 +310,7 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_device_gives_one_note_and_ends() {
+    fn a_missing_device_gives_one_note_and_is_looked_for_again() {
         let s = KnobSettings { device: Some("no such knob xyzzy 42".into()), ..Default::default() };
         let knob = Knob::start(&s).unwrap();
         let mut got = Vec::new();
@@ -288,6 +323,13 @@ mod tests {
         }
         assert_eq!(got.len(), 1, "{got:?}");
         assert!(matches!(&got[0], Msg::Note(n) if n.starts_with("knob: ")), "{got:?}");
+        // a retry that finds nothing again does not say it again
+        std::thread::sleep(RETRY + Duration::from_millis(300));
+        assert_eq!(knob.drain(), vec![]);
+        // and a waiting reader stops at once when codj lets go of it
+        let t = std::time::Instant::now();
+        drop(knob);
+        assert!(t.elapsed() < Duration::from_millis(500), "{:?}", t.elapsed());
     }
 
     /// Needs a writable /dev/uinput; skipped (passes) without one. The virtual device only has
