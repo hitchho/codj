@@ -87,6 +87,13 @@ pub const CATALOG: &[NodeType] = &[
         &[],
         "sums four inputs with a gain each",
     ),
+    nt(
+        "Chop",
+        &[("clock", 0.0), ("trig", 0.0), ("slice", 0.0), ("rate", 1.0), ("level", 1.0)],
+        &["out"],
+        &[("track", "library file path"), ("bar", "first bar, from 1 (1)"), ("bars", "0.25..16 (1)"), ("slices", "1..256 (16)"), ("order", "\"0 1 . 3 - 5\": slice per clock step, . rest, - play on")],
+        "a stretch of a library track cut into slices on its beat grid; plays at the patch's tempo (pitch moves with it, like a record); a clock steps through order, a rising trig plays slice",
+    ),
     nt("AudioOut", &[("left", 0.0), ("right", 0.0)], &[], &[], "the slot's output; exactly one per patch"),
     nt("Notes", &[], &[], &[("text", "string")], "a comment, ignored"),
 ];
