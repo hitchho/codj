@@ -1951,7 +1951,7 @@ mod tests {
             "jump 1 beat forward / back (4w: 4 beats)",
             "mark: save a hot cue here (eight of them)",
             "loop 4 beats; 8v loops 8; v again leaves",
-            "undo / redo a control change",
+            "undo: rolls back a transition, or a control",
             "low: the bass — keep only one bassline at a time",
             "crossfader: which deck the room hears",
             "hints: label every control, type one to pick it",

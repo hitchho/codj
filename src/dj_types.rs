@@ -74,7 +74,7 @@ pub struct MixerInfo {
     pub crossfader: f64,
     pub master: f64,
     pub cue_mix: f64,
-    /// "internal" | "external"
+    /// "internal" | "external" | "split"
     pub mode: String,
     pub quantize: bool,
     pub xruns: u64,

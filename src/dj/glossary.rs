@@ -54,7 +54,8 @@ pub const DECK_KEYS: &[Entry] = &[
     e("Space", "play / pause the focused deck"),
     e("c", "cue: a saved spot; hold to hear it in headphones"),
     e("s", "sync: match {self}'s tempo and beats to {other}"),
-    e("w b", "jump 1 beat forward / back (4w: 4 beats)"),
+    e("a b", "load the highlighted track onto deck A / B"),
+    e("w ge", "jump 1 beat forward / back (4w: 4 beats)"),
     e("W B", "jump a bar forward / back (2W: 2 bars)"),
     e("} {", "jump a phrase (16 bars) forward / back"),
     e("0 gg", "back to the start of the track"),
@@ -68,9 +69,9 @@ pub const DECK_KEYS: &[Entry] = &[
     e("+ -", "pitch up / down 0.1 % (hold to ramp)"),
     e("=", "pitch back to 0"),
     e("R", "reset deck: EQ, filter, fader, pitch"),
-    e("[ ]", "bend a playing deck, roll a paused one"),
+    e("[ ]", "bend a playing deck, scrub a paused one"),
     e(".", "repeat the last action on the focused deck"),
-    e("u C-r", "undo / redo a control change"),
+    e("u C-r", "undo: rolls back a transition, or a control"),
     e("4w 2}", "a count goes in front, like in vim"),
 ];
 
@@ -534,7 +535,7 @@ mod tests {
     fn the_overlay_names_the_keys_of_the_focused_deck() {
         let keys = |entries: &[Entry]| entries.iter().map(|x| x.keys).collect::<Vec<_>>();
         let deck = keys(DECK_KEYS);
-        for k in ["h l", "Space", "c", "s", "w b", "W B", "} {", "0 gg", "G $", "m{a-h}", "'{a-h}", "v", "+ -", "=", "[ ]", ".", "u C-r"] {
+        for k in ["h l", "Space", "c", "s", "a b", "w ge", "W B", "} {", "0 gg", "G $", "m{a-h}", "'{a-h}", "v", "+ -", "=", "[ ]", ".", "u C-r"] {
             assert!(deck.contains(&k), "{k}");
         }
         let sync = DECK_KEYS.iter().find(|e| e.keys == "s").unwrap();

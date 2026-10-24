@@ -197,6 +197,9 @@ pub enum SetCall {
     Automix(Option<bool>),
     /// `:autoplay [on|off]`: queue tracks that blend when the queue runs low; no word toggles
     Autoplay(Option<bool>),
+    /// `:split [on|off]`: one pair of headphones, the master left and the cue right; off is the
+    /// usual master and headphone outputs
+    Split(Option<bool>),
 }
 
 /// A call to the patch decks. Like the set calls they run one after another in their own task.
@@ -363,6 +366,7 @@ impl SetCall {
             SetCall::Transition(..) => "DjTransition",
             SetCall::Automix(_) => "Automix",
             SetCall::Autoplay(_) => "Autoplay",
+            SetCall::Split(_) => "DjMode",
         }
     }
 
@@ -373,7 +377,7 @@ impl SetCall {
             SetCall::Use(n) => format!("set {n} active"),
             SetCall::New(n) => format!("set {n} made and active: :mix new writes a mix, F9 records, F10 edits"),
             SetCall::Arm(m) => format!("armed mix {}", m + 1),
-            SetCall::Disarm => "cancelled: no mix or transition is planned now".into(),
+            SetCall::Disarm => "cancelled: a planned transition is dropped, a running one rolled back".into(),
             SetCall::Auto(on) => format!("auto {}", if *on { "on" } else { "off" }),
             SetCall::Preview(m, bars) => format!("previewing mix {} from {bars} bars before", m + 1),
             SetCall::Load(t) => format!("loaded track {}", t + 1),
@@ -387,7 +391,7 @@ impl SetCall {
             SetCall::Recipes | SetCall::MixNew(_) => String::new(),
             SetCall::AutoMix(_, to) => format!("automix into deck {}", deck_letter(*to)),
             SetCall::Transition(_, to, ..) => format!("transition into deck {}", deck_letter(*to)),
-            SetCall::Automix(_) | SetCall::Autoplay(_) => String::new(),
+            SetCall::Automix(_) | SetCall::Autoplay(_) | SetCall::Split(_) => String::new(),
         }
     }
 
@@ -410,6 +414,8 @@ impl SetCall {
             SetCall::Automix(_) => "automix off: tracks play to their end".into(),
             SetCall::Autoplay(_) if detail == "on" => "autoplay on: when the queue runs low, tracks that blend are queued".into(),
             SetCall::Autoplay(_) => "autoplay off: the list plays in order".into(),
+            SetCall::Split(_) if detail == "on" => "split: the master in your left ear, the cue (what you prepare) in the right".into(),
+            SetCall::Split(_) => "split off: the master on the main output, the cue on the headphones".into(),
             _ => text,
         }
     }
@@ -549,6 +555,13 @@ async fn run_set_call(proxy: &ServerProxy<'_>, call: &SetCall) -> zbus::Result<S
                 None => !proxy.autoplay_state().await?.0,
             };
             SetReply::Status(with_switch(proxy.autoplay(on).await?, on))
+        }
+        SetCall::Split(on) => {
+            let on = match on {
+                Some(on) => *on,
+                None => proxy.dj_mixer().await?.mode != "split",
+            };
+            SetReply::Status(with_switch(proxy.dj_mode(if on { "split" } else { "internal" }).await?, on))
         }
     })
 }
@@ -1110,6 +1123,8 @@ pub enum Command {
     Automix(Option<bool>),
     /// `:autoplay [on|off]`
     Autoplay(Option<bool>),
+    /// `:split [on|off]`
+    Split(Option<bool>),
     Load(u8),
     /// correct a deck's detected tempo by a factor; 0 resets
     Grid(u8, f64),
@@ -1401,14 +1416,18 @@ pub fn parse_command(cmd: &str) -> Command {
                 _ => Command::Unknown("usage: grid a|b x2|/2|x1.5|/1.5|reset".into()),
             }
         }
-        Some(w @ ("automix" | "autoplay")) => {
+        Some(w @ ("automix" | "autoplay" | "split")) => {
             let on = match words.next() {
                 None => None,
                 Some("on") => Some(true),
                 Some("off") => Some(false),
                 Some(_) => return Command::Unknown(format!("usage: {w} [on|off]")),
             };
-            if w == "automix" { Command::Automix(on) } else { Command::Autoplay(on) }
+            match w {
+                "automix" => Command::Automix(on),
+                "autoplay" => Command::Autoplay(on),
+                _ => Command::Split(on),
+            }
         }
         Some("set") => {
             let name = words.collect::<Vec<_>>().join(" ");
@@ -1869,6 +1888,12 @@ impl DjScreen {
             // the knob you reach for without thinking: volume, as in the normal view
             self.session.send(vec![DjCall::VolumeStep(dir as f64 * 0.02)]);
         }
+    }
+
+    /// A transition is planned or running: a set's armed mix, or the player's or the DJ's own
+    fn transition_active(&self) -> bool {
+        let s = self.session.shared.lock().unwrap();
+        s.set.as_ref().is_some_and(|set| set.armed >= 0) || s.up_next.as_ref().is_some_and(|u| !u.1.is_empty() && u.2 >= 0.)
     }
 
     /// `q` in the library: the highlighted track goes to the end of the player's queue
@@ -2516,6 +2541,13 @@ impl DjScreen {
                 None => Outcome::Stay,
             };
         }
+        // `u` with a transition planned or running undoes the transition (like F8): the old
+        // track plays on alone; with none it undoes the last control change
+        let plain_u = key.code == KeyCode::Char('u') && key.modifiers.is_empty() && key.kind == KeyEventKind::Press;
+        if plain_u && !self.keys.has_pending() && self.keys.hints().selected.is_none() && self.transition_active() {
+            self.session.set_call(SetCall::Disarm);
+            return Outcome::Stay;
+        }
         let Some(nav) = self.keys.on_key(key, now) else {
             return Outcome::Stay;
         };
@@ -2559,6 +2591,7 @@ impl DjScreen {
             // handled inside DjKeys, which owns the selection
             Nav::Hints | Nav::Toggle | Nav::Reset => {}
             Nav::LoadSmart => self.load_smart(),
+            Nav::Load(d) => self.load(d),
         }
         Outcome::Stay
     }
@@ -2588,6 +2621,7 @@ impl DjScreen {
             Command::Exit => return Outcome::Exit,
             Command::Automix(on) => self.session.set_call(SetCall::Automix(on)),
             Command::Autoplay(on) => self.session.set_call(SetCall::Autoplay(on)),
+            Command::Split(on) => self.session.set_call(SetCall::Split(on)),
             Command::Load(d) => self.load(d),
             Command::Grid(d, f) => self.session.grid_scale(d, f),
             Command::SetList => self.session.set_call(SetCall::List),
@@ -2792,7 +2826,11 @@ impl DjScreen {
         let explain: Option<String> = if self.keys.hints().active {
             glossary::hover(&typed, &labels, self.keys.visible()).or_else(|| self.keys.hints().selected.map(|t| glossary::explain(t).to_string()))
         } else {
-            self.keys.hints().selected.map(|t| glossary::explain(t).to_string())
+            self.keys.hints().selected.map(|t| glossary::explain(t).to_string()).or_else(|| {
+                // a paused deck is one being cued: say how to move through it
+                let f = self.keys.focus() as usize;
+                s.decks.get(f).filter(|d| d.loaded && !d.playing).map(|_| scrub_help(f, self.keys.jog_seconds(), self.knob_jog))
+            })
         };
         // the tutor's pane and its proposal marks in the library
         let grids = [0, 1].map(|i| s.grids[i].as_ref().filter(|(p, _)| *p == s.decks[i].path).map(|(_, g)| *g));
@@ -3084,6 +3122,8 @@ mod tests {
         assert_eq!(parse_command("autoplay on"), Command::Autoplay(Some(true)));
         assert_eq!(parse_command("automix off"), Command::Automix(Some(false)));
         assert!(matches!(parse_command("autoplay maybe"), Command::Unknown(_)));
+        assert_eq!(parse_command("split"), Command::Split(None));
+        assert_eq!(parse_command("split off"), Command::Split(Some(false)));
     }
 
     #[test]
@@ -3384,4 +3424,13 @@ mod tests {
         );
         assert_eq!(describe_error("DjDecks", &e), "codjd has no deck API (DjDecks): update codjd");
     }
+}
+
+/// The status line while the focused deck is paused: how to find a spot in it
+fn scrub_help(deck: usize, step: f64, knob_jog: bool) -> String {
+    let knob = if knob_jog { "knob turns scrub" } else { "knob press: scrub with it" };
+    format!(
+        "deck {} paused: [ ] scrub {step} s (hold: faster) · g[ g] step · W B a bar · {{ }} 16 bars · {knob} · Space plays",
+        if deck == 0 { 'A' } else { 'B' }
+    )
 }

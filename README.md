@@ -25,7 +25,7 @@ The first five minutes, all vim keys:
 | `/` then `Enter`, `n` `N` | search (regex), next / previous match |
 | `Enter`, `Space` | play, pause (tracks blend into each other on the beat: `:automix` toggles it; `:autoplay` never lets the music run out) |
 | `:slsk <artist>` | search Soulseek and download (first time: `:set`, fill in a username) |
-| `:dj` | DJ mode: two decks; `Tab` then `j`/`k` and `a`/`b` loads a track onto deck A/B |
+| `:dj` | DJ mode: two decks; `j`/`k` pick a track, `a`/`b` load it onto deck A/B; `:split` mixes on one pair of headphones (master left, cue right) |
 | `:tutor` | a guided first mix with your own tracks (opens DJ mode) |
 | `:set new friday`, `F9` | in DJ mode: start a set, then record your mixing into it as code (`F10` edits it) |
 | `:q` | quit (the music keeps playing in codjd) |

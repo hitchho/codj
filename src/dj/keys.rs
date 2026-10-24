@@ -251,6 +251,8 @@ pub enum Nav {
     LibPageDown,
     /// load the highlighted track onto the focused deck (the other one if it plays)
     LoadSmart,
+    /// `a` / `b`: the highlighted library track onto deck A / B
+    Load(u8),
     /// arm the next mix of the active set (F6)
     SetArmNext,
     /// auto mode on / off (F7)
@@ -431,7 +433,9 @@ pub fn bind(k: &NKey) -> Option<Binding> {
         'c' => Cue,
         's' => Act(A::Sync),
         'w' => Act(A::Jump(1.0)),
-        'b' => Act(A::Jump(-1.0)),
+        // the decks are A and B: their letters load them, from anywhere
+        'a' => Nav(N::Load(0)),
+        'b' => Nav(N::Load(1)),
         'v' => Act(A::Loop),
         '0'..='9' => Digit(c as u8 - b'0'),
         'g' => Pend(Pending::G),
@@ -1255,6 +1259,14 @@ impl DjKeys {
             Pending::G => match c {
                 'g' => self.run(Act::Seek(SeekTo::Start), count, now, true),
                 't' => Some(Nav::AutoMix),
+                // `ge`: back a beat (vim's back to the end of a word; `b` loads deck B)
+                'e' => self.run(Act::Jump(-1.0), count, now, true),
+                // the jog step (`[` `]` on a paused deck, the knob as jog wheel): finer, coarser
+                '[' | ']' => {
+                    let d = if c == ']' { 1. } else { -1. };
+                    self.jog_level = (self.jog_level + d).clamp(0., (JOG_STEPS.len() - 1) as f64);
+                    None
+                }
                 _ => None,
             },
             // a digit in the menu is a length step; the menu stays up for the technique
@@ -2049,9 +2061,10 @@ mod tests {
         assert_eq!(n(' '), Some(Act(self::Act::PlayPause)));
         assert_eq!(n('c'), Some(Cue));
         assert_eq!(n('s'), Some(Act(self::Act::Sync)));
-        // motions: w b beats, W B bars, } { phrases
+        // motions: w (ge back) beats, W B bars, } { phrases; a b load the decks
         assert_eq!(n('w'), Some(Act(self::Act::Jump(1.0))));
-        assert_eq!(n('b'), Some(Act(self::Act::Jump(-1.0))));
+        assert_eq!(n('a'), Some(Nav(self::Nav::Load(0))));
+        assert_eq!(n('b'), Some(Nav(self::Nav::Load(1))));
         assert_eq!(bind(&normalize(&press('W'))), Some(Act(self::Act::Jump(4.0))));
         assert_eq!(bind(&normalize(&press('B'))), Some(Act(self::Act::Jump(-4.0))));
         assert_eq!(bind(&normalize(&press('}'))), Some(Act(self::Act::Jump(64.0))));
@@ -2132,7 +2145,7 @@ mod tests {
             assert_eq!(bind(&normalize(&alt(c, KeyEventKind::Press))), None, "Alt+{c}");
         }
         // the old deck letters that have no meaning now
-        for c in "zxaeriopynz,<>".chars() {
+        for c in "zxeriopynz,<>".chars() {
             assert_eq!(bind(&normalize(&press(c))), None, "{c}");
         }
         // capitals and shifted symbols of the old map: A B load, Shift+digit clears
@@ -2162,9 +2175,9 @@ mod tests {
         let t0 = Instant::now();
         let mut k = keys(true);
         assert_eq!(typed(&mut k, "w", t0), vec![DjCall::BeatJump { deck: 0, beats: 1.0 }]);
-        assert_eq!(typed(&mut k, "b", t0), vec![DjCall::BeatJump { deck: 0, beats: -1.0 }]);
+        assert_eq!(typed(&mut k, "ge", t0), vec![DjCall::BeatJump { deck: 0, beats: -1.0 }]);
         assert_eq!(typed(&mut k, "4w", t0), vec![DjCall::BeatJump { deck: 0, beats: 4.0 }]);
-        assert_eq!(typed(&mut k, "12b", t0), vec![DjCall::BeatJump { deck: 0, beats: -12.0 }]);
+        assert_eq!(typed(&mut k, "12ge", t0), vec![DjCall::BeatJump { deck: 0, beats: -12.0 }]);
         // a zero inside a count is a digit
         assert_eq!(typed(&mut k, "10w", t0), vec![DjCall::BeatJump { deck: 0, beats: 10.0 }]);
         // bars and phrases
