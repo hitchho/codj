@@ -112,6 +112,8 @@ struct Shared {
     overlay: Option<Vec<String>>,
     /// a text popup (`:help <term>`, the recipes), closed by any key
     popup: Option<(String, Vec<String>)>,
+    /// Spotify search results waiting to go into the library list: (query, tracks)
+    found: Option<(String, Vec<Music>)>,
     /// the active set's warnings (`SetWarnings`) and what they were fetched for
     warnings: Vec<String>,
     warn_sig: String,
@@ -200,6 +202,17 @@ pub enum SetCall {
     /// `:split [on|off]`: one pair of headphones, the master left and the cue right; off is the
     /// usual master and headphone outputs
     Split(Option<bool>),
+    /// `:spotify login|logout`, `:spotify` alone: the status
+    Spotify(SpotifyCmd),
+    /// `:sp <words>`: Spotify's catalog into the library list
+    SpotifySearch(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SpotifyCmd {
+    Login,
+    Logout,
+    Status,
 }
 
 /// A call to the patch decks. Like the set calls they run one after another in their own task.
@@ -367,6 +380,8 @@ impl SetCall {
             SetCall::Automix(_) => "Automix",
             SetCall::Autoplay(_) => "Autoplay",
             SetCall::Split(_) => "DjMode",
+            SetCall::Spotify(_) => "Spotify",
+            SetCall::SpotifySearch(_) => "SpotifySearch",
         }
     }
 
@@ -391,7 +406,7 @@ impl SetCall {
             SetCall::Recipes | SetCall::MixNew(_) => String::new(),
             SetCall::AutoMix(_, to) => format!("automix into deck {}", deck_letter(*to)),
             SetCall::Transition(_, to, ..) => format!("transition into deck {}", deck_letter(*to)),
-            SetCall::Automix(_) | SetCall::Autoplay(_) | SetCall::Split(_) => String::new(),
+            SetCall::Automix(_) | SetCall::Autoplay(_) | SetCall::Split(_) | SetCall::Spotify(_) | SetCall::SpotifySearch(_) => String::new(),
         }
     }
 
@@ -416,6 +431,7 @@ impl SetCall {
             SetCall::Autoplay(_) => "autoplay off: the list plays in order".into(),
             SetCall::Split(_) if detail == "on" => "split: the master in your left ear, the cue (what you prepare) in the right".into(),
             SetCall::Split(_) => "split off: the master on the main output, the cue on the headphones".into(),
+            SetCall::Spotify(_) => format!("Spotify: {detail}"),
             _ => text,
         }
     }
@@ -466,6 +482,8 @@ pub fn errors_with_warnings(mut errors: Vec<String>, warnings: Vec<String>) -> V
 
 enum SetReply {
     Status(String),
+    /// Spotify search results
+    Found(String, Vec<Music>),
     List(Vec<(String, String, u32)>),
     Errors(Vec<String>),
 }
@@ -555,6 +573,22 @@ async fn run_set_call(proxy: &ServerProxy<'_>, call: &SetCall) -> zbus::Result<S
                 None => !proxy.autoplay_state().await?.0,
             };
             SetReply::Status(with_switch(proxy.autoplay(on).await?, on))
+        }
+        SetCall::Spotify(c) => {
+            let r = match c {
+                SpotifyCmd::Login => proxy.spotify_login().await?,
+                SpotifyCmd::Logout => proxy.spotify_logout().await.map(|r| if r == "ok" { "logged out".into() } else { r })?,
+                SpotifyCmd::Status => {
+                    let (on, text) = proxy.spotify_status().await?;
+                    if text.is_empty() && !on { "not logged in: :spotify login".into() } else { text }
+                }
+            };
+            // what codjd says is news, not an error, unless the build has no Spotify
+            SetReply::Status(if r.contains("built without") { r } else { format!("ok {r}") })
+        }
+        SetCall::SpotifySearch(q) => {
+            let found = proxy.spotify_search(q, 30).await?;
+            SetReply::Found(q.clone(), found.into_iter().map(spotify_music).collect())
         }
         SetCall::Split(on) => {
             let on = match on {
@@ -792,6 +826,7 @@ impl Session {
             info: None,
             overlay: None,
             popup: None,
+            found: None,
             warnings: Vec::new(),
             warn_sig: String::new(),
             warn_missing: false,
@@ -921,6 +956,15 @@ impl Session {
                         }
                         Ok(Ok(SetReply::Status(r))) => s.call_error = Some((format!("{}: {r}", call.name()), now)),
                         Ok(Ok(SetReply::List(sets))) => s.info = Some((format_set_list(&sets), now + NOTE_FOR * 2, now)),
+                        Ok(Ok(SetReply::Found(q, tracks))) => {
+                            let note = if tracks.is_empty() {
+                                format!("Spotify has nothing for \"{q}\"")
+                            } else {
+                                format!("{} tracks from Spotify · j k pick · a b load · / or Esc back to the library", tracks.len())
+                            };
+                            s.info = Some((note, now + NOTE_FOR * 2, now));
+                            s.found = Some((q, tracks));
+                        }
                         Ok(Ok(SetReply::Errors(lines))) => {
                             s.overlay = Some(if lines.is_empty() { vec!["no errors".to_string()] } else { lines });
                         }
@@ -1094,6 +1138,8 @@ pub struct Pane {
     input: Input,
     /// the search that filters `lib`
     search: String,
+    /// the Spotify query whose results the list shows instead of the library
+    found: Option<String>,
     all: Vec<Music>,
     lib: Vec<Music>,
     sel: usize,
@@ -1125,6 +1171,10 @@ pub enum Command {
     Autoplay(Option<bool>),
     /// `:split [on|off]`
     Split(Option<bool>),
+    /// `:spotify [login|logout]`
+    Spotify(SpotifyCmd),
+    /// `:sp <words>`
+    SpotifySearch(String),
     Load(u8),
     /// correct a deck's detected tempo by a factor; 0 resets
     Grid(u8, f64),
@@ -1416,6 +1466,20 @@ pub fn parse_command(cmd: &str) -> Command {
                 _ => Command::Unknown("usage: grid a|b x2|/2|x1.5|/1.5|reset".into()),
             }
         }
+        Some("spotify") => match words.next() {
+            None | Some("status") => Command::Spotify(SpotifyCmd::Status),
+            Some("login") => Command::Spotify(SpotifyCmd::Login),
+            Some("logout") => Command::Spotify(SpotifyCmd::Logout),
+            Some(w) => Command::SpotifySearch(std::iter::once(w).chain(words).collect::<Vec<_>>().join(" ")),
+        },
+        Some("sp") => {
+            let q = words.collect::<Vec<_>>().join(" ");
+            if q.is_empty() {
+                Command::Unknown("usage: sp <words> (search Spotify; :spotify login first)".into())
+            } else {
+                Command::SpotifySearch(q)
+            }
+        }
         Some(w @ ("automix" | "autoplay" | "split")) => {
             let on = match words.next() {
                 None => None,
@@ -1539,6 +1603,7 @@ impl Pane {
             focus: Focus::Decks,
             input: Input::default(),
             search: String::new(),
+            found: None,
             lib: library.clone(),
             all: library,
             sel: 0,
@@ -1584,6 +1649,8 @@ impl Pane {
             KeyCode::Char('b') | KeyCode::Char('>') => return Browse::Load(1),
             KeyCode::Enter => return Browse::LoadFree,
             KeyCode::Char('?') => return Browse::Help,
+            // Esc on Spotify results goes back to the library first
+            KeyCode::Esc if self.found.is_some() => self.refilter(),
             KeyCode::Esc | KeyCode::Tab | KeyCode::BackTab => self.focus = Focus::Decks,
             KeyCode::Char(_) | KeyCode::Left | KeyCode::Right | KeyCode::F(_) => {
                 self.focus = Focus::Decks;
@@ -1594,7 +1661,15 @@ impl Pane {
         Browse::Nothing
     }
 
+    /// Spotify search results in place of the library, until the next search or Esc
+    pub fn show_found(&mut self, query: String, tracks: Vec<Music>) {
+        self.lib = tracks;
+        self.sel = 0;
+        self.found = Some(query);
+    }
+
     fn refilter(&mut self) {
+        self.found = None;
         self.lib = crate::search::search_musics(&self.search, &self.all);
         self.sel = self.sel.min(self.lib.len().saturating_sub(1));
     }
@@ -2631,6 +2706,11 @@ impl DjScreen {
             Command::Automix(on) => self.session.set_call(SetCall::Automix(on)),
             Command::Autoplay(on) => self.session.set_call(SetCall::Autoplay(on)),
             Command::Split(on) => self.session.set_call(SetCall::Split(on)),
+            Command::Spotify(c) => self.session.set_call(SetCall::Spotify(c)),
+            Command::SpotifySearch(q) => {
+                self.set_note(format!("searching Spotify for \"{q}\""));
+                self.session.set_call(SetCall::SpotifySearch(q));
+            }
             Command::Load(d) => self.load(d),
             Command::Grid(d, f) => self.session.grid_scale(d, f),
             Command::SetList => self.session.set_call(SetCall::List),
@@ -2753,6 +2833,9 @@ impl DjScreen {
             p.tick();
         }
         self.poll_knob();
+        if let Some((q, tracks)) = self.session.shared.lock().unwrap().found.take() {
+            self.pane.show_found(q, tracks);
+        }
         self.tick_tutor(&decks, &mixer, now);
         self.keys.set_snapshot(&decks, &mixer);
         let starts = {
@@ -2902,6 +2985,11 @@ impl DjScreen {
         };
         let queue = s.queue.clone();
         let up_next = s.up_next.as_ref().and_then(crate::ui::automix_label);
+        // the library box's filter text: the search, or the Spotify query being shown
+        let lib_label = match &self.pane.found {
+            Some(q) => format!("♫ Spotify: {q}"),
+            None => self.pane.search.clone(),
+        };
         let view = View {
             decks: &s.decks,
             mixer: &s.mixer,
@@ -2912,7 +3000,7 @@ impl DjScreen {
             note,
             focus: self.pane.focus,
             input: self.pane.input.value(),
-            search: &self.pane.search,
+            search: &lib_label,
             lib: &self.pane.lib,
             lib_total: self.pane.all.len(),
             lib_sel: self.pane.sel,
@@ -3133,6 +3221,11 @@ mod tests {
         assert!(matches!(parse_command("autoplay maybe"), Command::Unknown(_)));
         assert_eq!(parse_command("split"), Command::Split(None));
         assert_eq!(parse_command("split off"), Command::Split(Some(false)));
+        assert_eq!(parse_command("spotify"), Command::Spotify(SpotifyCmd::Status));
+        assert_eq!(parse_command("spotify login"), Command::Spotify(SpotifyCmd::Login));
+        assert_eq!(parse_command("sp aasi cadillac"), Command::SpotifySearch("aasi cadillac".into()));
+        assert_eq!(parse_command("spotify pneumatix"), Command::SpotifySearch("pneumatix".into()));
+        assert!(matches!(parse_command("sp"), Command::Unknown(_)));
     }
 
     #[test]
@@ -3442,4 +3535,17 @@ fn scrub_help(deck: usize, step: f64, knob_jog: bool) -> String {
         "deck {} paused: [ ] scrub {step} s (hold: faster) · g[ g] step · W B a bar · {{ }} 16 bars · {knob} · Space plays",
         if deck == 0 { 'A' } else { 'B' }
     )
+}
+
+/// A Spotify search hit as a library entry: its path is the `spotify:track:` uri, which codjd
+/// loads onto a deck like a file
+fn spotify_music((uri, title, artist, album, ms): (String, String, String, String, u32)) -> Music {
+    Music {
+        title,
+        artist,
+        genre: album,
+        length: std::time::Duration::from_millis(u64::from(ms)),
+        path: zbus::zvariant::FilePath::from(std::path::PathBuf::from(uri)),
+        index: usize::MAX,
+    }
 }

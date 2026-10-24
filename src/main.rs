@@ -158,6 +158,11 @@ pub trait Server {
     /// Signal fires when volume changes
     /// Decks (DJ groundwork): replies "ok" or an error message
     async fn dj_load(&self, deck: u32, path: &str) -> Result<String>;
+    /// Spotify (a codjd built with the feature): login in the browser, status, catalog search
+    async fn spotify_login(&self) -> Result<String>;
+    async fn spotify_logout(&self) -> Result<String>;
+    async fn spotify_status(&self) -> Result<(bool, String)>;
+    async fn spotify_search(&self, query: &str, limit: u32) -> Result<Vec<(String, String, String, String, u32)>>;
     async fn dj_play(&self, deck: u32) -> Result<String>;
     async fn dj_pause(&self, deck: u32) -> Result<String>;
     async fn dj_seek(&self, deck: u32, seconds: f64) -> Result<String>;
