@@ -71,7 +71,7 @@ pub const DECK_KEYS: &[Entry] = &[
     e("R", "reset deck: EQ, filter, fader, pitch"),
     e("[ ]", "bend a playing deck, scrub a paused one"),
     e(".", "repeat the last action on the focused deck"),
-    e("u C-r", "undo: rolls back a transition, or a control"),
+    e("^z ^r", "undo: rolls back a transition, or a control"),
     e("4w 2}", "a count goes in front, like in vim"),
 ];
 
@@ -535,7 +535,7 @@ mod tests {
     fn the_overlay_names_the_keys_of_the_focused_deck() {
         let keys = |entries: &[Entry]| entries.iter().map(|x| x.keys).collect::<Vec<_>>();
         let deck = keys(DECK_KEYS);
-        for k in ["h l", "Space", "c", "s", "a b", "w ge", "W B", "} {", "0 gg", "G $", "m{a-h}", "'{a-h}", "v", "+ -", "=", "[ ]", ".", "u C-r"] {
+        for k in ["h l", "Space", "c", "s", "a b", "w ge", "W B", "} {", "0 gg", "G $", "m{a-h}", "'{a-h}", "v", "+ -", "=", "[ ]", ".", "^z ^r"] {
             assert!(deck.contains(&k), "{k}");
         }
         let sync = DECK_KEYS.iter().find(|e| e.keys == "s").unwrap();

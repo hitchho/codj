@@ -2543,11 +2543,20 @@ impl DjScreen {
         }
         // `u` with a transition planned or running undoes the transition (like F8): the old
         // track plays on alone; with none it undoes the last control change
-        let plain_u = key.code == KeyCode::Char('u') && key.modifiers.is_empty() && key.kind == KeyEventKind::Press;
-        if plain_u && !self.keys.has_pending() && self.keys.hints().selected.is_none() && self.transition_active() {
+        // Ctrl-z is the same, for the hand that reaches for it in a panic
+        let ctrl_z = key.code == KeyCode::Char('z') && key.modifiers == KeyModifiers::CONTROL;
+        let plain_u = key.code == KeyCode::Char('u') && key.modifiers.is_empty();
+        if (plain_u || ctrl_z) && key.kind == KeyEventKind::Press && !self.keys.has_pending() && self.keys.hints().selected.is_none() && self.transition_active() {
             self.session.set_call(SetCall::Disarm);
             return Outcome::Stay;
         }
+        let as_u;
+        let key = if ctrl_z {
+            as_u = KeyEvent { code: KeyCode::Char('u'), modifiers: KeyModifiers::NONE, ..*key };
+            &as_u
+        } else {
+            key
+        };
         let Some(nav) = self.keys.on_key(key, now) else {
             return Outcome::Stay;
         };
