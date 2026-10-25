@@ -1920,8 +1920,9 @@ impl DjScreen {
     }
 
     /// What the knob did: turning edits the picked control, scrolls the library while browsing,
-    /// else turns the volume, or with the jog wheel switched on (a press) is the focused deck's
-    /// jog wheel (scrub when paused, bend when playing). Pressing resets the picked control,
+    /// scrubs the focused deck while it is paused (finding a spot), else turns the volume, or
+    /// with the jog wheel switched on (a press) is the focused deck's jog wheel (bend when
+    /// playing). Pressing resets the picked control,
     /// loads the highlighted track while browsing, else switches between volume and jog wheel.
     /// Notes show in the status line. Nothing acts while a text box or pane has the keyboard.
     fn poll_knob(&mut self) {
@@ -1955,9 +1956,13 @@ impl DjScreen {
         if self.keys.wheel(dir, now) {
             return;
         }
+        // a paused deck is one being cued: the knob finds the spot in it; a playing one leaves
+        // the knob as volume
+        let f = self.keys.focus() as usize;
+        let cueing = self.session.shared.lock().unwrap().decks.get(f).is_some_and(|d| d.loaded && !d.playing);
         if self.pane.browsing() {
             self.pane.scroll(-dir as isize);
-        } else if self.knob_jog {
+        } else if self.knob_jog || cueing {
             self.keys.jog(dir, now);
         } else {
             // the knob you reach for without thinking: volume, as in the normal view
@@ -2921,7 +2926,7 @@ impl DjScreen {
             self.keys.hints().selected.map(|t| glossary::explain(t).to_string()).or_else(|| {
                 // a paused deck is one being cued: say how to move through it
                 let f = self.keys.focus() as usize;
-                s.decks.get(f).filter(|d| d.loaded && !d.playing).map(|_| scrub_help(f, self.keys.jog_seconds(), self.knob_jog))
+                s.decks.get(f).filter(|d| d.loaded && !d.playing).map(|_| scrub_help(f, self.keys.jog_seconds()))
             })
         };
         // the tutor's pane and its proposal marks in the library
@@ -3529,10 +3534,9 @@ mod tests {
 }
 
 /// The status line while the focused deck is paused: how to find a spot in it
-fn scrub_help(deck: usize, step: f64, knob_jog: bool) -> String {
-    let knob = if knob_jog { "knob turns scrub" } else { "knob press: scrub with it" };
+fn scrub_help(deck: usize, step: f64) -> String {
     format!(
-        "deck {} paused: [ ] scrub {step} s (hold: faster) · g[ g] step · W B a bar · {{ }} 16 bars · {knob} · Space plays",
+        "deck {} paused: the knob scrubs · [ ] {step} s (hold: faster) · g[ g] step · W B a bar · {{ }} 16 bars · Space plays",
         if deck == 0 { 'A' } else { 'B' }
     )
 }

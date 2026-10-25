@@ -32,8 +32,8 @@ pub const NUDGE_TAP: Duration = Duration::from_millis(300);
 /// The jog step, seconds a paused deck moves per detent (x2, x4, x8 spun fast): the `JOG`
 /// control (`f` and its label, then the knob or `]` `[`) picks one of these
 pub const JOG_STEPS: [f64; 8] = [0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0];
-/// 0.1 s
-pub const DEFAULT_JOG_LEVEL: f64 = 2.0;
+/// 0.5 s: a press moves far enough to hear the difference; `g[` gets finer
+pub const DEFAULT_JOG_LEVEL: f64 = 4.0;
 /// ... a playing deck bends by this nudge amount (-1..1 = -4..+4 %) while the knob turns
 pub const JOG_BEND: f64 = 0.5;
 /// detents closer than this count as spinning
@@ -925,7 +925,7 @@ impl DjKeys {
         self.jog = Some(Jog { deck, dir, last: now, streak, bending: playing });
     }
 
-    /// `[knob] jog`: where the jog step starts, the step nearest to `seconds` (None: 0.1 s)
+    /// `[knob] jog`: where the jog step starts, the step nearest to `seconds` (None: 0.5 s)
     pub fn set_jog_seconds(&mut self, seconds: Option<f64>) {
         self.jog_level = match seconds.filter(|s| s.is_finite() && *s > 0.0) {
             Some(s) => {
@@ -2669,9 +2669,9 @@ mod tests {
         let gridded = DeckInfo { track_bpm: 120.0, beat_in_bar: 1, ..deck(false) };
         k.set_snapshot(&[gridded, deck(false)], &MixerInfo::default());
         k.on_key(&press(']'), t0);
-        assert_eq!(k.tick(t0 + ms(10)), [DjCall::BeatJump { deck: 0, beats: 0.1 * 120.0 / 60.0 }]);
+        assert_eq!(k.tick(t0 + ms(10)), [DjCall::BeatJump { deck: 0, beats: 0.5 * 120.0 / 60.0 }]);
         k.on_key(&press('['), t0 + ms(500));
-        assert_eq!(k.tick(t0 + ms(510)), [DjCall::BeatJump { deck: 0, beats: -0.1 * 120.0 / 60.0 }]);
+        assert_eq!(k.tick(t0 + ms(510)), [DjCall::BeatJump { deck: 0, beats: -0.5 * 120.0 / 60.0 }]);
         // R: everything moved goes home
         k.on_key(&press('2'), t0 + ms(1000));
         k.on_key(&press('-'), t0 + ms(1010));
@@ -2709,16 +2709,16 @@ mod tests {
     fn the_jog_step_is_a_control_of_its_own() {
         let t0 = Instant::now();
         let mut k = keys(true);
-        assert_eq!(k.jog_seconds(), 0.1);
+        assert_eq!(k.jog_seconds(), 0.5);
         // picked and turned: coarser, never sent to codjd
         k.hints.selected = Some(Target::Slot(Slot::Jog));
         k.edit(1, t0);
         k.edit(1, t0 + ms(500));
-        assert_eq!(k.jog_seconds(), 0.5);
+        assert_eq!(k.jog_seconds(), 2.0);
         assert!(k.tick(t0 + ms(600)).is_empty(), "the jog step is codj's own");
         // the knob press puts it back, the config picks the nearest step
         k.reset(t0 + ms(700));
-        assert_eq!(k.jog_seconds(), 0.1);
+        assert_eq!(k.jog_seconds(), 0.5);
         k.set_jog_seconds(Some(0.9));
         assert_eq!(k.jog_seconds(), 1.0);
         k.set_jog_seconds(Some(100.0));
@@ -2732,7 +2732,7 @@ mod tests {
         let t0 = Instant::now();
         let mut k = keys(false);
         let gridded = |playing| DeckInfo { track_bpm: 120.0, beat_in_bar: 1, position: 10.0, ..deck(playing) };
-        // paused: a slow turn scrubs 0.1 s a detent (0.2 beats at 120 BPM), spinning goes faster
+        // paused: a slow turn scrubs 0.5 s a detent (1 beat at 120 BPM), spinning goes faster
         k.set_snapshot(&[gridded(false), deck(false)], &MixerInfo::default());
         k.jog(1, t0);
         k.jog(1, t0 + ms(500));
@@ -2743,7 +2743,7 @@ mod tests {
             DjCall::BeatJump { deck: 0, beats } => (*beats * 5.0 * 1e9).round() / 1e9,
             other => panic!("{other:?}"),
         }).collect();
-        assert_eq!(jumps, [1.0, 1.0, 2.0, 4.0, -1.0]);
+        assert_eq!(jumps, [5.0, 5.0, 10.0, 20.0, -5.0]);
         // playing: the turn bends the tempo once, the bend ends when the knob stops
         k.set_snapshot(&[gridded(true), deck(false)], &MixerInfo::default());
         k.jog(1, t0 + ms(1000));
