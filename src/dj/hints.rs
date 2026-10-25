@@ -34,6 +34,8 @@ pub enum Target {
     Slot(Slot),
     /// beats of the next loop made with `v`
     LoopLen(Deck),
+    /// where the deck is in its track: the knob and `[` `]` scrub it, `:124` jumps
+    Time(Deck),
     /// a knob of a patch slot: (slot 0..3, index in the slot's knob list), sent as a `knob` action
     Knob(u8, u8),
 }
@@ -84,6 +86,7 @@ impl Target {
             Target::Slot(Slot::SyncRange) => "sync range".into(),
             Target::Slot(Slot::Jog) => "jog step".into(),
             Target::LoopLen(d) => format!("{} loop", deck(d)),
+            Target::Time(d) => format!("{} time", deck(d)),
         }
     }
 
@@ -99,6 +102,7 @@ impl Target {
             Target::Slot(Slot::SyncRange) => format!("±{:.0}%", v * 100.0),
             Target::Slot(Slot::Jog) => fmt_jog(crate::dj::keys::JOG_STEPS[(v.max(0.0) as usize).min(crate::dj::keys::JOG_STEPS.len() - 1)]),
             Target::LoopLen(_) => format!("{} beats", fmt_beats(v)),
+            Target::Time(_) => crate::dj::render::fmt_time(v),
             Target::Knob(..) => format!("{v:.2}"),
         }
     }
@@ -149,6 +153,8 @@ pub fn table() -> Vec<(Target, &'static str)> {
         (s(Slot::Rate(1)), "xs"),
         (Target::LoopLen(0), "ca"),
         (Target::LoopLen(1), "cs"),
+        (Target::Time(0), "va"),
+        (Target::Time(1), "vs"),
         (s(Slot::Gain(0)), "za"),
         (s(Slot::Gain(1)), "zs"),
         // mixer-wide
@@ -298,7 +304,7 @@ mod tests {
     #[test]
     fn labels_are_left_hand_prefix_free_and_complete() {
         let tab = table();
-        assert_eq!(tab.len(), 21 + 48);
+        assert_eq!(tab.len(), 23 + 48);
         for (_, l) in &tab {
             assert!(matches!(l.len(), 1 | 2), "{l}");
             assert!(l.chars().all(|c| LETTERS.contains(c)), "{l}");
@@ -322,6 +328,7 @@ mod tests {
                 Target::Slot(Slot::Gain(d)),
                 Target::Slot(Slot::Rate(d)),
                 Target::LoopLen(d),
+                Target::Time(d),
             ]
         };
         for x in all(0).into_iter().chain(all(1)).chain([

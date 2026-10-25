@@ -253,6 +253,8 @@ pub enum Nav {
     LoadSmart,
     /// `a` / `b`: the highlighted library track onto deck A / B
     Load(u8),
+    /// `p`: hear the focused deck in the headphones only, to find the spot by ear
+    Preview,
     /// arm the next mix of the active set (F6)
     SetArmNext,
     /// auto mode on / off (F7)
@@ -436,6 +438,7 @@ pub fn bind(k: &NKey) -> Option<Binding> {
         // the decks are A and B: their letters load them, from anywhere
         'a' => Nav(N::Load(0)),
         'b' => Nav(N::Load(1)),
+        'p' => Nav(N::Preview),
         'v' => Act(A::Loop),
         '0'..='9' => Digit(c as u8 - b'0'),
         'g' => Pend(Pending::G),
@@ -813,6 +816,7 @@ impl DjKeys {
         match t {
             Target::Slot(s) => self.target(s, now),
             Target::LoopLen(d) => self.loop_len[d as usize],
+            Target::Time(d) => self.decks.get(d as usize).map_or(0.0, |x| x.position),
             Target::Knob(s, i) => self.knob_target(s, i, now),
         }
     }
@@ -857,6 +861,7 @@ impl DjKeys {
         match target {
             Target::Slot(slot) => self.bump(slot, n as f64 * slot.tap_step(), now),
             Target::LoopLen(d) => self.loop_len[d as usize] = hints::ladder_step(self.loop_len[d as usize], n),
+            Target::Time(d) => self.scrub(d, n.signum(), now),
             Target::Knob(s, i) => {
                 let (lo, hi) = self.knob_info(s, i).map_or((0.0, 1.0), |k| (k.2, k.3));
                 self.bump_knob(s, i, n as f64 * (hi - lo) / KNOB_STEPS, now);
@@ -874,6 +879,7 @@ impl DjKeys {
                 self.bump(slot, delta, now);
             }
             Target::LoopLen(d) => self.loop_len[d as usize] = hints::DEFAULT_BEATS,
+            Target::Time(_) => {}
             Target::Knob(s, i) => {
                 // the value the patch file has; a knob the file does not list goes to its minimum
                 let home = self.knob_info(s, i).map(|(name, _, lo, _)| {
@@ -895,6 +901,23 @@ impl DjKeys {
             return true;
         }
         self.edit(dir, now)
+    }
+
+    /// Moves `deck` by the jog step, playing or not (its time picked with `f`); turning fast
+    /// moves further, like the jog wheel
+    pub fn scrub(&mut self, deck: Deck, dir: i32, now: Instant) {
+        let Some(d) = self.decks.get(deck as usize).filter(|d| d.loaded) else { return };
+        let (gridded, position, bpm) = (d.has_grid(), d.position, d.track_bpm);
+        let dir = dir.signum() as i8;
+        let prev = self.jog.filter(|j| j.deck == deck && j.dir == dir && !j.bending);
+        let streak = prev.filter(|j| now.saturating_duration_since(j.last) < JOG_FAST).map_or(0, |j| j.streak.saturating_add(1));
+        let seconds = dir as f64 * f64::from(1u8 << streak.min(3)) * self.jog_seconds();
+        if gridded && bpm > 0.0 {
+            self.out.push(DjCall::BeatJump { deck: deck as u32, beats: seconds * bpm / 60.0 });
+        } else {
+            self.out.push(DjCall::Seek { deck: deck as u32, seconds: (position + seconds).max(0.0) });
+        }
+        self.jog = Some(Jog { deck, dir, last: now, streak, bending: false });
     }
 
     /// The knob as the focused deck's jog wheel, like a record under the hand: a paused deck
@@ -1801,8 +1824,8 @@ mod tests {
     fn patch_hint_labels_are_two_letters_prefix_free_and_never_a_deck_label() {
         let tab = hints::table();
         let deck_labels: Vec<&str> = tab.iter().filter(|(t, _)| !matches!(t, Target::Knob(..) | Target::Slot(Slot::Ctl(Ctl::Fader(2..) | Ctl::Filter(2..) | Ctl::Eq(2.., _))))).map(|(_, l)| *l).collect();
-        assert_eq!(deck_labels.len(), 21);
-        let patch: Vec<&str> = tab.iter().skip(21).map(|(_, l)| *l).collect();
+        assert_eq!(deck_labels.len(), 23);
+        let patch: Vec<&str> = tab.iter().skip(23).map(|(_, l)| *l).collect();
         assert_eq!(patch.len(), 48);
         for l in &patch {
             assert_eq!(l.len(), 2, "{l}");
@@ -2145,7 +2168,7 @@ mod tests {
             assert_eq!(bind(&normalize(&alt(c, KeyEventKind::Press))), None, "Alt+{c}");
         }
         // the old deck letters that have no meaning now
-        for c in "zxeriopynz,<>".chars() {
+        for c in "zxeriynz,<>".chars() {
             assert_eq!(bind(&normalize(&press(c))), None, "{c}");
         }
         // capitals and shifted symbols of the old map: A B load, Shift+digit clears

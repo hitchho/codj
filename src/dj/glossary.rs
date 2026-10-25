@@ -32,6 +32,7 @@ pub fn explain(t: Target) -> &'static str {
         Target::Slot(Slot::SyncRange) => "sync range: the biggest tempo change sync may do",
         Target::Slot(Slot::Jog) => "jog step: how far a knob notch rolls",
         Target::LoopLen(_) => "loop length: beats the next v loop repeats",
+        Target::Time(_) => "time: knob or ] [ scrub · :124 goes to 2:04",
         Target::Knob(..) => "patch knob: ] [ turn it, \\ back to the saved value",
     }
 }
@@ -55,6 +56,7 @@ pub const DECK_KEYS: &[Entry] = &[
     e("c", "cue: a saved spot; hold to hear it in headphones"),
     e("s", "sync: match {self}'s tempo and beats to {other}"),
     e("a b", "load the highlighted track onto deck A / B"),
+    e("p", "preview: this deck in the headphones only"),
     e("w ge", "jump 1 beat forward / back (4w: 4 beats)"),
     e("W B", "jump a bar forward / back (2W: 2 bars)"),
     e("} {", "jump a phrase (16 bars) forward / back"),

@@ -260,6 +260,8 @@ DJ mode is vim for decks. **One deck has the focus** (A at the start) and every 
 |`F1` / `F2`|Headphone cue on deck A / B (`:hp`)|
 |`F5`|Quantize on / off (mixer-wide, `:quantize`)|
 |`F6` / `F7` / `F8`|[Set](#sets-in-dj-mode): arm the next mix / auto mode on-off / disarm (`:arm next`, `:auto`, `:disarm`); `F8` also cancels a planned transition and rolls back a running one, like `u`|
+|`p`|**Preview**: the focused deck plays in your headphones only (its fader down, its headphone button on; with `:split`, your right ear), so you find the spot by ear while the room hears the other deck. The knob or `[` `]` scrub it; `p` or `Space` stops it there and its fader comes back; `t` + a letter brings it in from that spot|
+|`f` then `va` / `vs`|Pick deck A's / B's **time**: the knob and `[` `]` scrub it (playing or not), the chip shows where it is|
 |`:1:30`, `:90`|**Jump the focused deck to a time** (like vim's `:42` goes to line 42): `l` `:1:30` Enter puts deck B at 1:30; then `t` + a letter (`tb`, `ts`...) brings it in from there. Paused or playing|
 |`:spotify login`, `:sp <words>`|**Spotify** (a codjd built with `--features spotify`, see codjd's docs/spotify.md): log in once in the browser with your Premium account, then `:sp <words>` shows Spotify's tracks in the library list; `a` / `b` stream one onto a deck, where it mixes like a file (it gets a beat grid too). `Esc` goes back to your library. Spotify decks are never recorded. Unofficial (librespot): your account, your risk|
 |`:split`|One pair of headphones: the master (what the room hears) in the left ear, the cue (the deck you prepare, its headphone button on) in the right. `:split` again goes back to master and headphone outputs. In codjd's config: `[audio] mode = "split"`|

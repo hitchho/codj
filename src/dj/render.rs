@@ -990,6 +990,7 @@ fn draw_deck(
         Span::styled(format!("  -{}", fmt_short(remaining)), dim()),
         Span::raw("  "),
     ];
+    found.push((Target::Time(idx as u8), 2, 0, 2, text_width(&time[..1])));
     let loop_col = text_width(&time) - 2;
     time.push(if d.loop_beats > 0.0 {
         Span::styled(
@@ -2397,7 +2398,7 @@ mod tests {
         for (t, _) in hints::table().into_iter().filter(|(t, _)| !patchy(t)) {
             assert!(spots.iter().any(|s| s.target == t), "no spot for {t:?}");
         }
-        assert_eq!(spots.len(), 21);
+        assert_eq!(spots.len(), 23);
         let (with, _) = render_full(120, 35, |v| {
             v.hints = HintView { active: true, labels: leak_labels(), ..HintView::default() };
         });

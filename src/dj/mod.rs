@@ -1848,6 +1848,8 @@ pub struct DjScreen {
     prompt: Option<prompt::Prompt>,
     /// the conversation the prompt box continues (one per DJ session, `:ai new` resets it)
     ai_session: Option<prompt::Session>,
+    /// `p`: the deck being previewed in the headphones, and its fader before
+    previewing: Option<(u8, f64)>,
     /// `[agent]` from the config, for the prompt box
     agent: crate::parser::AgentSettings,
     /// the hardware knob while DJ mode is open (dropping it releases the device)
@@ -1888,6 +1890,7 @@ impl DjScreen {
             parked_editor: None,
             prompt: None,
             ai_session: None,
+            previewing: None,
             agent: Default::default(),
             knob: None,
             knob_jog: false,
@@ -1975,6 +1978,32 @@ impl DjScreen {
         }
     }
 
+    /// `p`: the focused deck plays in the headphones only (its fader down, its headphone button
+    /// on; with `:split` that is your right ear), so you find the spot by ear while the room
+    /// hears the other deck. `p` again (or Space) stops there: that is where `t` brings it in.
+    fn preview(&mut self, now: Instant) {
+        let deck = self.keys.focus();
+        let d = deck as usize;
+        let info = self.session.shared.lock().unwrap().decks.get(d).cloned();
+        let Some(info) = info.filter(|i| i.loaded) else {
+            return self.set_note("nothing on this deck: a or b loads the highlighted track");
+        };
+        let name = if deck == 0 { 'A' } else { 'B' };
+        if let Some((pd, fader)) = self.previewing.take().filter(|(pd, _)| *pd == deck) {
+            self.session.send(vec![DjCall::Pause(pd as u32)]);
+            self.keys.set_control(keys::Slot::Ctl(keys::Ctl::Fader(pd)), fader, now);
+            return self.set_note(format!("deck {name} stopped at {} · t + a letter brings it in from here", render::fmt_time(info.position)));
+        }
+        let other_on_air = self.session.shared.lock().unwrap().decks.get(1 - d).is_some_and(|o| o.playing);
+        let fader = self.keys.target(keys::Slot::Ctl(keys::Ctl::Fader(deck)), now);
+        if other_on_air {
+            self.keys.set_control(keys::Slot::Ctl(keys::Ctl::Fader(deck)), 0.0, now);
+        }
+        self.previewing = Some((deck, fader));
+        self.session.send(vec![DjCall::Set { control: "cue", deck: d as u32, value: 1.0 }, DjCall::Play(d as u32)]);
+        self.set_note(format!("deck {name} in your headphones only · knob or [ ] scrub · p stops here · then t + a letter"));
+    }
+
     /// A transition is planned or running: a set's armed mix, or the player's or the DJ's own
     fn transition_active(&self) -> bool {
         let s = self.session.shared.lock().unwrap();
@@ -2006,6 +2035,8 @@ impl DjScreen {
     /// one, bringing in the highlighted library track (loaded there first unless that deck holds
     /// it already, cued by hand or not)
     fn transition(&mut self, recipe: Option<&'static str>, bars: Option<u32>, outro: bool) {
+        // a previewed deck comes in from where it is: the transition takes its fader over
+        self.previewing = None;
         let decks = self.session.shared.lock().unwrap().decks.clone();
         let playing = |i: usize| decks.get(i).is_some_and(|d| d.playing);
         let (from, to) = match (playing(0), playing(1)) {
@@ -2628,6 +2659,13 @@ impl DjScreen {
         }
         // `u` with a transition planned or running undoes the transition (like F8): the old
         // track plays on alone; with none it undoes the last control change
+        // Space on the deck being previewed ends the preview (its fader comes back)
+        if key.code == KeyCode::Char(' ') && key.modifiers.is_empty() && key.kind == KeyEventKind::Press && !self.keys.has_pending() {
+            if self.previewing.is_some_and(|(d, _)| d == self.keys.focus()) {
+                self.preview(now);
+                return Outcome::Stay;
+            }
+        }
         // Ctrl-z is the same, for the hand that reaches for it in a panic
         let ctrl_z = key.code == KeyCode::Char('z') && key.modifiers == KeyModifiers::CONTROL;
         let plain_u = key.code == KeyCode::Char('u') && key.modifiers.is_empty();
@@ -2686,6 +2724,7 @@ impl DjScreen {
             Nav::Hints | Nav::Toggle | Nav::Reset => {}
             Nav::LoadSmart => self.load_smart(),
             Nav::Load(d) => self.load(d),
+            Nav::Preview => self.preview(now),
         }
         Outcome::Stay
     }
