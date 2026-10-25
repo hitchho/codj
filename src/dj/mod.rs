@@ -1171,6 +1171,8 @@ pub enum Command {
     Autoplay(Option<bool>),
     /// `:split [on|off]`
     Split(Option<bool>),
+    /// `:1:30`, `:90`: the focused deck to that time (vim's `:42` goes to line 42)
+    Goto(f64),
     /// `:spotify [login|logout]`
     Spotify(SpotifyCmd),
     /// `:sp <words>`
@@ -1434,6 +1436,9 @@ pub fn parse_command(cmd: &str) -> Command {
             }
             return Command::Ai(rest.trim().to_string());
         }
+    }
+    if let Some(t) = parse_time(cmd.trim()) {
+        return Command::Goto(t);
     }
     let mut words = cmd.split_whitespace();
     match words.next() {
@@ -2711,6 +2716,16 @@ impl DjScreen {
             Command::Automix(on) => self.session.set_call(SetCall::Automix(on)),
             Command::Autoplay(on) => self.session.set_call(SetCall::Autoplay(on)),
             Command::Split(on) => self.session.set_call(SetCall::Split(on)),
+            Command::Goto(t) => {
+                let deck = self.keys.focus();
+                self.session.send(vec![DjCall::Seek { deck: deck as u32, seconds: t }]);
+                self.set_note(format!(
+                    "deck {} to {}:{:02} · t + a letter brings it in from here",
+                    if deck == 0 { 'A' } else { 'B' },
+                    (t as u64) / 60,
+                    (t as u64) % 60
+                ));
+            }
             Command::Spotify(c) => self.session.set_call(SetCall::Spotify(c)),
             Command::SpotifySearch(q) => {
                 self.set_note(format!("searching Spotify for \"{q}\""));
@@ -3226,6 +3241,10 @@ mod tests {
         assert!(matches!(parse_command("autoplay maybe"), Command::Unknown(_)));
         assert_eq!(parse_command("split"), Command::Split(None));
         assert_eq!(parse_command("split off"), Command::Split(Some(false)));
+        assert_eq!(parse_command("1:30"), Command::Goto(90.));
+        assert_eq!(parse_command("90"), Command::Goto(90.));
+        assert_eq!(parse_command("0:05.5"), Command::Goto(5.5));
+        assert!(!matches!(parse_command("1:75"), Command::Goto(_)));
         assert_eq!(parse_command("spotify"), Command::Spotify(SpotifyCmd::Status));
         assert_eq!(parse_command("spotify login"), Command::Spotify(SpotifyCmd::Login));
         assert_eq!(parse_command("sp aasi cadillac"), Command::SpotifySearch("aasi cadillac".into()));
@@ -3552,4 +3571,20 @@ fn spotify_music((uri, title, artist, album, ms): (String, String, String, Strin
         path: zbus::zvariant::FilePath::from(std::path::PathBuf::from(uri)),
         index: usize::MAX,
     }
+}
+
+/// `1:30`, `90`, `0:05.5`: a time in a track, seconds
+fn parse_time(t: &str) -> Option<f64> {
+    let (m, sec) = match t.split_once(':') {
+        Some((m, s)) => (m.parse::<u32>().ok()?, s),
+        None => (0, t),
+    };
+    if sec.is_empty() || !sec.chars().all(|c| c.is_ascii_digit() || c == '.') {
+        return None;
+    }
+    let sec: f64 = sec.parse().ok()?;
+    if t.contains(':') && sec >= 60. {
+        return None;
+    }
+    Some(f64::from(m) * 60. + sec)
 }
