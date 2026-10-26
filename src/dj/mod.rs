@@ -2004,6 +2004,29 @@ impl DjScreen {
         self.set_note(format!("deck {name} in your headphones only · knob or [ ] scrub · p stops here · then t + a letter"));
     }
 
+    /// Nothing here would be lost by swapping codj for a newer build: no editor (parked ones
+    /// included), no agent at work, no tutor, no typing or half-typed key, no preview
+    pub fn idle_for_restart(&self) -> bool {
+        self.editor.is_none()
+            && self.parked_editor.is_none()
+            && !self.prompt.as_ref().is_some_and(|p| p.visible || p.busy())
+            && self.tutor.is_none()
+            && !self.pane.typing()
+            && !self.keys.has_pending()
+            && self.keys.hints().selected.is_none()
+            && !self.keys.hints().active
+            && self.previewing.is_none()
+    }
+
+    /// The focused deck, handed to a newer build
+    pub fn focus(&self) -> u8 {
+        self.keys.focus()
+    }
+
+    pub fn set_focus(&mut self, deck: u8) {
+        self.keys.set_focus(deck);
+    }
+
     /// A transition is planned or running: a set's armed mix, or the player's or the DJ's own
     fn transition_active(&self) -> bool {
         let s = self.session.shared.lock().unwrap();

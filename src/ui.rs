@@ -1475,6 +1475,21 @@ impl<'a> UI<'a> {
             && self.last_input.elapsed() >= quiet
     }
 
+    /// DJ mode with nothing open that a swap would lose, and no key for a while: the newer
+    /// build comes back in DJ mode with the same deck focused
+    pub fn dj_idle_for_restart(&self, quiet: std::time::Duration) -> Option<u8> {
+        let dj = self.dj.as_ref()?;
+        (dj.idle_for_restart() && self.last_input.elapsed() >= quiet).then(|| dj.focus())
+    }
+
+    /// Back in DJ mode after a swap, the same deck focused
+    pub async fn resume_dj(&mut self, focus: u8) {
+        self.enter_dj().await;
+        if let Some(dj) = self.dj.as_mut() {
+            dj.set_focus(focus);
+        }
+    }
+
     /// Where the cursor is in the list (handed to a newer codj)
     pub fn list_position(&self) -> usize {
         self.music_list.selected

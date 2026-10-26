@@ -527,6 +527,10 @@ async fn main() -> Result<()> {
     ui.restore_state().await;
     ui.pending_select = env::var(REEXEC_SELECTED).ok().and_then(|v| v.parse().ok());
     env::remove_var(REEXEC_SELECTED);
+    if let Some(focus) = env::var(REEXEC_DJ).ok().and_then(|v| v.parse::<u8>().ok()) {
+        ui.resume_dj(focus).await;
+    }
+    env::remove_var(REEXEC_DJ);
     let mut upgrade_check = std::time::Instant::now();
     let mut upgrade_failed = false;
     ui.set_frame(&mut terminal.get_frame());
@@ -559,7 +563,8 @@ async fn main() -> Result<()> {
         // a newer codj was installed: swap to it once nothing on screen would be lost
         if !upgrade_failed && upgrade_check.elapsed() >= std::time::Duration::from_secs(2) {
             upgrade_check = std::time::Instant::now();
-            if let Some(new) = replaced_binary().filter(|_| ui.idle_for_restart(UPGRADE_QUIET)) {
+            let dj_focus = ui.dj_idle_for_restart(UPGRADE_QUIET);
+            if let Some(new) = replaced_binary().filter(|_| ui.idle_for_restart(UPGRADE_QUIET) || dj_focus.is_some()) {
                 kbd_pop_all();
                 let _ = stdout().execute(DisableMouseCapture);
                 let _ = disable_raw_mode();
@@ -568,6 +573,7 @@ async fn main() -> Result<()> {
                 let err = std::process::Command::new(&new)
                     .args(env::args_os().skip(1))
                     .env(REEXEC_SELECTED, ui.list_position().to_string())
+                    .env(REEXEC_DJ, dj_focus.map(|f| f.to_string()).unwrap_or_default())
                     .exec();
                 // exec only returns on failure: take the terminal back and keep going
                 eprintln!("codj: can't start the newer build: {err}");
@@ -634,6 +640,8 @@ fn edit_in_terminal<B: ratatui::backend::Backend>(
 /// only one key per frame let held keys (key repeat) pile up and keep scrolling after release.
 /// The list position a replaced codj hands to its newer build
 const REEXEC_SELECTED: &str = "CODJ_REEXEC_SELECTED";
+/// The replaced codj was in DJ mode: the newer one goes back there, this deck focused
+const REEXEC_DJ: &str = "CODJ_REEXEC_DJ";
 /// No key for this long before codj swaps itself for a newer build
 const UPGRADE_QUIET: std::time::Duration = std::time::Duration::from_secs(10);
 
