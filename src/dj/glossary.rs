@@ -32,7 +32,7 @@ pub fn explain(t: Target) -> &'static str {
         Target::Slot(Slot::SyncRange) => "sync range: the biggest tempo change sync may do",
         Target::Slot(Slot::Jog) => "jog step: how far a knob notch rolls",
         Target::LoopLen(_) => "loop length: beats the next v loop repeats",
-        Target::Time(_) => "time: knob or ] [ scrub · :124 goes to 2:04",
+        Target::Time(_) => "time: spin the knob, bars at a time · :124 = 2:04",
         Target::Knob(..) => "patch knob: ] [ turn it, \\ back to the saved value",
     }
 }

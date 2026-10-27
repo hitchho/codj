@@ -38,6 +38,8 @@ pub const DEFAULT_JOG_LEVEL: f64 = 4.0;
 pub const JOG_BEND: f64 = 0.5;
 /// detents closer than this count as spinning
 const JOG_FAST: Duration = Duration::from_millis(60);
+/// Detents closer than this are a spin of the picked clock (a hand spin is slower than a jog)
+const SCRUB_FAST: Duration = Duration::from_millis(150);
 /// a bend ends this long after the last detent
 const JOG_RELEASE: Duration = Duration::from_millis(250);
 
@@ -903,19 +905,20 @@ impl DjKeys {
         self.edit(dir, now)
     }
 
-    /// Moves `deck` by the jog step, playing or not (its time picked with `f`); turning fast
-    /// moves further, like the jog wheel
+    /// Moves `deck` through its track, playing or not (its time picked with `f`): a slow turn a
+    /// bar, spinning 2, 4, 8 and 16 bars a detent, so a spin crosses minutes and slowing down
+    /// lands on a bar line (2 s steps for a track without a grid)
     pub fn scrub(&mut self, deck: Deck, dir: i32, now: Instant) {
         let Some(d) = self.decks.get(deck as usize).filter(|d| d.loaded) else { return };
         let (gridded, position, bpm) = (d.has_grid(), d.position, d.track_bpm);
         let dir = dir.signum() as i8;
         let prev = self.jog.filter(|j| j.deck == deck && j.dir == dir && !j.bending);
-        let streak = prev.filter(|j| now.saturating_duration_since(j.last) < JOG_FAST).map_or(0, |j| j.streak.saturating_add(1));
-        let seconds = dir as f64 * f64::from(1u8 << streak.min(3)) * self.jog_seconds();
+        let streak = prev.filter(|j| now.saturating_duration_since(j.last) < SCRUB_FAST).map_or(0, |j| j.streak.saturating_add(1));
+        let mult = dir as f64 * f64::from(1u8 << streak.min(4));
         if gridded && bpm > 0.0 {
-            self.out.push(DjCall::BeatJump { deck: deck as u32, beats: seconds * bpm / 60.0 });
+            self.out.push(DjCall::BeatJump { deck: deck as u32, beats: mult * BEATS_PER_BAR });
         } else {
-            self.out.push(DjCall::Seek { deck: deck as u32, seconds: (position + seconds).max(0.0) });
+            self.out.push(DjCall::Seek { deck: deck as u32, seconds: (position + mult * 2.0).max(0.0) });
         }
         self.jog = Some(Jog { deck, dir, last: now, streak, bending: false });
     }
@@ -2726,6 +2729,24 @@ mod tests {
         for (c, r) in [('s', "bassswap"), ('e', "eq-swap"), ('f', "filter-blend"), ('o', "echo-out"), ('c', "cut"), ('k', "brake")] {
             assert_eq!(technique(c), Some(Some(r)));
         }
+    }
+
+    #[test]
+    fn spinning_the_picked_clock_moves_by_bars_and_faster_spins_go_further() {
+        let t0 = Instant::now();
+        let mut k = keys(true);
+        let gridded = DeckInfo { track_bpm: 120.0, beat_in_bar: 1, position: 60.0, ..deck(true) };
+        k.set_snapshot(&[gridded, deck(false)], &MixerInfo::default());
+        // a slow turn: a bar each; a spin: 2, 4, 8, 16 bars; turning back starts over
+        let at = [0, 400, 500, 600, 700, 800, 900, 1000];
+        for (i, ms_) in at.iter().enumerate() {
+            k.scrub(0, if i == 7 { -1 } else { 1 }, t0 + ms(*ms_));
+        }
+        let bars: Vec<f64> = k.tick(t0 + ms(1100)).iter().map(|c| match c {
+            DjCall::BeatJump { deck: 0, beats } => beats / 4.0,
+            other => panic!("{other:?}"),
+        }).collect();
+        assert_eq!(bars, [1.0, 1.0, 2.0, 4.0, 8.0, 16.0, 16.0, -1.0]);
     }
 
     #[test]
