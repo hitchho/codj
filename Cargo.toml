@@ -9,7 +9,7 @@ version = "0.2.0"
 edition = "2021"
 readme = "README.md"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/yassinebenarbia/mplayer-client"
+repository = "https://github.com/hitchho/codj"
 description = "codj: terminal music player with built-in Soulseek, the TUI for codjd"
 keywords = ["music", "music-player", "tui", "soulseek", "dbus"]
 

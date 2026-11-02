@@ -1,14 +1,23 @@
 <h1 align="center">codj</h1>
 
-**codj** is a terminal music player with built-in [Soulseek](https://www.slsknet.org) search and downloads, written in [Rust](https://www.rust-lang.org). It is the TUI for [**codjd**](https://github.com/yassinebenarbia/mplayer-server), the player daemon, and talks to it over [D-Bus](https://www.freedesktop.org/wiki/Software/dbus/#whatisd-bus). Music keeps playing, and downloads keep going, when codj is closed.
+**codj** is a terminal music player with built-in [Soulseek](https://www.slsknet.org) search and downloads, written in [Rust](https://www.rust-lang.org). It is the TUI for [**codjd**](https://github.com/hitchho/codjd), the player daemon, and talks to it over [D-Bus](https://www.freedesktop.org/wiki/Software/dbus/#whatisd-bus). Music keeps playing, and downloads keep going, when codj is closed.
 
-*codj* reads two ways: **co-DJ** (agents can plan and mix with you over MCP) and **code + DJ** (sets are written as code, in your own vim). It is growing into a keyboard-driven DJ system; see the [DJ mode design](https://github.com/yassinebenarbia/mplayer-server/blob/main/docs/dj-mode.md). It was called *musa* before.
+*codj* reads two ways: **co-DJ** (agents can plan and mix with you over MCP) and **code + DJ** (sets are written as code, in your own vim). It is growing into a keyboard-driven DJ system; see the [DJ mode design](https://github.com/hitchho/codjd/blob/main/docs/dj-mode.md). It was called *musa* before.
 
 # Quick start
 
+Install codj and codjd, the daemon, one of these ways:
+
 ```sh
-cargo install --path .                    # codj, this repo
-cargo install --path ../mplayer-server    # codjd, the daemon (github.com/yassinebenarbia/mplayer-server)
+yay -S codj                               # Arch (AUR): codj and codjd
+nix run github:hitchho/codj               # Nix: codj, with codjd on its PATH
+cargo install --path .                    # from source: codj, this repo
+cargo install --path ../codjd             # from source: codjd (github.com/hitchho/codjd)
+```
+
+Prebuilt x86_64 Linux binaries are on the [releases](https://github.com/hitchho/codj/releases) page ([codjd's](https://github.com/hitchho/codjd/releases)). Then:
+
+```sh
 codjd fetch-models                        # once: the beat-detection model (83 MB)
 codjd -r                                  # after an update: restart codjd on the new build, the music plays on
 codj                                      # starts codjd if it isn't running; plays ~/Music
