@@ -109,7 +109,7 @@ The client captures the mouse, so selecting text in the terminal needs `Shift` h
 |`:slsk <query>` | `:soulseek <query>`|Search for music on soulseek network (connects on first use)|
 |`:slsk`|Open the soulseek panel|
 |`:dupes` | `:duplicates`|Show every copy of a song, or (default) only the best one: lossless over lossy, then the bigger file. Copies are the same title and artist with about the same length; untagged files are never merged. The list title says how many are hidden|
-|`:dj`|Open the live [DJ mode](#dj-mode) (`?` explains every key there, `:tutor` teaches a first mix) (also `Shift + m` in the list)|
+|`:dj`|Open the live [DJ mode](#dj-mode) (`?` explains every key there, `:tutor` teaches a first mix) (also `Shift + m` or `Shift + Enter` in the list)|
 |`:automix` / `:automix on\|off`|[Automix](#automix), the beat-matched transitions between tracks, off / on (toggles without an argument)|
 |`:autoplay` / `:autoplay on\|off`|Never run out of music: while it plays and fewer than two tracks are queued, codjd queues the library track that blends best after the last one (tempo within 4 %, a compatible key, a steady beat grid, not played lately; then within 8 % in any key). The picks are ordinary queue entries (`Shift+Q` shows them; remove or move them freely). Off by default (`[player] autoplay = true` in codjd's config)|
 |`:settings` | `:set`|Open the soulseek settings panel: `j`/`k` move, `Enter` edits, `Space` toggles, `Esc` closes. Changes are saved to your config file right away (comments kept); ranking settings apply to the current results immediately|
@@ -196,7 +196,7 @@ When a download is queued, up to 3 other users who had the same file in the sear
 
 # DJ mode
 
-Two decks, a mixer and a library on one screen, played from the keyboard. Open it with `:dj` or `Shift + m` in the list (`Shift + d` already downloads lyrics). It needs a codjd with the deck API (`docs/dj-api.md`); against an older codjd the screen opens and says so in the status line.
+Two decks, a mixer and a library on one screen, played from the keyboard. Open it with `:dj`, `Shift + m` or `Shift + Enter` in the list (`Shift + d` already downloads lyrics). It needs a codjd with the deck API (`docs/dj-api.md`); against an older codjd the screen opens and says so in the status line.
 
 ```
  DJ   h l focus deck · Tab library · : command (:q leaves) · ? keys     ● live

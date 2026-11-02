@@ -707,13 +707,16 @@ impl ListMode {
                         }
                     }
                 }
-                KeyModifiers::SHIFT => {
-                    if let KeyCode::Char(c) = key.code {
+                KeyModifiers::SHIFT => match key.code {
+                    // like M: DJ mode (terminals without the kitty keyboard protocol send plain Enter)
+                    KeyCode::Enter => ui.enter_dj().await,
+                    KeyCode::Char(c) => {
                         if ui.list_upper_key(c).await {
                             return ui.quit();
                         }
                     }
-                }
+                    _ => {}
+                },
                 KeyModifiers::CONTROL => {
                     if let KeyCode::Char(c) = key.code {
                         match c {
@@ -2552,7 +2555,7 @@ impl<'a> UI<'a> {
             ("/  n N", "search (regex; artist: title: genre:), next / prev match"),
             ("q  Q", "queue the track · show the queue"),
             ("m", "queue 5 similar-sounding tracks"),
-            (":dj  or  M", "DJ mode: two decks, mixing, sets"),
+            (":dj  M  S-Enter", "DJ mode: two decks, mixing, sets"),
             (":automix", "beat-matched transitions between tracks on / off"),
             (":autoplay", "never run out: queue tracks that blend, on / off"),
             (":tutor", "a guided first mix (opens DJ mode)"),
