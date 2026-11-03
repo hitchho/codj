@@ -344,7 +344,7 @@ dependencies = [
 
 [[package]]
 name = "codj"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "basic-toml",
  "crossterm 0.27.0",
