@@ -874,7 +874,7 @@ fn draw_status(buf: &mut Buffer, area: Rect, v: &View) {
         buf.set_stringn(area.x, area.y, n, text_w, Style::default().fg(Color::Yellow));
     } else {
         let hint = "? keys · h l focus · Space play · c cue · s sync · w b W B } { jump (4w) · ma 'a marks · v loop · - + = pitch · [ ] nudge · f hints · u undo · . repeat";
-        buf.set_stringn(area.x, area.y, hint, text_w, dim());
+        buf.set_stringn(area.x, area.y, whole_items(hint, text_w), text_w, dim());
     }
     if mode_w > 0 {
         let x = area.x + text_w as u16 + 1;
@@ -888,6 +888,22 @@ fn draw_status(buf: &mut Buffer, area: Rect, v: &View) {
         let x = area.right() - chip_w as u16 + 1;
         buf.set_stringn(x, area.y, c, chip_w - 1, Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD));
     }
+}
+
+/// The longest run of a ` · `-separated list's items that fits in `w` columns, so a narrow
+/// screen drops whole items instead of cutting one in half ("pit")
+fn whole_items(list: &str, w: usize) -> &str {
+    if list.chars().count() <= w {
+        return list;
+    }
+    let mut end = 0;
+    for (i, _) in list.match_indices(" · ") {
+        if list[..i].chars().count() > w {
+            break;
+        }
+        end = i;
+    }
+    &list[..end]
 }
 
 fn draw_deck(
@@ -1141,13 +1157,21 @@ fn draw_waves(buf: &mut Buffer, ov: Rect, zoom: Rect, d: &DeckInfo, wave: WaveVi
         for s in 0..8 {
             if let Some(t) = d.hotcue(s) {
                 if let Some(c) = time_to_col(t, 0.0, dur, ov.width) {
-                    let cell = &mut buf[(ov.x + c, ov.y)];
-                    cell.set_char('▾');
-                    cell.set_fg(Color::Yellow);
+                    cue_mark(&mut buf[(ov.x + c, ov.y)], s);
                 }
             }
         }
         if let Some(c) = time_to_col(d.position.min(dur - 1e-6), 0.0, dur, ov.width) {
+            // the part already played is dimmed, like a CDJ's overview: where you are in the
+            // track shows at a glance
+            for x in 0..c {
+                for y in ov.top()..ov.bottom() {
+                    let cell = &mut buf[(ov.x + x, y)];
+                    if super::wave::is_bar(cell) {
+                        cell.set_fg(super::wave::dim(cell.fg, 0.45));
+                    }
+                }
+            }
             playhead(buf, ov, c);
         }
     }
@@ -1163,9 +1187,7 @@ fn draw_waves(buf: &mut Buffer, ov: Rect, zoom: Rect, d: &DeckInfo, wave: WaveVi
         for s in 0..8 {
             if let Some(t) = d.hotcue(s) {
                 if let Some(c) = time_to_col(t, t0, t1, zoom.width) {
-                    let cell = &mut buf[(zoom.x + c, zoom.y)];
-                    cell.set_char('▾');
-                    cell.set_fg(Color::Yellow);
+                    cue_mark(&mut buf[(zoom.x + c, zoom.y)], s);
                 }
             }
         }
@@ -1174,13 +1196,27 @@ fn draw_waves(buf: &mut Buffer, ov: Rect, zoom: Rect, d: &DeckInfo, wave: WaveVi
     }
 }
 
-/// Dim background behind `[from, to)` seconds (a loop)
+/// Hot cue `slot` in a waveform's top row: its letter in its pad's colour, like the pads above
+fn cue_mark(cell: &mut ratatui::buffer::Cell, slot: usize) {
+    cell.set_char(MARK_KEYS[slot]);
+    cell.set_fg(Color::Black);
+    // e to h have no pad of their own: yellow, like their dots
+    cell.set_bg(CUE_COLORS.get(slot).copied().unwrap_or(Color::Yellow));
+    cell.modifier.insert(Modifier::BOLD);
+}
+
+/// The loop `[from, to)` seconds: a green background, and the bars in it turned green too, so
+/// it shows on a loud track whose bars fill every cell
 fn shade(buf: &mut Buffer, area: Rect, from: f64, to: f64, t0: f64, t1: f64) {
     for x in 0..area.width {
         let t = t0 + (x as f64 + 0.5) / area.width as f64 * (t1 - t0);
         if t >= from && t < to {
             for y in area.top()..area.bottom() {
-                buf[(area.x + x, y)].set_bg(Color::Rgb(20, 60, 25));
+                let cell = &mut buf[(area.x + x, y)];
+                cell.set_bg(Color::Rgb(20, 60, 25));
+                if super::wave::is_bar(cell) {
+                    cell.set_fg(super::wave::blend(cell.fg, (60, 210, 90), 0.55));
+                }
             }
         }
     }
@@ -1202,7 +1238,8 @@ fn playhead(buf: &mut Buffer, area: Rect, col: u16) {
     }
 }
 
-/// Beat grid lines in the zoomed strip: bar starts bright, other beats dim, in the empty cells
+/// Beat grid lines in the zoomed strip: bar starts bright, other beats dim. Over the waveform
+/// they cut a dark line through the bars (a loud track has no empty cells to draw them in).
 fn beat_ticks(buf: &mut Buffer, area: Rect, d: &DeckInfo, t0: f64, t1: f64) {
     let spb = 60.0 / d.track_bpm;
     // track-time of the current beat's start
@@ -1213,12 +1250,14 @@ fn beat_ticks(buf: &mut Buffer, area: Rect, d: &DeckInfo, t0: f64, t1: f64) {
         let t = start + k as f64 * spb;
         let Some(c) = time_to_col(t, t0, t1, area.width) else { continue };
         let in_bar = (d.beat_in_bar as i64 - 1 + k).rem_euclid(4);
-        let (ch, color) = if in_bar == 0 { ('┃', Color::Gray) } else { ('╎', Color::DarkGray) };
+        let (ch, color) = if in_bar == 0 { ('┃', Color::Rgb(150, 150, 150)) } else { ('╎', Color::Rgb(85, 85, 85)) };
         for y in area.top()..area.bottom() {
             let cell = &mut buf[(area.x + c, y)];
             if cell.symbol() == " " {
                 cell.set_char(ch);
                 cell.set_fg(color);
+            } else if super::wave::is_bar(cell) {
+                cell.set_fg(super::wave::dim(cell.fg, if in_bar == 0 { 0.2 } else { 0.55 }));
             }
         }
     }
@@ -1572,6 +1611,69 @@ mod tests {
         render_full(w, h, f).0
     }
 
+    /// `CODJ_SNAP=dir cargo test snapshot -- --ignored`, then `tools/cells2png.py`: every scenario's cells (symbol, colors,
+    /// modifiers) as text files, for drawing as images and looking at the screen as it is
+    #[test]
+    #[ignore]
+    fn snapshot() {
+        use std::fmt::Write as _;
+        let Some(dir) = std::env::var_os("CODJ_SNAP") else { return };
+        let loud = Waveform { duration_ms: 437_000, cols: vec![[255, 255, 255, 230, 230, 230]; 21850] };
+        let labels = leak_labels();
+        let decks = {
+            let mut b = deck_b();
+            b.playing = true;
+            b.fader = 0.9;
+            b.hotcues = vec![30.0, 60.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0];
+            [deck_a(), b]
+        };
+        let mixer = MixerInfo { crossfader: -0.25, mode: "internal".into(), quantize: true, xruns: 0, ..Default::default() };
+        let wf = wave();
+        let lib = lib();
+        type Tweak<'x> = Box<dyn Fn(&mut View<'x>) + 'x>;
+        let scenes: Vec<(&str, u16, u16, Tweak)> = vec![
+            ("normal", 120, 35, Box::new(|_| {})),
+            ("loud", 120, 35, Box::new(|v| v.waves = [WaveView::Ready(&loud), WaveView::Ready(&loud)])),
+            ("big", 180, 50, Box::new(|v| v.waves = [WaveView::Ready(&wf), WaveView::Ready(&loud)])),
+            ("hints", 120, 35, Box::new(|v| {
+                v.waves = [WaveView::Ready(&loud), WaveView::Ready(&wf)];
+                v.hints.active = true;
+                v.hints.labels = labels;
+            })),
+            ("browse", 120, 35, Box::new(|v| {
+                v.waves = [WaveView::Ready(&loud), WaveView::Ready(&wf)];
+                v.focus = Focus::Library;
+                v.note = Some("deck B is playing, so the track went onto the other deck");
+                v.error = Some("DjDecks: timeout");
+            })),
+            ("help", 120, 35, Box::new(|v| v.learn.help = true)),
+            ("small", 100, 30, Box::new(|v| v.waves = [WaveView::Ready(&loud), WaveView::Ready(&wf)])),
+        ];
+        for (name, w, h, tweak) in &scenes {
+            let mut v = test_view(&decks, &mixer, &lib);
+            v.waves = [WaveView::Ready(&wf), WaveView::Ready(&wf)];
+            v.lib_total = lib.len();
+            v.lib_sel = 1;
+            v.doubt = [false, true];
+            tweak(&mut v);
+            let mut term = Terminal::new(TestBackend::new(*w, *h)).unwrap();
+            term.draw(|frame| {
+                let area = frame.area();
+                draw(frame.buffer_mut(), area, &v);
+            })
+            .unwrap();
+            let buf = term.backend().buffer().clone();
+            let mut out = format!("{w} {h}\n");
+            for y in 0..*h {
+                for x in 0..*w {
+                    let c = &buf[(x, y)];
+                    let _ = writeln!(out, "{}\t{:?}\t{:?}\t{:?}", c.symbol().replace('\t', " "), c.fg, c.bg, c.modifier);
+                }
+            }
+            std::fs::write(std::path::Path::new(&dir).join(format!("{name}.cells")), out).unwrap();
+        }
+    }
+
     pub fn render_full(w: u16, h: u16, f: impl FnOnce(&mut View)) -> (String, Vec<Spot>) {
         let decks = [deck_a(), deck_b()];
         let mixer = MixerInfo { crossfader: -0.25, mode: "internal".into(), quantize: true, xruns: 0, ..Default::default() };
@@ -1696,7 +1798,42 @@ mod tests {
         // beat ticks in the zoomed strip (empty cells above the bars)
         assert!(text.contains('┃') || text.contains('╎'));
         // hot cue markers in the strips
-        assert!(text.contains('▾'));
+        assert!(text.contains("┃a") || text.contains('a'));
+    }
+
+    #[test]
+    fn hot_cues_in_the_strips_are_their_letters_in_their_pad_colours_even_on_a_loud_track() {
+        let area = Rect::new(0, 0, 10, 2);
+        let mut buf = Buffer::empty(area);
+        for x in 0..10 {
+            for y in 0..2 {
+                buf[(x, y)].set_char('█');
+            }
+        }
+        cue_mark(&mut buf[(2, 0)], 0);
+        cue_mark(&mut buf[(5, 0)], 6);
+        assert_eq!((buf[(2, 0)].symbol(), buf[(2, 0)].bg), ("a", Color::Red));
+        assert_eq!((buf[(5, 0)].symbol(), buf[(5, 0)].bg), ("g", Color::Yellow));
+    }
+
+    #[test]
+    fn the_beat_grid_and_the_loop_show_over_a_loud_track() {
+        let loud = Waveform { duration_ms: 437_000, cols: vec![[255, 255, 255, 230, 230, 230]; 21850] };
+        let decks = [deck_a(), deck_b()];
+        let mixer = MixerInfo::default();
+        let lib = lib();
+        let mut v = test_view(&decks, &mixer, &lib);
+        v.waves = [WaveView::Ready(&loud), WaveView::None];
+        let mut buf = Buffer::empty(Rect::new(0, 0, 120, 35));
+        draw(&mut buf, Rect::new(0, 0, 120, 35), &v);
+        // a row of deck A's zoomed strip
+        let row = 18;
+        let fgs: Vec<Color> = (0..60).map(|x| buf[(x, row)].fg).collect();
+        // bars of three kinds at least: plain, darkened by a grid line, greened by the loop
+        let mut kinds: Vec<Color> = (0..60).filter(|&x| super::super::wave::is_bar(&buf[(x, row)])).map(|x| buf[(x, row)].fg).collect();
+        kinds.sort_by_key(|c| format!("{c:?}"));
+        kinds.dedup();
+        assert!(kinds.len() >= 3, "{fgs:?}");
     }
 
     #[test]

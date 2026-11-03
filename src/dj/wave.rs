@@ -101,13 +101,30 @@ impl Bar {
     }
 }
 
-fn dim(c: Color, f: f64) -> Color {
+pub(super) fn dim(c: Color, f: f64) -> Color {
     match c {
         Color::Rgb(r, g, b) => {
             Color::Rgb((r as f64 * f) as u8, (g as f64 * f) as u8, (b as f64 * f) as u8)
         }
         c => c,
     }
+}
+
+/// `c` moved `f` (0..1) of the way towards `to`
+pub(super) fn blend(c: Color, to: (u8, u8, u8), f: f64) -> Color {
+    match c {
+        Color::Rgb(r, g, b) => {
+            let m = |a: u8, z: u8| (a as f64 + (z as f64 - a as f64) * f).round() as u8;
+            Color::Rgb(m(r, to.0), m(g, to.1), m(b, to.2))
+        }
+        c => c,
+    }
+}
+
+/// A waveform bar in this cell (an eighth block), so marks drawn here must recolor it rather
+/// than replace it
+pub(super) fn is_bar(cell: &ratatui::buffer::Cell) -> bool {
+    EIGHTHS[1..].iter().any(|e| cell.symbol().starts_with(*e))
 }
 
 const EIGHTHS: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
