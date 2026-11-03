@@ -1186,19 +1186,19 @@ fn shade(buf: &mut Buffer, area: Rect, from: f64, to: f64, t0: f64, t1: f64) {
     }
 }
 
-/// Thin line at the playhead; over a bar it only lightens the background
+/// The playhead: a solid white line drawn over the waveform, like a CDJ's. It replaces the
+/// bars in its column: a loud track fills every cell with full blocks, which hid a playhead that
+/// only lightened the background behind them.
 fn playhead(buf: &mut Buffer, area: Rect, col: u16) {
     if col >= area.width {
         return;
     }
     for y in area.top()..area.bottom() {
         let cell = &mut buf[(area.x + col, y)];
-        if cell.symbol() == " " {
-            cell.set_char('│');
-            cell.set_fg(Color::White);
-        } else {
-            cell.set_bg(Color::Rgb(95, 95, 95));
-        }
+        cell.set_char('┃');
+        cell.set_fg(Color::White);
+        cell.set_bg(Color::Black);
+        cell.modifier.insert(Modifier::BOLD);
     }
 }
 
@@ -1642,11 +1642,29 @@ mod tests {
         assert!(text.contains(" b  --"), "{text}");
         // a waveform was drawn (bars and the playhead)
         assert!(text.contains('█'));
-        assert!(text.contains('│'));
+        assert!(text.contains('┃'));
         // phase meter: beat 3 lit
         assert!(text.contains("3 ██"));
         // exactly 35 lines, none wider than the screen
         assert_eq!(text.lines().count(), 35);
+    }
+
+    #[test]
+    fn the_playhead_shows_over_a_waveform_full_to_the_top() {
+        // a loud track: every cell of the strip is a full block
+        let area = Rect::new(0, 0, 20, 4);
+        let mut buf = Buffer::empty(area);
+        for x in 0..20 {
+            for y in 0..4 {
+                buf[(x, y)].set_char('█');
+            }
+        }
+        playhead(&mut buf, area, 10);
+        for y in 0..4 {
+            assert_eq!(buf[(10, y)].symbol(), "┃");
+            assert_eq!(buf[(10, y)].fg, Color::White);
+        }
+        assert_eq!(buf[(9, 0)].symbol(), "█");
     }
 
     #[test]

@@ -641,11 +641,6 @@ async fn run_call(proxy: &ServerProxy<'_>, call: &DjCall) -> zbus::Result<String
         DjCall::PatchKnob { slot, name, value } => {
             proxy.patch_action(*slot, &serde_json::json!({"op": "knob", "name": name, "value": value}).to_string()).await
         }
-        DjCall::VolumeStep(delta) => {
-            let now = proxy.get_volume().await? as f64;
-            let v = ((now + delta).clamp(0., 1.) * 100.).round() / 100.;
-            proxy.volume(v as f32).await.map(|_| "ok".to_string())
-        }
     }
 }
 
@@ -1854,8 +1849,6 @@ pub struct DjScreen {
     agent: crate::parser::AgentSettings,
     /// the hardware knob while DJ mode is open (dropping it releases the device)
     knob: Option<crate::knob::Knob>,
-    /// a knob press switched the knob from volume to the jog wheel
-    knob_jog: bool,
     /// the `?` key map is up
     help: bool,
     /// how far the `?` key map is scrolled
@@ -1893,7 +1886,6 @@ impl DjScreen {
             previewing: None,
             agent: Default::default(),
             knob: None,
-            knob_jog: false,
             help: false,
             help_scroll: 0,
             tutor: None,
@@ -1927,11 +1919,10 @@ impl DjScreen {
         self.knob.take()
     }
 
-    /// What the knob did: turning edits the picked control, scrolls the library while browsing,
-    /// scrubs the focused deck while it is paused (finding a spot), else turns the volume, or
-    /// with the jog wheel switched on (a press) is the focused deck's jog wheel (bend when
-    /// playing). Pressing resets the picked control,
-    /// loads the highlighted track while browsing, else switches between volume and jog wheel.
+    /// What the knob did: turning edits the picked control, else only moves the library
+    /// highlight, so a knob turned by accident never touches the sound. Pressing resets the
+    /// picked control, else loads the highlighted track like `Enter` (never over a playing
+    /// deck). A deck's time is reached by picking it (`f` `va` / `vs`).
     /// Notes show in the status line. Nothing acts while a text box or pane has the keyboard.
     fn poll_knob(&mut self) {
         use crate::knob::{KnobAction, Msg};
@@ -1944,16 +1935,7 @@ impl DjScreen {
                 Msg::Action(KnobAction::Down, t) => self.knob_turn(-1, t),
                 Msg::Action(KnobAction::Press, t) => {
                     if !self.keys.press(t) {
-                        if self.pane.browsing() {
-                            self.load_smart();
-                        } else {
-                            self.knob_jog = !self.knob_jog;
-                            self.set_note(if self.knob_jog {
-                                "knob: jog wheel (scrubs a paused deck, bends a playing one) · press again for volume"
-                            } else {
-                                "knob: volume · press for the jog wheel"
-                            });
-                        }
+                        self.load_smart();
                     }
                 }
             }
@@ -1964,18 +1946,8 @@ impl DjScreen {
         if self.keys.wheel(dir, now) {
             return;
         }
-        // a paused deck is one being cued: the knob finds the spot in it; a playing one leaves
-        // the knob as volume
-        let f = self.keys.focus() as usize;
-        let cueing = self.session.shared.lock().unwrap().decks.get(f).is_some_and(|d| d.loaded && !d.playing);
-        if self.pane.browsing() {
-            self.pane.scroll(-dir as isize);
-        } else if self.knob_jog || cueing {
-            self.keys.jog(dir, now);
-        } else {
-            // the knob you reach for without thinking: volume, as in the normal view
-            self.session.send(vec![DjCall::VolumeStep(dir as f64 * 0.02)]);
-        }
+        // nothing picked: the knob only picks the next track, it never touches the sound
+        self.pane.scroll(-dir as isize);
     }
 
     /// `p`: the focused deck plays in the headphones only (its fader down, its headphone button
@@ -2001,7 +1973,8 @@ impl DjScreen {
         }
         self.previewing = Some((deck, fader));
         self.session.send(vec![DjCall::Set { control: "cue", deck: d as u32, value: 1.0 }, DjCall::Play(d as u32)]);
-        self.set_note(format!("deck {name} in your headphones only · knob or [ ] scrub · p stops here · then t + a letter"));
+        let hint = if deck == 0 { 'a' } else { 's' };
+        self.set_note(format!("deck {name} in your headphones only · [ ] scrub (f v{hint} with the knob) · p stops here · then t + a letter"));
     }
 
     /// Nothing here would be lost by swapping codj for a newer build: no editor (parked ones
@@ -3617,7 +3590,7 @@ mod tests {
 /// The status line while the focused deck is paused: how to find a spot in it
 fn scrub_help(deck: usize, step: f64) -> String {
     format!(
-        "deck {} paused: the knob scrubs · [ ] {step} s (hold: faster) · g[ g] step · W B a bar · {{ }} 16 bars · Space plays",
+        "deck {} paused: [ ] {step} s (hold: faster) · g[ g] step · W B a bar · {{ }} 16 bars · Space plays",
         if deck == 0 { 'A' } else { 'B' }
     )
 }

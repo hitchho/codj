@@ -534,8 +534,6 @@ pub enum DjCall {
     Set { control: &'static str, deck: u32, value: f64 },
     /// a patch knob: `PatchAction {"op":"knob",...}` on the slot
     PatchKnob { slot: u32, name: String, value: f64 },
-    /// the player's volume (codjd's `Volume`, the master) up or down by `delta`, 0..1
-    VolumeStep(f64),
 }
 
 impl DjCall {
@@ -553,7 +551,6 @@ impl DjCall {
             DjCall::Hotcue { .. } => "DjHotcue",
             DjCall::Set { .. } => "DjSet",
             DjCall::PatchKnob { .. } => "PatchAction",
-            DjCall::VolumeStep(_) => "Volume",
         }
     }
 }
